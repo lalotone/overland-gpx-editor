@@ -20,6 +20,10 @@ import (
 	"github.com/lalotone/overland-gpx-editor/web"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=...".
+// The Makefile fills it from `git describe`.
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", envOr("ADDR", ":8000"),
 		"address to listen on")
@@ -35,7 +39,13 @@ func main() {
 		"tile zoom: higher is finer and heavier (0 uses the default of 13, ~14 m/px)")
 	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", "tiles"),
 		"directory to keep fetched terrain tiles in, so elevation keeps working offline")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("gpx-editor", version)
+		return
+	}
 
 	assets, hasUI := web.Assets()
 	if !hasUI {
@@ -82,8 +92,8 @@ func main() {
 
 	// The API reads, writes and deletes files in the library directory and has
 	// no authentication. Bind it to a trusted network only.
-	log.Printf("gpx-editor listening on %s (library: %s, elevation: %s)",
-		*addr, *gpxDir, elevationSource)
+	log.Printf("gpx-editor %s listening on %s (library: %s, elevation: %s)",
+		version, *addr, *gpxDir, elevationSource)
 
 	shutdown := make(chan struct{})
 	go func() {

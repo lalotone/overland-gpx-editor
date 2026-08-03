@@ -1,8 +1,12 @@
 BINARY  := gpx-editor
 # node_modules contains a stray Go package, so ./... is not usable here.
 PKGS    := . ./internal/... ./web/...
+# Stamped into the binary and reported by -version. Falls back to "dev" outside
+# a git checkout, so a tarball build still says something honest.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build frontend backend deps test check lint clean run cross
+.PHONY: all build frontend backend deps test check lint clean run cross dist
 
 ## build: frontend + single self-contained binary
 all: build
@@ -23,7 +27,7 @@ frontend: node_modules
 	npm run build
 
 backend:
-	go build -trimpath -ldflags "-s -w" -o $(BINARY) .
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) .
 
 ## run: build everything and serve on :8000
 run: build
@@ -42,13 +46,33 @@ lint: node_modules
 	npx tsc --noEmit
 	npm run lint
 
-## cross: release binaries for the common targets
+# Every target is pure Go, so one Linux machine builds all of them with no
+# cross-toolchain, no container and no macOS runner.
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
+## cross: binaries for every released platform, one directory each
 cross: frontend
-	@mkdir -p build
-	GOOS=linux  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o build/$(BINARY)-linux-amd64 .
-	GOOS=linux  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o build/$(BINARY)-linux-arm64 .
-	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o build/$(BINARY)-darwin-arm64 .
-	GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o build/$(BINARY)-windows-amd64.exe .
+	@rm -rf build && mkdir -p build
+	@for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		out=build/$(BINARY)-$$os-$$arch; \
+		bin=$(BINARY); [ "$$os" = windows ] && bin=$(BINARY).exe; \
+		mkdir -p $$out; \
+		echo "  $$os/$$arch"; \
+		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $$out/$$bin . || exit 1; \
+		cp README.md LICENSE $$out/; \
+	done
+
+## dist: the archives and checksums that go on a GitHub release
+dist: cross
+	@cd build && for dir in $(BINARY)-*; do \
+		case $$dir in \
+			*windows*) zip -qr $$dir.zip $$dir ;; \
+			*)         tar czf $$dir.tar.gz $$dir ;; \
+		esac; \
+	done
+	@cd build && sha256sum *.tar.gz *.zip > SHA256SUMS
+	@echo; echo "$(VERSION):"; ls -1sh build/*.tar.gz build/*.zip build/SHA256SUMS | sed 's/^/  /'
 
 clean:
 	rm -rf $(BINARY) build web/dist/assets web/dist/index.html

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ESLint 10 needs Node 20.19+/22.13+, and the Go version comes from
+      # go.mod so the two cannot drift.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # go test, npm run verify, go vet, gofmt, tsc, eslint.
+      #
+      # The verify harness reads ./gpx, which is gitignored — with no library
+      # present it skips the file-backed groups and still runs the pure-logic
+      # checks, which is most of them.
+      - run: make check

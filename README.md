@@ -41,7 +41,30 @@ the part I want.
 
 ---
 
-## Quick start
+## Install
+
+Grab the archive for your platform from
+[Releases](https://github.com/lalotone/overland-gpx-editor/releases), unpack
+it, and run the binary. It serves the whole app — frontend, API and track
+library — on <http://localhost:8000>. There is nothing else to install.
+
+```bash
+tar xzf gpx-editor-linux-amd64.tar.gz
+cd gpx-editor-linux-amd64
+./gpx-editor
+```
+
+The binaries are unsigned, so both desktop platforms will object once:
+
+- **macOS** — Gatekeeper quarantines the download. Clear it with
+  `xattr -dr com.apple.quarantine ./gpx-editor`, or right-click → Open.
+- **Windows** — SmartScreen warns about an unrecognised app. More info →
+  Run anyway.
+
+Each release ships `SHA256SUMS`; check a download with
+`sha256sum -c SHA256SUMS --ignore-missing`.
+
+### Or build it
 
 **To build:** Go 1.22+ and Node 18+. **To run:** nothing at all.
 
@@ -68,8 +91,9 @@ Usage of ./gpx-editor:
   -elevation-tile-cache dir   where tiles are kept (default "tiles")
 ```
 
-`make cross` writes Linux, macOS and Windows binaries to `build/` — no C
-toolchain needed.
+`make cross` writes Linux, macOS and Windows binaries to `build/`, and
+`make dist` packages them with checksums the way a release does — no C
+toolchain needed for any of it, since nothing here uses cgo.
 
 > [!NOTE]
 > The frontend build output is not committed, so `go install` on its own
@@ -189,8 +213,12 @@ make run       # the above, then serve on :8000
 make test      # go test + npm run verify
 make check     # tests plus go vet, gofmt, tsc, eslint
 make cross     # release binaries for linux/darwin/windows
+make dist      # the above, archived with SHA256SUMS
 npm run dev    # frontend dev server with HMR (needs ./gpx-editor running)
 ```
+
+Pushing a `v*` tag builds and publishes a release; every push and pull request
+runs `make check`. Both live in [.github/workflows](.github/workflows).
 
 Targets that need the npm toolchain install it themselves, so `make` works on a
 bare clone.

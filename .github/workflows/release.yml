@@ -1,0 +1,82 @@
+name: Release
+
+# Tagging is the trigger:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag is also the version — the Makefile stamps it into the binary with
+# git describe, so `gpx-editor -version` reports what was released.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # to create the release and upload the archives
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git describe needs the tags, and a shallow clone has none.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag should never publish something that fails its own checks. This
+      # is the same command a contributor runs locally.
+      - name: Check
+        run: make check
+
+      # Every target is pure Go, so this one Linux runner produces the macOS
+      # and Windows builds too — no cross-toolchain, no matrix, no mac runner.
+      - name: Build archives
+        run: make dist
+
+      - name: Write release notes
+        run: |
+          cat > build/NOTES.md <<'NOTES'
+          ### Install
+
+          Download the archive for your platform, unpack it, and run the
+          binary. It serves the whole app — frontend, API and track library —
+          on <http://localhost:8000>, with nothing else to install.
+
+          ```bash
+          tar xzf gpx-editor-linux-amd64.tar.gz
+          cd gpx-editor-linux-amd64
+          ./gpx-editor
+          ```
+
+          **macOS** — the binaries are unsigned, so Gatekeeper quarantines
+          them. Clear it once with `xattr -dr com.apple.quarantine ./gpx-editor`,
+          or right-click the binary and choose Open.
+
+          **Windows** — SmartScreen warns about an unrecognised app for the
+          same reason: More info, then Run anyway.
+
+          Verify a download against `SHA256SUMS`:
+
+          ```bash
+          sha256sum -c SHA256SUMS --ignore-missing
+          ```
+          NOTES
+
+      # --generate-notes appends the commit changelog after the notes above.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file build/NOTES.md \
+            --generate-notes \
+            build/*.tar.gz build/*.zip build/SHA256SUMS

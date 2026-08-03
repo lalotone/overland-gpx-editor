@@ -963,11 +963,21 @@ html.dark .track-card-loss strong { color: #f87171; }
   height: 100vh;
   max-width: 100%;
   padding: 0;
+  /*
+   * Both are load-bearing. A flex item's automatic minimum size is its
+   * content, so without min-height:0 this box grows past 100vh as the sidebar
+   * fills up and takes the whole page scrollbar with it — the sidebar's own
+   * overflow never gets a chance to engage. overflow:hidden then guarantees
+   * nothing else can spill out either.
+   */
+  min-height: 0;
+  overflow: hidden;
 }
 
 .creation-sidebar {
   width: 320px;
   flex-shrink: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -1365,6 +1375,7 @@ html.dark .elev-api-banner svg {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .creation-header {
@@ -1471,10 +1482,13 @@ html.dark .elev-api-banner svg {
 
 /* Map container */
 
+/* The map fills whatever is left. It must be allowed to shrink: a hard floor
+   here propagates up as a minimum height for the whole screen and reintroduces
+   the page scrollbar on a short window. */
 .map-container {
   flex: 1;
   position: relative;
-  min-height: 400px;
+  min-height: 0;
   background: var(--bg-primary);
   z-index: 1;
 }

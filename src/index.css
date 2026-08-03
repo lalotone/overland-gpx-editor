@@ -43,6 +43,12 @@
 
   --border-color:  #e5e7eb;
   --border-strong: #cbd2da;
+
+  /* Tells the browser which way to paint native scrollbars, form controls and
+     the canvas — without it a dark page still gets light scrollbars. */
+  color-scheme: light;
+  --scrollbar-thumb:       #b6bec9;
+  --scrollbar-thumb-hover: #98a2b0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -80,6 +86,10 @@ html.dark {
 
   --border-color:  #333940;
   --border-strong: #454b54;
+
+  color-scheme: dark;
+  --scrollbar-thumb:       #414852;
+  --scrollbar-thumb-hover: #566070;
 }
 
 body {

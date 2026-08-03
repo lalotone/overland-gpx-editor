@@ -1023,8 +1023,6 @@ html.dark .track-card-loss strong { color: #f87171; }
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  /* Room for the scrollbar so it never sits on top of the delete buttons. */
-  padding-right: 4px;
 }
 
 /* Place search */
@@ -3161,4 +3159,55 @@ html.dark .loading-overlay {
 /* Leaflet's default marker shadow reads as grime on a dark basemap. */
 html.dark .leaflet-marker-shadow {
   opacity: 0.45;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Scrollbars                                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The panels scroll internally now, so their scrollbars are part of the
+ * furniture rather than something the OS draws at the edge of the window.
+ * Two syntaxes are needed: the standard properties (Firefox) and the WebKit
+ * pseudo-elements (Chrome, Edge, Safari). Both read the same tokens.
+ *
+ * The thumb is drawn with a transparent border and padding-box clipping,
+ * which insets it from the track instead of filling the full gutter — a
+ * 10px slab against a panel edge reads as a chunk of chrome, a 6px pill
+ * reads as an affordance.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+/*
+ * Reserve the gutter on the panels that scroll only once they are full, so
+ * the content does not shift sideways the moment the scrollbar appears.
+ */
+.creation-sidebar,
+.sidebar-section--grow .waypoint-list {
+  scrollbar-gutter: stable;
 }

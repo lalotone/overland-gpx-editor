@@ -956,20 +956,27 @@ html.dark .track-card-loss strong { color: #f87171; }
 /*  Creation screen                                                    */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Sized to the viewport and clipped, so the sidebar's own overflow is what
+ * gives way when the route-point list grows.
+ *
+ * `flex: none` is the load-bearing part. This is an item of .app, a column
+ * flex container, and `flex: 1` sets flex-basis:0% — which in the main axis
+ * OVERRIDES height. .app is min-height:100vh, so its main size is indefinite,
+ * that percentage basis falls back to content sizing, and the box grew to fit
+ * its content (measured at 1116px in a 900px viewport). min-height:0 is a
+ * floor, not a ceiling, and overflow:hidden cannot clip a box that sized
+ * itself to its content — so neither of them helped. max-height is belt and
+ * braces: a definite maximum caps the box whatever the flex algorithm does.
+ */
 .creation-screen {
-  flex: 1;
+  flex: none;
   display: flex;
   gap: 0;
   height: 100vh;
+  max-height: 100vh;
   max-width: 100%;
   padding: 0;
-  /*
-   * Both are load-bearing. A flex item's automatic minimum size is its
-   * content, so without min-height:0 this box grows past 100vh as the sidebar
-   * fills up and takes the whole page scrollbar with it — the sidebar's own
-   * overflow never gets a chance to engage. overflow:hidden then guarantees
-   * nothing else can spill out either.
-   */
   min-height: 0;
   overflow: hidden;
 }
@@ -1593,12 +1600,14 @@ html.dark .elev-api-banner svg {
 /* ------------------------------------------------------------------ */
 
 .view-screen {
-  flex: 1;
+  /* flex:none for the same reason as .creation-screen above — flex-basis:0%
+     would override this height and let the panels grow the page. */
+  flex: none;
   display: flex;
   flex-direction: column;
   height: 100vh;
-  /* The panels above the map size themselves to content; without this a tall
-     one scrolls the whole screen instead of the map simply getting shorter. */
+  max-height: 100vh;
+  min-height: 0;
   overflow: hidden;
 }
 

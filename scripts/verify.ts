@@ -178,6 +178,36 @@ console.log(`\nRound-trip and edit checks\n${'='.repeat(78)}`)
   }
 }
 
+// Places of interest sit away from the line — a monument near the route, not
+// a point on it. They must survive a save with their names, and must not be
+// mistaken for track points on the way back in.
+{
+  const gpx = buildGPX({
+    name: 'Ride with places',
+    coordinates: [
+      { lat: 42.0, lon: -0.5, elevation: 400 },
+      { lat: 42.1, lon: -0.6, elevation: 500 },
+    ],
+    waypoints: [
+      { lat: 42.4, lon: -0.9, name: 'Ermita de San Juan' },
+      { lat: 41.7, lon: -0.2, name: 'Mirador', desc: 'Worth the detour' },
+    ],
+  })
+  const [reparsed] = parseGPX(gpx)
+
+  check('places of interest survive a save', reparsed.waypoints.length === 2,
+    `${reparsed.waypoints.length}`)
+  check('their names survive', reparsed.waypoints[0]?.name === 'Ermita de San Juan',
+    reparsed.waypoints[0]?.name)
+  check('a place description survives', reparsed.waypoints[1]?.desc === 'Worth the detour')
+  // The whole point: they are off the line, so the route must be unchanged.
+  check('places are not folded into the track', reparsed.coordinates.length === 2,
+    `${reparsed.coordinates.length} track points`)
+  check('places keep their own position',
+    reparsed.waypoints[0].lat === 42.4 && reparsed.waypoints[0].lon === -0.9)
+  console.log(`  off-route places: ${reparsed.waypoints.map(w => w.name).join(', ')} — track still ${reparsed.coordinates.length} points`)
+}
+
 // A <rte>-only file (planner exports) must load.
 {
   const routeOnly = `<?xml version="1.0"?>

@@ -50,7 +50,7 @@ import { fetchRouteSurface, summarizeSurface, surfaceDefinition } from './lib/su
 import type { SurfaceClass } from './lib/surface'
 import { altitudeColor, getBaseLayer, getSegmentColor } from './lib/terrain'
 import type { ColorMode } from './lib/terrain'
-import type { Coordinate, Track } from './lib/types'
+import type { Coordinate, GpxWaypoint, Track } from './lib/types'
 
 import './App.css'
 
@@ -422,6 +422,10 @@ function App() {
   /* -- Editing ------------------------------------------------------ */
 
   const [showTools, setShowTools] = useState(false)
+  /** Clicking the map drops a place of interest instead of a route point. */
+  const [waypointMode, setWaypointMode] = useState(false)
+  /** Places of interest placed while planning — not part of the routed line. */
+  const [creationPins, setCreationPins] = useState<GpxWaypoint[]>([])
   const [selectionMode, setSelectionMode] = useState(false)
   const [selection, setSelection] = useState<TrimSelection | null>(null)
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null)
@@ -914,6 +918,76 @@ function App() {
     [tracks, selectedTrackIndex, notify],
   )
 
+  /** Drop the loaded track and everything derived from it, back to a blank slate. */
+  const clearTrack = useCallback(() => {
+    if (dirty && !confirm('This track has unsaved edits. Clear it anyway?')) return
+    setTracks([])
+    setSelectedTrackIndex(0)
+    setEditHistory([])
+    setDirty(false)
+    setSelection(null)
+    setSelectionAnchor(null)
+    setSelectionMode(false)
+    setWaypointMode(false)
+    setActivePois({ fuel: [], water: [], camp: [] })
+    setSurfaceSegments(null)
+    setSurfaceError(null)
+    setSurfaceApproximate(false)
+    setElevationInterpolated(false)
+    setElevationApiError(false)
+    setShowTools(false)
+    setViewMode('welcome')
+    loadSavedFiles()
+  }, [dirty, loadSavedFiles])
+
+  /* -- Custom waypoints --------------------------------------------- */
+
+  /*
+   * Waypoints are independent of the track's own points: you drop them where
+   * something is, not where the route happens to have a sample. They ride
+   * along in the file as <wpt> elements, which buildGPX already writes.
+   */
+  const addWaypoint = useCallback(
+    (lat: number, lon: number) => {
+      applyEdit('Waypoint added', t => ({
+        ...t,
+        waypoints: [...t.waypoints, { lat, lon, name: `Waypoint ${t.waypoints.length + 1}` }],
+      }))
+    },
+    [applyEdit],
+  )
+
+  const renameWaypoint = useCallback(
+    (index: number) => {
+      const current = tracks[selectedTrackIndex]?.waypoints[index]
+      const name = prompt('Waypoint name', current?.name ?? '')?.trim()
+      if (!name) return
+      applyEdit('Waypoint renamed', t => ({
+        ...t,
+        waypoints: t.waypoints.map((w, i) => (i === index ? { ...w, name } : w)),
+      }))
+    },
+    [applyEdit, tracks, selectedTrackIndex],
+  )
+
+  const removeWaypoint = useCallback(
+    (index: number) => {
+      applyEdit('Waypoint removed', t => ({
+        ...t,
+        waypoints: t.waypoints.filter((_, i) => i !== index),
+      }))
+    },
+    [applyEdit],
+  )
+
+  const handleViewMapClick = useCallback(
+    (e: L.LeafletMouseEvent) => {
+      if (!waypointMode) return
+      addWaypoint(e.latlng.lat, e.latlng.lng)
+    },
+    [waypointMode, addWaypoint],
+  )
+
   const undoEdit = useCallback(() => {
     if (editHistory.length === 0) return
     const previous = editHistory[editHistory.length - 1]
@@ -1052,12 +1126,38 @@ function App() {
   const handleMapClick = useCallback(
     (e: L.LeafletMouseEvent) => {
       if (viewMode !== 'creation') return
+
+      // Places of interest are not route points: the router must not detour
+      // through a monument you only want marked on the map.
+      if (waypointMode) {
+        setCreationPins(prev => [
+          ...prev,
+          { lat: e.latlng.lat, lon: e.latlng.lng, name: `Point of interest ${prev.length + 1}` },
+        ])
+        return
+      }
+
       const waypoint: Waypoint = { id: Date.now(), lat: e.latlng.lat, lon: e.latlng.lng }
       setCreationWaypoints(prev => [...prev, waypoint])
       fetchWaypointElevation(waypoint)
     },
-    [viewMode, fetchWaypointElevation],
+    [viewMode, waypointMode, fetchWaypointElevation],
   )
+
+  // prompt() stays outside the updater: updaters must be pure, and StrictMode
+  // runs them twice.
+  const renameCreationPin = useCallback(
+    (index: number) => {
+      const name = prompt('Name this place', creationPins[index]?.name ?? '')?.trim()
+      if (!name) return
+      setCreationPins(prev => prev.map((p, i) => (i === index ? { ...p, name } : p)))
+    },
+    [creationPins],
+  )
+
+  const removeCreationPin = useCallback((index: number) => {
+    setCreationPins(prev => prev.filter((_, i) => i !== index))
+  }, [])
 
   const deleteWaypoint = useCallback((id: number) => {
     setCreationWaypoints(prev => prev.filter(w => w.id !== id))
@@ -1273,16 +1373,21 @@ function App() {
       buildGPX({
         name,
         coordinates: creationCoordinates,
-        waypoints: exportWaypoints
-          ? creationWaypoints.map((w, i) => ({
-              lat: w.lat,
-              lon: w.lon,
-              elevation: w.elevation,
-              name: `WP ${i + 1}`,
-            }))
-          : [],
+        // Places of interest always travel with the file; the routing points
+        // only when asked for, since they are scaffolding rather than content.
+        waypoints: [
+          ...creationPins,
+          ...(exportWaypoints
+            ? creationWaypoints.map((w, i) => ({
+                lat: w.lat,
+                lon: w.lon,
+                elevation: w.elevation,
+                name: `WP ${i + 1}`,
+              }))
+            : []),
+        ],
       }),
-    [creationCoordinates, creationWaypoints, exportWaypoints],
+    [creationCoordinates, creationWaypoints, creationPins, exportWaypoints],
   )
 
   const handleSaveCreation = useCallback(async () => {
@@ -1319,6 +1424,8 @@ function App() {
   const resetCreation = useCallback(() => {
     routeSeqRef.current++
     setCreationWaypoints([])
+    setCreationPins([])
+    setWaypointMode(false)
     setRoutedCoordinates([])
     setRoutedDuration(null)
     setRoutedEngine(null)
@@ -1712,12 +1819,12 @@ function App() {
               )}
             </div>
 
-            <div className="sidebar-section">
+            <div className="sidebar-section sidebar-section--grow">
               <h3>
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                   <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" />
                 </svg>
-                Waypoints
+                Route points
                 <span className="badge">{creationWaypoints.length}</span>
                 <span className="waypoint-actions">
                   <button
@@ -1784,6 +1891,17 @@ function App() {
                 </div>
               </div>
               <div className="creation-controls">
+                <button
+                  className={`btn btn-ghost btn-sm${waypointMode ? ' active' : ''}`}
+                  onClick={() => setWaypointMode(v => !v)}
+                  title="Mark a place worth stopping at — a monument, a viewpoint, a spring. It is saved with the file but the route does not detour through it."
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 010-5 2.5 2.5 0 010 5z" />
+                  </svg>
+                  {waypointMode ? 'Click the map…' : 'Add place'}
+                  {creationPins.length > 0 && <span className="badge">{creationPins.length}</span>}
+                </button>
                 <button className="btn btn-primary" onClick={downloadCreation} disabled={creationCoordinates.length < 2}>
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                     <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
@@ -1824,7 +1942,7 @@ function App() {
               </div>
             </div>
 
-            <div className="map-container">
+            <div className={`map-container${waypointMode ? ' placing-waypoint' : ''}`}>
               <MapContainer
                 center={[41.65, -0.88]}
                 zoom={9}
@@ -1845,7 +1963,20 @@ function App() {
                       },
                     }}
                   >
-                    <Popup>Waypoint</Popup>
+                    <Popup>Route point</Popup>
+                  </Marker>
+                ))}
+
+                {/* Places of interest: marked, saved, but never routed through. */}
+                {creationPins.map((pin, i) => (
+                  <Marker key={`pin-${i}`} position={[pin.lat, pin.lon]} icon={waypointIcon('★')}>
+                    <Popup>
+                      <strong>{pin.name}</strong>
+                      <span className="wpt-popup-actions">
+                        <button className="btn btn-ghost btn-xs" onClick={() => renameCreationPin(i)}>Rename</button>
+                        <button className="btn btn-danger btn-xs" onClick={() => removeCreationPin(i)}>Delete</button>
+                      </span>
+                    </Popup>
                   </Marker>
                 ))}
                 {routedCoordinates.length > 1 && (
@@ -1995,6 +2126,13 @@ function App() {
                 <button className="btn btn-success btn-sm" onClick={saveCurrentTrack} title="Save back to the library">
                   Save
                 </button>
+                <button
+                  className="btn btn-danger btn-sm"
+                  onClick={clearTrack}
+                  title="Clear the map and start again"
+                >
+                  Clear
+                </button>
                 <ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} inline />
               </div>
             </div>
@@ -2040,12 +2178,22 @@ function App() {
                   <span className="stat-value">{timeStats.movingSpeedKmh.toFixed(1)} <small>km/h</small></span>
                 </div>
               )}
-              {fuelGap !== null && (
-                <div className={`stat-item${fuelGap > 200 ? ' stat-warn' : ''}`}>
-                  <span className="stat-label">Longest fuel gap</span>
-                  <span className="stat-value">{fuelGap.toFixed(0)} <small>km</small></span>
-                </div>
-              )}
+              {/*
+                * Always rendered, even before the fuel layer is on. Adding a
+                * tile on toggle used to wrap the grid onto a second row, which
+                * grew the panel and shoved the map and profile down the page.
+                */}
+              <div
+                className={`stat-item${fuelGap !== null && fuelGap > 200 ? ' stat-warn' : ''}`}
+                title={fuelGap === null ? 'Turn on the Fuel layer to measure this' : undefined}
+              >
+                <span className="stat-label">Longest fuel gap</span>
+                <span className="stat-value">
+                  {fuelGap === null
+                    ? <span className="stat-pending">—</span>
+                    : <>{fuelGap.toFixed(0)} <small>km</small></>}
+                </span>
+              </div>
             </div>
 
             <div className="toolbar-strip">
@@ -2058,6 +2206,17 @@ function App() {
                   <path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z" />
                 </svg>
                 Tools
+              </button>
+
+              <button
+                className={`btn btn-ghost btn-xs${waypointMode ? ' active' : ''}`}
+                onClick={() => setWaypointMode(v => !v)}
+                title="Click anywhere on the map to drop a waypoint — it does not have to sit on the track"
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 010-5 2.5 2.5 0 010 5z" />
+                </svg>
+                {waypointMode ? 'Click the map…' : 'Waypoint'}
               </button>
 
               <span className="toolbar-divider" />
@@ -2217,7 +2376,7 @@ function App() {
             )}
           </div>
 
-          <div className="map-wrapper-with-elevation">
+          <div className={`map-wrapper-with-elevation${waypointMode ? ' placing-waypoint' : ''}`}>
             <MapContainer
               center={[currentTrack.coordinates[0]?.lat ?? 0, currentTrack.coordinates[0]?.lon ?? 0]}
               zoom={13}
@@ -2225,6 +2384,7 @@ function App() {
               ref={map => { if (map) mapRef.current = map }}
             >
               <MapTiles baseLayerId={baseLayer} hillshade={hillshade} hillshadeOpacity={hillshadeOpacity} />
+              <MapClickHandler onClick={handleViewMapClick} />
 
               <ColoredTrack
                 coordinates={currentTrack.coordinates}
@@ -2259,6 +2419,10 @@ function App() {
                     <strong>{w.name ?? `Waypoint ${i + 1}`}</strong>
                     {w.desc && <><br />{w.desc}</>}
                     {w.elevation !== undefined && <><br />{w.elevation.toFixed(0)} m</>}
+                    <span className="wpt-popup-actions">
+                      <button className="btn btn-ghost btn-xs" onClick={() => renameWaypoint(i)}>Rename</button>
+                      <button className="btn btn-danger btn-xs" onClick={() => removeWaypoint(i)}>Delete</button>
+                    </span>
                   </Popup>
                 </Marker>
               ))}

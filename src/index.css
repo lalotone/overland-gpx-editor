@@ -9,6 +9,17 @@
 /* ------------------------------------------------------------------ */
 /*  Light theme (default)                                              */
 /* ------------------------------------------------------------------ */
+/*
+ * Text colours are chosen against measured contrast, not by eye. The small
+ * uppercase labels on stat tiles are the tightest case in the app: they sit on
+ * --bg-tertiary at 0.62rem, so --text-muted is held at 4.5:1 against that
+ * surface in both themes. It used to be 2.1:1 (light) and 1.9:1 (dark), which
+ * is why the numbers read as floating with no labels attached.
+ *
+ * --accent is the brand blue for text, borders and focus rings. --accent-solid
+ * is the darker fill used behind white button text, where the bright blue only
+ * reaches 3.7:1.
+ */
 :root {
   --bg-primary:   #f0f2f5;
   --bg-secondary: #ffffff;
@@ -17,41 +28,58 @@
   --bg-card:      #ffffff;
 
   --text-primary:   #1a1f36;
-  --text-secondary: #6b7280;
-  --text-muted:     #9ca3af;
+  --text-secondary: #5a6472;
+  --text-muted:     #616b7d;
 
   --gradient-start: #3b82f6;
   --gradient-end:   #60a5fa;
-  --accent:         #3b82f6;
-  --accent-dark:    #2563eb;
-  --accent-light:   rgba(59, 130, 246, 0.10);
+  --accent:         #2563eb;
+  --accent-dark:    #1d4ed8;
+  --accent-solid:   #2563eb;
+  --accent-light:   rgba(37, 99, 235, 0.09);
+
+  --success-solid: #1a7f37;
+  --danger-solid:  #dc2626;
 
   --border-color:  #e5e7eb;
-  --border-strong: #d1d5db;
+  --border-strong: #cbd2da;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Dark theme — applied via <html class="dark">                       */
 /* ------------------------------------------------------------------ */
+/*
+ * One cool-neutral ramp rather than the previous mix of neutral panels and a
+ * blue-tinted tile colour, which read as muddy where the two met. Surfaces get
+ * lighter as they get closer to the reader: page → panel → tile.
+ */
 html.dark {
-  --bg-primary:   #0f1117;
-  --bg-secondary: #161b22;
-  --bg-tertiary:  #1c2333;
-  --bg-sidebar:   #161b22;
-  --bg-card:      #1c2333;
+  /* Surfaces are greyscale — every channel within ~10 of the others — so the
+     only colour in the interface is the blue accent and the data itself
+     (gradient ramps, surface swatches, POI pins). Blue-tinted panels compete with
+     those and make the map look washed. */
+  --bg-primary:   #131416;
+  --bg-secondary: #1b1d20;
+  --bg-tertiary:  #24272b;
+  --bg-sidebar:   #1b1d20;
+  --bg-card:      #24272b;
 
-  --text-primary:   #e6edf3;
-  --text-secondary: #8b949e;
-  --text-muted:     #484f58;
+  --text-primary:   #eceff2;
+  --text-secondary: #b0b6bd;
+  --text-muted:     #949aa2;
 
-  --gradient-start: #3b82f6;
-  --gradient-end:   #60a5fa;
-  --accent:         #3b82f6;
-  --accent-dark:    #2563eb;
-  --accent-light:   rgba(59, 130, 246, 0.12);
+  --gradient-start: #4d9fff;
+  --gradient-end:   #7ab6ff;
+  --accent:         #4d9fff;
+  --accent-dark:    #3a86e0;
+  --accent-solid:   #2f6fd0;
+  --accent-light:   rgba(77, 159, 255, 0.13);
 
-  --border-color:  #21262d;
-  --border-strong: #30363d;
+  --success-solid: #1a7f37;
+  --danger-solid:  #c9372c;
+
+  --border-color:  #333940;
+  --border-strong: #454b54;
 }
 
 body {

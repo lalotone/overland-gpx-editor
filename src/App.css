@@ -305,95 +305,96 @@ html.dark .theme-toggle {
 /*  Shared button styles                                               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Buttons.
+ *
+ * Filled variants use the --*-solid tokens: the bright brand blue behind white
+ * text only reaches 3.7:1, and the green was worse at 2.3:1. The coloured
+ * "glow" shadows and the lift-on-hover are gone — a toolbar of eight buttons
+ * that all rise off the page reads as noise. Destructive actions stay quiet
+ * until you touch them: Discard is a secondary action next to Save, and a
+ * solid red block gives it more weight than it deserves.
+ */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  padding: 10px 22px;
+  padding: 9px 18px;
   font-size: 0.875rem;
   font-weight: 600;
-  border: none;
+  line-height: 1.2;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: transform var(--transition), box-shadow var(--transition),
-    background var(--transition), opacity var(--transition);
-  line-height: 1.4;
   white-space: nowrap;
-  letter-spacing: 0.01em;
-}
-
-.btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-}
-
-.btn:active:not(:disabled) {
-  transform: translateY(0);
+  transition: background var(--transition), border-color var(--transition),
+    color var(--transition), opacity var(--transition);
 }
 
 .btn:disabled {
-  opacity: 0.35;
+  opacity: 0.4;
   cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
 }
 
 .btn:focus-visible {
-  outline: 2px solid var(--gradient-start);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
 .btn-primary {
-  background: var(--gradient-start);
-  color: white;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  background: var(--accent-solid);
+  color: #fff;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #2563eb;
-  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.45);
+  background: var(--accent-dark);
 }
 
 .btn-success {
-  background: var(--success-color);
-  color: white;
-  box-shadow: 0 2px 8px rgba(63, 185, 80, 0.3);
+  background: var(--success-solid);
+  color: #fff;
 }
 
 .btn-success:hover:not(:disabled) {
-  background: #2ea043;
-  box-shadow: 0 4px 16px rgba(63, 185, 80, 0.45);
+  filter: brightness(1.12);
 }
 
+/* Quiet until hover — see the note above. */
 .btn-danger {
-  background: var(--delete-color);
-  color: white;
-  box-shadow: 0 2px 8px rgba(248, 81, 73, 0.3);
+  background: transparent;
+  color: var(--danger-solid);
+  border-color: var(--border-strong);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #da3633;
-  box-shadow: 0 4px 16px rgba(248, 81, 73, 0.45);
+  background: var(--danger-solid);
+  border-color: var(--danger-solid);
+  color: #fff;
+}
+
+html.dark .btn-danger {
+  color: #ff8b82;
 }
 
 .btn-ghost {
   background: var(--bg-tertiary);
   color: var(--text-primary);
-  border: 1px solid var(--border-strong);
-  box-shadow: none;
+  border-color: var(--border-strong);
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: var(--bg-card);
-  border-color: var(--gradient-start);
-  color: var(--gradient-start);
-  transform: translateY(-1px);
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .btn-sm {
-  padding: 6px 14px;
+  padding: 6px 13px;
   font-size: 0.8rem;
 }
+
+/* .btn-xs and .btn-ghost.active are defined with the toolbar rules below. */
 
 /* ------------------------------------------------------------------ */
 /*  Notification toast                                                 */
@@ -982,6 +983,31 @@ html.dark .track-card-loss strong { color: #f87171; }
   padding: 16px;
   margin-bottom: 12px;
   border: 1px solid var(--border-subtle);
+  /* Sections keep their natural height; only the one marked --grow gives way. */
+  flex-shrink: 0;
+}
+
+/*
+ * The waypoint list is the one part of the sidebar with no upper bound — it
+ * grows by a row per click. Left alone it pushes the sections above it out of
+ * view and makes the whole sidebar scroll, so the panel you are reading moves
+ * every time you add a point. Instead this section takes whatever height is
+ * left over and scrolls inside itself; everything else stays put.
+ */
+.sidebar-section--grow {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 150px;
+  overflow: hidden;
+}
+
+.sidebar-section--grow .waypoint-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Room for the scrollbar so it never sits on top of the delete buttons. */
+  padding-right: 4px;
 }
 
 /* Place search */
@@ -1557,6 +1583,9 @@ html.dark .elev-api-banner svg {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* The panels above the map size themselves to content; without this a tall
+     one scrolls the whole screen instead of the map simply getting shorter. */
+  overflow: hidden;
 }
 
 .stats-panel {
@@ -1588,9 +1617,18 @@ html.dark .elev-api-banner svg {
 
 .stats-grid {
   display: grid;
-  /* Stat count varies — time and fuel-gap tiles only appear when relevant. */
+  /*
+   * The tile count is fixed for a given track — the fuel-gap tile renders as
+   * "—" until the layer is on rather than appearing later, so toggling a POI
+   * layer cannot rewrap this grid and push the map down.
+   */
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 6px;
+}
+
+.stat-pending {
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 .stat-item {
@@ -3018,3 +3056,86 @@ html.dark .loading-overlay {
   }
 
   }
+
+/* ------------------------------------------------------------------ */
+/*  Custom waypoints                                                   */
+/* ------------------------------------------------------------------ */
+
+/* Crosshair over the whole map while placement is armed, so it is obvious the
+   next click does something. */
+.map-wrapper-with-elevation.placing-waypoint .leaflet-container,
+.map-container.placing-waypoint .leaflet-container {
+  cursor: crosshair;
+}
+
+.wpt-popup-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Leaflet chrome                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Leaflet ships its own white popups, zoom buttons and attribution bar. On a
+ * dark page those punch bright holes through the UI, so they follow the theme
+ * tokens like everything else.
+ */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+}
+
+.leaflet-popup-content-wrapper {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.leaflet-popup-content {
+  margin: 12px 14px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+  color: var(--text-muted);
+}
+
+.leaflet-container a.leaflet-popup-close-button:hover {
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-bottom-color: var(--border-color);
+}
+
+.leaflet-bar a:hover {
+  background: var(--bg-tertiary);
+}
+
+.leaflet-bar a.leaflet-disabled {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  color: var(--text-secondary);
+}
+
+.leaflet-control-attribution a {
+  color: var(--accent);
+}
+
+/* Leaflet's default marker shadow reads as grime on a dark basemap. */
+html.dark .leaflet-marker-shadow {
+  opacity: 0.45;
+}

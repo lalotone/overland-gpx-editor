@@ -63,9 +63,9 @@ Usage of ./gpx-editor:
   -elevation-host string      self-hosted opentopodata-style DEM service;
                               empty uses the public Open-Meteo API
   -elevation-dataset string   DEM dataset for -elevation-host (default "srtm30m")
-  -elevation-tiles            read elevation from ~30 m terrain tiles instead
+  -elevation-tiles            read elevation from ~30 m terrain tiles (default true)
   -elevation-tile-zoom int    tile zoom (default 13, ~14 m/px)
-  -elevation-tile-cache dir   keep tiles on disk so elevation works offline
+  -elevation-tile-cache dir   where tiles are kept (default "tiles")
 ```
 
 `make cross` writes Linux, macOS and Windows binaries to `build/` — no C
@@ -86,42 +86,37 @@ it behind a reverse proxy with auth, or keep it on a trusted network.
 
 ## Elevation
 
-Out of the box the backend proxies to
-[Open-Meteo](https://open-meteo.com/en/docs/elevation-api) — public, keyless,
-no setup. That covers ground elevation under the cursor, elevation for newly
-planned routes, and "Refetch from DEM".
+Out of the box the backend reads elevation from **terrain tiles** — ~30 m
+Terrarium rasters, cached to `tiles/` next to the binary. Nothing to configure
+and no API quota to run into.
 
-Open-Meteo serves **Copernicus DEM GLO-90**, and 90 m postings smooth out
-exactly the gradients that matter on a trail. On steep ground the difference is
-not subtle: one Pyrenean point reads 1539 m from 90 m data and 1920 m from
-30 m data. Two better options:
-
-**Terrain tiles** — no setup, ~30 m, and it caches to disk so elevation keeps
-working with no signal:
-
-```bash
-./gpx-editor -elevation-tiles -elevation-tile-cache ./tiles
-```
-
-It reads elevation straight out of Terrarium terrain-RGB rasters rather than
-asking a service per point. A 95 km route pulls 27 tiles (2.6 MB) in about
-5 seconds cold, and is instant afterwards. Bandwidth is the trade: tiles are
-~100 KB each, against a few KB of JSON for the same route.
+Tiles are read locally rather than asked for a point at a time, which is why
+they are the default: a 95 km route needs 27 tiles (2.6 MB) and about 5
+seconds cold, then costs nothing, and a cached area keeps working with no
+signal. The trade is bandwidth — tiles are ~100 KB each against a few KB of
+JSON for the same route — and opening the planner zoomed out caches ~22 MB
+for the region you are looking at.
 
 While you plan, tiles for the visible area download in the background with a
-progress readout on the map — pan to another region and it fetches that one
-too. Zoomed far enough out the area runs to thousands of tiles, and the
-prefetch says so rather than pulling them; routing and elevation still work,
-just fetched as needed.
+progress readout on the map; pan somewhere else and it follows. Zoomed far
+out the view runs to thousands of tiles, so only its middle is cached and the
+readout says so. Elevation still works everywhere either way — anything not
+cached is fetched on demand.
 
-**A self-hosted DEM** — best if you already run one. Anything
-[opentopodata](https://www.opentopodata.org/)-compatible works:
+Two alternatives:
 
 ```bash
+# A DEM you already run. Takes precedence over tiles.
 ./gpx-editor -elevation-host http://dem.lan:30110 -elevation-dataset srtm30m
+
+# The public Open-Meteo API. No downloads, but Copernicus 90 m and a daily
+# request quota — 90 m postings smooth out exactly the gradients that matter
+# on a trail. One Pyrenean point reads 1539 m from it and 1920 m from 30 m
+# tiles.
+./gpx-editor -elevation-tiles=false
 ```
 
-Whichever you pick, tracks that already carry `<ele>` data display and analyse
+Whichever you use, tracks that already carry `<ele>` data display and analyse
 correctly with no elevation service reachable at all.
 
 ---
@@ -136,11 +131,11 @@ bundle at build time.
 | --- | --- | --- | --- |
 | `ADDR` | backend | `:8000` | Listen address |
 | `GPX_DIR` | backend | `gpx` | Track library directory |
-| `ELEVATION_HOST` | backend | *(empty — Open-Meteo)* | Self-hosted opentopodata-style DEM |
-| `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
-| `ELEVATION_TILES` | backend | *(off)* | Read elevation from terrain tiles instead; wins over the above |
+| `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
-| `ELEVATION_TILE_CACHE` | backend | *(memory only)* | Directory to keep tiles in, for offline use |
+| `ELEVATION_TILE_CACHE` | backend | `tiles` | Where tiles are kept, so elevation works offline |
+| `ELEVATION_HOST` | backend | *(empty)* | Self-hosted opentopodata-style DEM. Takes precedence over tiles |
+| `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
 | `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at a backend on another host |
 | `VITE_DEV_API_TARGET` | frontend | `http://localhost:8000` | Where `npm run dev` proxies the API |
 | `VITE_ELEVATION_API` | frontend | *(empty — disabled)* | Optional direct DEM call if the proxy fails |
@@ -218,8 +213,8 @@ All are public and keyless. Attribution is rendered on the map by Leaflet.
 | [Valhalla](https://valhalla1.openstreetmap.de) | Routing, with [OSRM](https://router.project-osrm.org) as fallback |
 | [Nominatim](https://nominatim.org) | Place search (max 1 request/second) |
 | [Overpass](https://overpass-api.de) | Fuel / water / campsite POIs |
-| [Open-Meteo](https://open-meteo.com/en/docs/elevation-api) | Elevation by default |
-| [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) | Elevation with `-elevation-tiles` — SRTM, NED and others, public domain |
+| [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) | Elevation by default — SRTM, NED and others, public domain |
+| [Open-Meteo](https://open-meteo.com/en/docs/elevation-api) | Elevation with `-elevation-tiles=false`; has a daily request quota |
 
 These are shared community resources on donated infrastructure. The app is
 built for personal-scale use and does not cache tiles or throttle aggressively.

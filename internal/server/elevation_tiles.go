@@ -383,7 +383,11 @@ type prefetchProgress struct {
 	Total   int  `json:"total"`
 	// Skipped reports the last request that was refused for being too wide,
 	// so the UI can say why nothing is happening.
-	Skipped bool   `json:"skipped,omitempty"`
+	Skipped bool `json:"skipped,omitempty"`
+	// Clamped reports that the view was wider than the cap and only its
+	// middle is being cached, so the UI can say so rather than imply the
+	// whole screen is covered.
+	Clamped bool   `json:"clamped,omitempty"`
 	Reason  string `json:"reason,omitempty"`
 }
 
@@ -394,6 +398,7 @@ type prefetchState struct {
 	done    int
 	total   int
 	skipped bool
+	clamped bool
 	reason  string
 }
 
@@ -441,12 +446,19 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		s.prefetch.cancel = nil
 	}
 
+	// Zoomed out, the view runs to thousands of tiles — the planner opens at a
+	// whole-province zoom, where refusing outright would mean it never caches
+	// anything at all. Cache the middle of the view instead, which is where
+	// the work starts, and say that is what happened.
+	clamped, reason := false, ""
 	if count > maxPrefetchTiles {
-		s.prefetch.running, s.prefetch.done, s.prefetch.total = false, 0, 0
-		s.prefetch.skipped = true
-		s.prefetch.reason = fmt.Sprintf("area needs %d tiles, over the %d limit — zoom in to cache it",
-			count, maxPrefetchTiles)
-		return prefetchProgress{Skipped: true, Reason: s.prefetch.reason}
+		r := (int(math.Sqrt(float64(maxPrefetchTiles))) - 1) / 2
+		cx, cy := (x0+x1)/2, (y0+y1)/2
+		x0, x1 = max(x0, cx-r), min(x1, cx+r)
+		y0, y1 = max(y0, cy-r), min(y1, cy+r)
+		clamped = true
+		reason = fmt.Sprintf("view spans %d tiles — caching the middle %d",
+			count, (x1-x0+1)*(y1-y0+1))
 	}
 
 	var missing []tileKey
@@ -462,11 +474,12 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		}
 	}
 
-	s.prefetch.skipped, s.prefetch.reason = false, ""
+	s.prefetch.skipped = false
+	s.prefetch.clamped, s.prefetch.reason = clamped, reason
 	s.prefetch.done, s.prefetch.total = 0, len(missing)
 	if len(missing) == 0 {
 		s.prefetch.running = false
-		return prefetchProgress{Running: false, Done: 0, Total: 0}
+		return prefetchProgress{Running: false, Clamped: clamped, Reason: reason}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -499,7 +512,7 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		cancel()
 	}()
 
-	return prefetchProgress{Running: true, Done: 0, Total: len(missing)}
+	return prefetchProgress{Running: true, Done: 0, Total: len(missing), Clamped: clamped, Reason: reason}
 }
 
 func (s *tileStore) progress() prefetchProgress {
@@ -510,6 +523,7 @@ func (s *tileStore) progress() prefetchProgress {
 		Done:    s.prefetch.done,
 		Total:   s.prefetch.total,
 		Skipped: s.prefetch.skipped,
+		Clamped: s.prefetch.clamped,
 		Reason:  s.prefetch.reason,
 	}
 }

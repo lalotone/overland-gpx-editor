@@ -3260,7 +3260,7 @@ html.dark .leaflet-marker-shadow {
   transition: width 0.25s ease;
 }
 
-/* Too wide an area to cache: a statement, not a progress bar. */
-.tile-progress--skipped {
+.tile-progress-note {
   color: var(--text-muted);
+  font-size: 0.71rem;
 }

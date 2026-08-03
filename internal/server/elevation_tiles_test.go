@@ -47,6 +47,10 @@ type tileServer struct {
 	seen     map[string]int
 	missing  map[string]bool
 	ele      func(x, y int) float64
+	// Encoding a 256x256 PNG per request makes a 225-tile prefetch test slower
+	// than the thing it is testing, so the body is built once.
+	once sync.Once
+	body []byte
 }
 
 func newTileServer(t *testing.T) *tileServer {
@@ -69,8 +73,9 @@ func newTileServer(t *testing.T) *tileServer {
 			http.NotFound(w, r)
 			return
 		}
+		ts.once.Do(func() { ts.body = encodeTerrarium(t, ele) })
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(encodeTerrarium(t, ele))
+		w.Write(ts.body)
 	}))
 	t.Cleanup(ts.Close)
 	return ts
@@ -269,7 +274,6 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 		GPXDir:           t.TempDir(),
 		ElevationTiles:   true,
 		ElevationTileURL: ts.url(),
-		ElevationHost:    "http://should-not-be-used.invalid",
 		ElevationDataset: "srtm30m",
 	})
 	if err != nil {
@@ -298,7 +302,7 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 
 func waitForPrefetch(t *testing.T, s *tileStore) prefetchProgress {
 	t.Helper()
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 1000; i++ {
 		p := s.progress()
 		if !p.Running {
 			return p
@@ -337,22 +341,61 @@ func TestPrefetchWarmsTheAreaAhead(t *testing.T) {
 	}
 }
 
-// Zoomed out far enough, the viewport is thousands of tiles; that must be
-// refused rather than quietly pulling hundreds of megabytes.
-func TestPrefetchRefusesTooWideAnArea(t *testing.T) {
+// Zoomed out far enough the viewport is thousands of tiles. The planner opens
+// at that zoom, so refusing outright would mean never caching anything: the
+// middle of the view is cached instead, and the response says so.
+func TestPrefetchClampsATooWideArea(t *testing.T) {
 	ts := newTileServer(t)
 	s := newTileServerStore(t, ts, "")
 
 	// Roughly Zaragoza to Teruel and well beyond, at z13.
 	got := s.startPrefetch(39.5, -2.5, 42.5, 0.5)
-	if !got.Skipped {
-		t.Fatalf("expected the area to be refused, got %+v", got)
+	if !got.Clamped {
+		t.Fatalf("expected the area to be clamped, got %+v", got)
+	}
+	if got.Total > maxPrefetchTiles {
+		t.Errorf("clamped to %d tiles, over the %d cap", got.Total, maxPrefetchTiles)
+	}
+	if got.Total == 0 || !got.Running {
+		t.Errorf("clamping should still cache something: %+v", got)
 	}
 	if got.Reason == "" {
-		t.Error("a refusal with no reason cannot be shown to anyone")
+		t.Error("the user needs to know only part of the view was cached")
 	}
-	if ts.requests.Load() != 0 {
-		t.Errorf("%d tiles fetched despite refusing", ts.requests.Load())
+	waitForPrefetch(t, s)
+	if int(ts.requests.Load()) > maxPrefetchTiles {
+		t.Errorf("%d tiles fetched, over the cap", ts.requests.Load())
+	}
+}
+
+// A DEM host is a deliberate choice and outranks the tile default.
+func TestConfiguredHostWinsOverTiles(t *testing.T) {
+	dem := newFakeDEM(t, false)
+	tiles := newTileServer(t)
+
+	s, err := New(Config{
+		GPXDir:           t.TempDir(),
+		ElevationTiles:   true,
+		ElevationTileURL: tiles.url(),
+		ElevationHost:    dem.URL,
+		ElevationDataset: "srtm30m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postBatch(t, s, `{"locations":"42.0,-0.5"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if got := decodeBatch(t, rec); got.Dataset != "srtm30m" {
+		t.Errorf("dataset = %q, want the configured host's srtm30m", got.Dataset)
+	}
+	if tiles.requests.Load() != 0 {
+		t.Error("tiles were used despite an explicit -elevation-host")
+	}
+	if len(dem.requests) == 0 {
+		t.Error("the configured host was never asked")
 	}
 }
 

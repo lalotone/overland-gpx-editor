@@ -83,6 +83,8 @@ interface TilePrefetch {
   done: number
   total: number
   skipped?: boolean
+  /** The view was wider than the cache budget; only its middle is covered. */
+  clamped?: boolean
   reason?: string
 }
 
@@ -1178,7 +1180,7 @@ function App() {
         if (!res.ok) return
         const p: TilePrefetch & { enabled: boolean } = await res.json()
         if (!p.enabled) { prefetchDisabledRef.current = true; setTilePrefetch(null); return }
-        setTilePrefetch(p.running || p.skipped ? p : null)
+        setTilePrefetch(p.running ? p : null)
         if (p.running) pollPrefetch()
       } catch {
         // The download is best-effort; on-demand lookup still covers the route.
@@ -1201,7 +1203,7 @@ function App() {
         if (!res.ok) return
         const p: TilePrefetch & { enabled: boolean } = await res.json()
         if (!p.enabled) { prefetchDisabledRef.current = true; return }
-        setTilePrefetch(p.running || p.skipped ? p : null)
+        setTilePrefetch(p.running ? p : null)
         if (p.running) pollPrefetch()
       } catch {
         // Backend unreachable — the app keeps working without it.
@@ -2173,25 +2175,23 @@ function App() {
               )}
 
               {tilePrefetch && (
-                <div className={`tile-progress${tilePrefetch.skipped ? ' tile-progress--skipped' : ''}`}>
-                  {tilePrefetch.skipped ? (
-                    <span className="tile-progress-label">Elevation tiles: {tilePrefetch.reason}</span>
-                  ) : (
-                    <>
-                      <span className="tile-progress-label">
-                        Downloading elevation tiles… {tilePrefetch.done}/{tilePrefetch.total}
-                      </span>
-                      <span className="tile-progress-track">
-                        <span
-                          className="tile-progress-bar"
-                          style={{
-                            width: `${tilePrefetch.total > 0
-                              ? Math.round((tilePrefetch.done / tilePrefetch.total) * 100)
-                              : 0}%`,
-                          }}
-                        />
-                      </span>
-                    </>
+                <div className="tile-progress">
+                  <span className="tile-progress-label">
+                    Downloading elevation tiles… {tilePrefetch.done}/{tilePrefetch.total}
+                  </span>
+                  <span className="tile-progress-track">
+                    <span
+                      className="tile-progress-bar"
+                      style={{
+                        width: `${tilePrefetch.total > 0
+                          ? Math.round((tilePrefetch.done / tilePrefetch.total) * 100)
+                          : 0}%`,
+                      }}
+                    />
+                  </span>
+                  {/* Zoomed out, only the middle of the view is worth caching. */}
+                  {tilePrefetch.clamped && tilePrefetch.reason && (
+                    <span className="tile-progress-note">{tilePrefetch.reason}</span>
                   )}
                 </div>
               )}

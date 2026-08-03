@@ -111,9 +111,9 @@ sources, in order of what the binary is told to use:
 
 | Source | Resolution | Notes |
 | --- | --- | --- |
-| Terrain tiles (`-elevation-tiles`) | ~30 m | Terrarium rasters read locally; caches to disk |
-| Self-hosted opentopodata (`-elevation-host`) | your dataset | Best if you already run one |
-| Open-Meteo (default) | 90 m | Copernicus GLO-90, public, no setup |
+| Self-hosted opentopodata (`-elevation-host`) | your dataset | Wins when set — an explicit choice |
+| Terrain tiles (default) | ~30 m | Terrarium rasters read locally; caches to disk |
+| Open-Meteo (`-elevation-tiles=false`) | 90 m | Copernicus GLO-90, public, daily quota |
 
 - **90 m postings smooth out exactly the short, steep pitches that matter on a
   trail.** This is not hypothetical. Sampling one point in the Pyrenees

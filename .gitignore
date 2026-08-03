@@ -15,6 +15,10 @@ web/dist/*
 # physically been, timestamped.
 gpx/
 
+# Cached terrain tiles (-elevation-tile-cache). Tens of MB of upstream data,
+# rebuildable on demand.
+tiles/
+
 .env
 .env.*
 !.env.example

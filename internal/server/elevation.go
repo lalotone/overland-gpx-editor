@@ -58,9 +58,10 @@ func (p point) String() string {
 }
 
 type elevationProxy struct {
-	// tiles reads elevation out of terrain-RGB rasters. When set it wins:
-	// it is opt-in, higher resolution than the default, and works offline
-	// once its cache is warm.
+	// tiles reads elevation out of terrain-RGB rasters. It is the default
+	// source: higher resolution than the public API, no per-point quota, and
+	// it works offline once its cache is warm. Set only when no ElevationHost
+	// is configured.
 	tiles *tileStore
 	// host is a self-hosted opentopodata-style service. Empty selects
 	// Open-Meteo.

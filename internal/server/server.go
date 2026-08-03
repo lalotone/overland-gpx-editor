@@ -54,8 +54,10 @@ func New(cfg Config) (*Server, error) {
 	// take half a minute either.
 	client := &http.Client{Timeout: 30 * time.Second}
 
+	// An explicitly configured DEM host is a deliberate choice, so it wins over
+	// the tile default.
 	var tiles *tileStore
-	if cfg.ElevationTiles {
+	if cfg.ElevationTiles && strings.TrimSpace(cfg.ElevationHost) == "" {
 		tiles = newTileStore(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, client)
 	}
 

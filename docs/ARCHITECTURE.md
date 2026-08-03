@@ -88,9 +88,9 @@ all to the same response shape, so the frontend cannot tell them apart:
 
 | Provider | When | Data |
 | --- | --- | --- |
-| Terrain tiles | `-elevation-tiles` | Terrarium rasters, ~30 m |
 | opentopodata | `-elevation-host` set | whatever you self-host |
-| Open-Meteo | default | Copernicus DEM GLO-90, 90 m |
+| Terrain tiles | default | Terrarium rasters, ~30 m |
+| Open-Meteo | `-elevation-tiles=false` | Copernicus DEM GLO-90, 90 m |
 
 `elevation_tiles.go` is the odd one out: rather than asking a service per
 point it fetches 256x256 terrain-RGB tiles and reads the raster directly,
@@ -103,10 +103,10 @@ The prefetch endpoints warm that cache ahead of use: while planning, the map
 reports its bounds once it settles and the server pulls the tiles covering
 them in the background. A newer request cancels the previous one, since the
 map has moved and the old area is no longer what anyone is looking at. Tile
-count grows with the square of how far you zoom out, so a request over
-`maxPrefetchTiles` is refused with a reason rather than quietly pulling
-hundreds of megabytes — on-demand lookup still covers whatever the route
-actually touches.
+count grows with the square of how far you zoom out — the planner opens at a
+whole-province zoom where the view is thousands of tiles — so a request over
+`maxPrefetchTiles` caches the middle of the view and reports that it did.
+On-demand lookup still covers whatever the route actually touches.
 
 Coordinates are parsed and range-checked before they reach an upstream URL, and
 requests are chunked to the 100-point limit both services impose, then stitched

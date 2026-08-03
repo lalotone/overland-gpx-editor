@@ -29,12 +29,12 @@ func main() {
 		"self-hosted opentopodata-style DEM service; empty uses the public Open-Meteo API")
 	elevationDataset := flag.String("elevation-dataset", envOr("ELEVATION_DATASET", "srtm30m"),
 		"DEM dataset for -elevation-host when a request does not name one")
-	elevationTiles := flag.Bool("elevation-tiles", envOr("ELEVATION_TILES", "") != "",
-		"read elevation from terrain-RGB tiles (~30 m) instead of an elevation API; wins over -elevation-host")
+	elevationTiles := flag.Bool("elevation-tiles", envBool("ELEVATION_TILES", true),
+		"read elevation from terrain-RGB tiles (~30 m); -elevation-tiles=false falls back to the Open-Meteo API")
 	tileZoom := flag.Int("elevation-tile-zoom", envInt("ELEVATION_TILE_ZOOM", 0),
 		"tile zoom: higher is finer and heavier (0 uses the default of 13, ~14 m/px)")
-	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", ""),
-		"directory to keep fetched terrain tiles in; set it to keep elevation working offline")
+	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", "tiles"),
+		"directory to keep fetched terrain tiles in, so elevation keeps working offline")
 	flag.Parse()
 
 	assets, hasUI := web.Assets()
@@ -66,6 +66,8 @@ func main() {
 
 	elevationSource := "Open-Meteo (public, Copernicus 90 m)"
 	switch {
+	case *elevationHost != "":
+		elevationSource = fmt.Sprintf("%s (%s)", *elevationHost, *elevationDataset)
 	case *elevationTiles:
 		zoom := *tileZoom
 		if zoom <= 0 {
@@ -76,11 +78,6 @@ func main() {
 			where = "cached in " + *tileCache
 		}
 		elevationSource = fmt.Sprintf("terrain tiles z%d, %s", zoom, where)
-		if *elevationHost != "" {
-			log.Print("both -elevation-tiles and -elevation-host are set; tiles win")
-		}
-	case *elevationHost != "":
-		elevationSource = fmt.Sprintf("%s (%s)", *elevationHost, *elevationDataset)
 	}
 
 	// The API reads, writes and deletes files in the library directory and has
@@ -106,6 +103,19 @@ func main() {
 	}
 	<-shutdown
 	log.Print("gpx-editor stopped")
+}
+
+// envBool reads a flag-style environment variable. Anything that looks like a
+// denial turns it off; anything else non-empty turns it on.
+func envBool(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "":
+		return fallback
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func envInt(key string, fallback int) int {

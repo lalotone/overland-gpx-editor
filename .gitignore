@@ -1,0 +1,23 @@
+node_modules/
+
+# Frontend build output, embedded into the binary by web/embed.go. The
+# directory itself must stay in git or //go:embed has nothing to match.
+web/dist/*
+!web/dist/.gitkeep
+
+# Compiled binaries
+/gpx-editor
+/build/
+
+# Your track library. Never commit this: GPX files are a log of where you have
+# physically been, timestamped.
+gpx/
+
+.env
+.env.*
+!.env.example
+
+# Local tooling state — machine paths, not project config
+.claude/settings.local.json
+.venv/
+__pycache__/

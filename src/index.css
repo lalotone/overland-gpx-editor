@@ -1,0 +1,73 @@
+@import 'leaflet/dist/leaflet.css';
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Light theme (default)                                              */
+/* ------------------------------------------------------------------ */
+:root {
+  --bg-primary:   #f0f2f5;
+  --bg-secondary: #ffffff;
+  --bg-tertiary:  #e8eaed;
+  --bg-sidebar:   #ffffff;
+  --bg-card:      #ffffff;
+
+  --text-primary:   #1a1f36;
+  --text-secondary: #6b7280;
+  --text-muted:     #9ca3af;
+
+  --gradient-start: #3b82f6;
+  --gradient-end:   #60a5fa;
+  --accent:         #3b82f6;
+  --accent-dark:    #2563eb;
+  --accent-light:   rgba(59, 130, 246, 0.10);
+
+  --border-color:  #e5e7eb;
+  --border-strong: #d1d5db;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Dark theme — applied via <html class="dark">                       */
+/* ------------------------------------------------------------------ */
+html.dark {
+  --bg-primary:   #0f1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary:  #1c2333;
+  --bg-sidebar:   #161b22;
+  --bg-card:      #1c2333;
+
+  --text-primary:   #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted:     #484f58;
+
+  --gradient-start: #3b82f6;
+  --gradient-end:   #60a5fa;
+  --accent:         #3b82f6;
+  --accent-dark:    #2563eb;
+  --accent-light:   rgba(59, 130, 246, 0.12);
+
+  --border-color:  #21262d;
+  --border-strong: #30363d;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.hidden {
+  display: none !important;
+}

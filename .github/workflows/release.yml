@@ -36,9 +36,17 @@ jobs:
       - name: Check
         run: make check
 
+      # Writes .deb and .rpm without dpkg or rpmbuild being present, which is
+      # what keeps everything on this one runner. Pinned so a release is not
+      # at the mercy of whatever @latest resolves to that day.
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       # Every target is pure Go, so this one Linux runner produces the macOS
       # and Windows builds too — no cross-toolchain, no matrix, no mac runner.
-      - name: Build archives
+      - name: Build archives and packages
         run: make dist
 
       - name: Write release notes
@@ -55,6 +63,17 @@ jobs:
           cd gpx-editor-linux-amd64
           ./gpx-editor
           ```
+
+          On Debian, Ubuntu, Fedora or RHEL there are packages instead:
+
+          ```bash
+          sudo apt install ./gpx-editor_*_amd64.deb     # or
+          sudo dnf install ./gpx-editor-*.x86_64.rpm
+          ```
+
+          They install `/usr/bin/gpx-editor` and drop an example systemd unit
+          in `/usr/share/doc/gpx-editor/` — deliberately not registered, since
+          the user and library directory are yours to choose.
 
           **macOS** — the binaries are unsigned, so Gatekeeper quarantines
           them. Clear it once with `xattr -dr com.apple.quarantine ./gpx-editor`,
@@ -79,4 +98,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file build/NOTES.md \
             --generate-notes \
-            build/*.tar.gz build/*.zip build/SHA256SUMS
+            build/*.tar.gz build/*.zip build/*.deb build/*.rpm build/SHA256SUMS

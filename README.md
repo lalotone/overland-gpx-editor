@@ -54,6 +54,18 @@ cd gpx-editor-linux-amd64
 ./gpx-editor
 ```
 
+On Debian, Ubuntu, Fedora or RHEL there are packages instead:
+
+```bash
+sudo apt install ./gpx-editor_0.1.0_amd64.deb     # or
+sudo dnf install ./gpx-editor-0.1.0-1.x86_64.rpm
+```
+
+They install `/usr/bin/gpx-editor` and leave an example systemd unit in
+`/usr/share/doc/gpx-editor/`. It is deliberately not registered with systemd:
+the user, the library directory and the listen address are yours to choose,
+and a package that silently starts serving on `:8000` is not a nice surprise.
+
 The binaries are unsigned, so both desktop platforms will object once:
 
 - **macOS** — Gatekeeper quarantines the download. Clear it with
@@ -92,8 +104,10 @@ Usage of ./gpx-editor:
 ```
 
 `make cross` writes Linux, macOS and Windows binaries to `build/`, and
-`make dist` packages them with checksums the way a release does — no C
-toolchain needed for any of it, since nothing here uses cgo.
+`make dist` archives them with `.deb`/`.rpm` packages and checksums the way a
+release does. None of it needs a C toolchain, a container or a macOS runner,
+since nothing here uses cgo — `make packages` does want
+[nfpm](https://nfpm.goreleaser.com) on `PATH`.
 
 > [!NOTE]
 > The frontend build output is not committed, so `go install` on its own
@@ -213,7 +227,8 @@ make run       # the above, then serve on :8000
 make test      # go test + npm run verify
 make check     # tests plus go vet, gofmt, tsc, eslint
 make cross     # release binaries for linux/darwin/windows
-make dist      # the above, archived with SHA256SUMS
+make packages  # .deb and .rpm (needs nfpm)
+make dist      # all of the above, archived with SHA256SUMS
 npm run dev    # frontend dev server with HMR (needs ./gpx-editor running)
 ```
 

@@ -1,0 +1,42 @@
+# Debian and RPM packages, built by nfpm from the binaries `make cross`
+# already produced. ARCH and VERSION come from the Makefile, which builds one
+# package per architecture and format.
+#
+# nfpm writes both formats from this single description with no dpkg or
+# rpmbuild on the machine, which is what makes this work from one Linux
+# runner — the same reason the cross-compile does.
+name: gpx-editor
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: lalotone <lalotone@gmail.com>
+homepage: https://github.com/lalotone/overland-gpx-editor
+license: MIT
+description: |
+  Route planner and track editor for offroad and motorbike riding.
+  Terrain-first mapping, elevation gain that filters GPS noise rather than
+  inflating it, and an editor that can crop, split and day-stage a track.
+  Frontend, API and track library are a single self-contained binary.
+
+contents:
+  # The Makefile stages the right binary here before each run: nfpm expands
+  # environment variables in the metadata above but not in content paths.
+  - src: ./build/pkgroot/gpx-editor
+    dst: /usr/bin/gpx-editor
+
+  - src: ./README.md
+    dst: /usr/share/doc/gpx-editor/README.md
+    file_info: { mode: 0644 }
+  - src: ./LICENSE
+    dst: /usr/share/doc/gpx-editor/LICENSE
+    file_info: { mode: 0644 }
+
+  # Shipped as documentation rather than installed into systemd: the unit
+  # names a user and a library directory that only whoever is running it can
+  # decide, and a package that silently starts listening on :8000 is not a
+  # nice surprise. Copy it, adjust it, enable it.
+  - src: ./packaging/gpx-editor.service
+    dst: /usr/share/doc/gpx-editor/gpx-editor.service
+    file_info: { mode: 0644 }

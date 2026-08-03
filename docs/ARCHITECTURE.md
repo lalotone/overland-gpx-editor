@@ -62,6 +62,7 @@ internal/server/
 web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
 
+packaging/                      nfpm config and the example systemd unit
 scripts/verify.ts               Logic harness (npm run verify)
 gpx/                            Local track library (gitignored)
 ```

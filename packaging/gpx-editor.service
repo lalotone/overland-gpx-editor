@@ -1,0 +1,36 @@
+# Example unit. The package installs this under /usr/share/doc rather than
+# into systemd, because the user, the library directory and the listen address
+# are yours to choose. To use it:
+#
+#   sudo useradd --system --home /var/lib/gpx-editor --create-home gpx
+#   sudo cp /usr/share/doc/gpx-editor/gpx-editor.service /etc/systemd/system/
+#   sudo systemctl enable --now gpx-editor
+#
+# There is no authentication and CORS is open, so keep it on a trusted network
+# or put a reverse proxy with auth in front of it.
+
+[Unit]
+Description=GPX Editor
+Documentation=https://github.com/lalotone/overland-gpx-editor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/gpx-editor -addr 127.0.0.1:8000 \
+    -gpx-dir /var/lib/gpx-editor/gpx \
+    -elevation-tile-cache /var/lib/gpx-editor/tiles
+User=gpx
+Group=gpx
+WorkingDirectory=/var/lib/gpx-editor
+Restart=on-failure
+RestartSec=5s
+
+# It only needs to read its own library and cache directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gpx-editor
+
+[Install]
+WantedBy=multi-user.target

@@ -47,41 +47,16 @@ npm run dev         # frontend dev server (http://localhost:5173)
 
 ## Project Structure
 
-```
-src/
-├── App.tsx                       # Screens, state, wiring
-├── components/
-│   ├── ColoredTrack.tsx          # Full-resolution track, run-length coloured
-│   ├── ElevationProfile.tsx      # Profile chart, hover, range selection
-│   ├── MapLayers.tsx             # Base tiles, hillshade pane, terrain controls
-│   └── SplashScreen.tsx
-└── lib/                          # Pure logic — no DOM, no React
-    ├── types.ts
-    ├── geo.ts                    # Distance, elevation stats, smoothing, speed
-    ├── gpx.ts                    # DOMParser-based parse + GPX 1.1 writer
-    ├── edit.ts                   # Trim, split, stages, simplify, smooth
-    ├── elevation.ts              # Batched DEM lookups
-    ├── fuel.ts                   # Spanish official fuel prices (ES only)
-    ├── routing.ts                # Valhalla motorcycle costing + fallbacks
-    ├── surface.ts                # Per-segment surface via trace_attributes
-    ├── terrain.ts                # Layers and colour scales
-    └── poi.ts                    # Overpass fuel / water / campsite lookups
-scripts/verify.ts                 # Logic harness (npm run verify)
+The file tree, the embed/build pipeline and the HTTP API live in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Read it before moving anything
+between `src/lib/`, `src/components/` and `internal/server/`.
 
-main.go                           # Flags, wiring, graceful shutdown
-internal/server/
-├── server.go                     # Routes, CORS, embedded-frontend handler
-├── files.go                      # Track library: list/read/write/upload/delete
-└── elevation.go                  # DEM proxy with upstream-sized chunking
-web/embed.go                      # go:embed of web/dist
-web/dist/                         # Frontend build output (embedded, gitignored)
-```
+Two rules it is worth repeating here:
 
-Keep `lib/` free of React and DOM globals apart from `gpx.ts`, which needs
-`DOMParser` (the verify harness supplies one via jsdom).
-
-The backend is standard library only. Keep it that way unless there is a real
-reason — the point of the Go rewrite is one dependency-free binary.
+- Keep `src/lib/` free of React and DOM globals apart from `gpx.ts`, which
+  needs `DOMParser` (the verify harness supplies one via jsdom).
+- The backend is standard library only. Keep it that way unless there is a
+  real reason — the point of the Go rewrite is one dependency-free binary.
 
 ## Conventions
 

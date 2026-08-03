@@ -1,15 +1,25 @@
 BINARY  := gpx-editor
 # node_modules contains a stray Go package, so ./... is not usable here.
 PKGS    := . ./internal/... ./web/...
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build frontend backend test check lint clean run cross
+.PHONY: all build frontend backend deps test check lint clean run cross
 
 ## build: frontend + single self-contained binary
 all: build
 build: frontend backend
 
-frontend:
+## deps: install the npm toolchain (tsc, vite, eslint) if it is missing
+deps: node_modules
+
+# Everything frontend runs out of node_modules/.bin, so the targets that need
+# those tools depend on the tree existing. Without this a fresh clone fails
+# with a bare "tsc: command not found", which says nothing about the cause.
+# The touch keeps the directory newer than the lockfile so this runs once.
+node_modules: package-lock.json package.json
+	npm ci
+	@touch node_modules
+
+frontend: node_modules
 	npm run build
 
 backend:
@@ -20,13 +30,13 @@ run: build
 	./$(BINARY)
 
 ## test: Go tests plus the frontend logic harness
-test:
+test: node_modules
 	go test $(PKGS)
 	npm run verify
 
 ## check: everything CI would run
 check: test lint
-lint:
+lint: node_modules
 	go vet $(PKGS)
 	gofmt -l . | grep -v node_modules || true
 	npx tsc --noEmit

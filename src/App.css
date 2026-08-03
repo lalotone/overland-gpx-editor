@@ -770,6 +770,7 @@ html.dark .track-card:hover .track-card-tiles::after {
 
 .track-card-badge {
   position: absolute;
+  z-index: 2;
   top: 7px;
   left: 7px;
   padding: 2px 6px;
@@ -847,8 +848,14 @@ html.dark .track-card-loss strong { color: #f87171; }
   opacity: 0.85;
 }
 
+/*
+ * Above the thumbnail's SVG, which carries z-index:1. Without this the SVG
+ * paints over the button and swallows the click, so deleting a track opened
+ * it instead — the button was visible the whole time, just not reachable.
+ */
 .track-card-delete {
   position: absolute;
+  z-index: 2;
   top: 7px;
   right: 7px;
   display: flex;
@@ -2651,21 +2658,6 @@ html.dark .loading-overlay {
 .stat-item.stat-warn {
   border-color: #f59e0b;
   background: rgba(245, 158, 11, 0.10);
-}
-
-.inline-check {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.inline-check input {
-  accent-color: var(--accent);
-  cursor: pointer;
 }
 
 /* -- Route info extras ---------------------------------------------- */

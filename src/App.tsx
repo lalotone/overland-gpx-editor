@@ -502,7 +502,6 @@ function App() {
   const [surfaceApproximate, setSurfaceApproximate] = useState(false)
   const [surfaceLoading, setSurfaceLoading] = useState(false)
   const [surfaceError, setSurfaceError] = useState<string | null>(null)
-  const [exportWaypoints, setExportWaypoints] = useState(false)
   const [placeSearch, setPlaceSearch] = useState('')
   const [placeResults, setPlaceResults] = useState<{ display_name: string; lat: string; lon: string }[]>([])
   const [placeSearching, setPlaceSearching] = useState(false)
@@ -1464,21 +1463,12 @@ function App() {
       buildGPX({
         name,
         coordinates: creationCoordinates,
-        // Places of interest always travel with the file; the routing points
-        // only when asked for, since they are scaffolding rather than content.
-        waypoints: [
-          ...creationPins,
-          ...(exportWaypoints
-            ? creationWaypoints.map((w, i) => ({
-                lat: w.lat,
-                lon: w.lon,
-                elevation: w.elevation,
-                name: `WP ${i + 1}`,
-              }))
-            : []),
-        ],
+        // Only places of interest. The route points are scaffolding for the
+        // router — writing them as waypoints too just litters the file with
+        // markers nobody asked for.
+        waypoints: creationPins,
       }),
-    [creationCoordinates, creationWaypoints, creationPins, exportWaypoints],
+    [creationCoordinates, creationPins],
   )
 
   const handleSaveCreation = useCallback(async () => {
@@ -1511,6 +1501,21 @@ function App() {
     const name = saveFileName.trim() || 'Created Track'
     downloadGpx(creationGpx(name), toGpxFilename(name))
   }, [saveFileName, creationGpx, downloadGpx])
+
+  /** Wipe the route back to an empty map, staying on the planner. */
+  const clearCreation = useCallback(() => {
+    routeSeqRef.current++
+    setCreationWaypoints([])
+    setCreationPins([])
+    setWaypointMode(false)
+    setRoutedCoordinates([])
+    setRoutedDuration(null)
+    setRoutedEngine(null)
+    setElevationInterpolated(false)
+    setSurfaceSegments(null)
+    setSurfaceError(null)
+    setSaveFileName('')
+  }, [])
 
   const resetCreation = useCallback(() => {
     routeSeqRef.current++
@@ -2015,16 +2020,19 @@ function App() {
                     Save
                   </button>
                 </div>
-                <label className="inline-check" title="Also write your clicked waypoints into the file as POIs">
-                  <input
-                    type="checkbox"
-                    checked={exportWaypoints}
-                    onChange={e => setExportWaypoints(e.target.checked)}
-                  />
-                  POIs
-                </label>
-                <button className="btn btn-danger" onClick={resetCreation}>
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={clearCreation}
+                  disabled={creationWaypoints.length === 0 && creationPins.length === 0}
+                  title="Remove every point and start this track again"
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                    <path d="M15.14 3a2 2 0 00-1.41.59L3 14.32a2 2 0 000 2.83L6.85 21H12l9-9a2 2 0 000-2.83l-4.45-4.58A2 2 0 0015.14 3zM7.5 19.1L4.9 16.5l6-6 2.6 2.6-6 6z" />
+                  </svg>
+                  Clear
+                </button>
+                <button className="btn btn-danger btn-sm" onClick={resetCreation} title="Leave the planner">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
                     <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
                   </svg>
                   Discard

@@ -14,10 +14,10 @@ shipped as one self-contained binary.
 
 </div>
 
-<!--
-  A screenshot belongs here. Drop one in docs/ and reference it, e.g.:
-  <p align="center"><img src="docs/screenshot.png" alt="GPX Editor" width="900"></p>
--->
+<p align="center">
+  <img src="docs/screenshot.webp" width="900"
+       alt="Planning a dirt route in the Pyrenees: contour basemap with hillshade, the route coloured by surface, and a sidebar showing distance, elevation, a 100% unpaved surface breakdown and the route points.">
+</p>
 
 ---
 

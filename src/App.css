@@ -3211,3 +3211,56 @@ html.dark .leaflet-marker-shadow {
 .sidebar-section--grow .waypoint-list {
   scrollbar-gutter: stable;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Elevation tile download                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Sits over the map while terrain tiles for the visible area come down in
+ * the background. Deliberately quiet: the app stays usable throughout, since
+ * anything not yet cached is still fetched on demand.
+ */
+.tile-progress {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+  max-width: min(90%, 420px);
+  padding: 9px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+.tile-progress-label {
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.tile-progress-bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+/* Too wide an area to cache: a statement, not a progress bar. */
+.tile-progress--skipped {
+  color: var(--text-muted);
+}

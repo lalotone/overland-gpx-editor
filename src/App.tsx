@@ -78,6 +78,14 @@ const DEFAULT_SIMPLIFY_TARGET = 500
 /** How far off the route a fuel station still counts as reachable. */
 const FUEL_CORRIDOR_M = 3000
 
+interface TilePrefetch {
+  running: boolean
+  done: number
+  total: number
+  skipped?: boolean
+  reason?: string
+}
+
 interface Waypoint {
   id: number
   lat: number
@@ -91,6 +99,32 @@ const THUMBNAIL_POINTS = 140
 /* ------------------------------------------------------------------ */
 /*  Map helper components                                              */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Reports the visible bounds once the map stops moving, so the backend can
+ * pull elevation tiles for where you are working before you need them.
+ * Debounced: panning across a region should warm the place you land, not
+ * every viewport you crossed on the way.
+ */
+function ViewportReporter({ onSettle }: { onSettle: (b: L.LatLngBounds) => void }) {
+  const map = useMap()
+  useEffect(() => {
+    let timer: number | undefined
+    const report = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => onSettle(map.getBounds()), 700)
+    }
+    report()
+    map.on('moveend', report)
+    map.on('zoomend', report)
+    return () => {
+      window.clearTimeout(timer)
+      map.off('moveend', report)
+      map.off('zoomend', report)
+    }
+  }, [map, onSettle])
+  return null
+}
 
 function MapClickHandler({ onClick }: { onClick: (e: L.LeafletMouseEvent) => void }) {
   const map = useMap()
@@ -426,6 +460,9 @@ function App() {
   const [waypointMode, setWaypointMode] = useState(false)
   /** Places of interest placed while planning — not part of the routed line. */
   const [creationPins, setCreationPins] = useState<GpxWaypoint[]>([])
+  /** Background elevation-tile download for the visible area, when the
+      backend is serving elevation from tiles. */
+  const [tilePrefetch, setTilePrefetch] = useState<TilePrefetch | null>(null)
   const [selectionMode, setSelectionMode] = useState(false)
   const [selection, setSelection] = useState<TrimSelection | null>(null)
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null)
@@ -1122,6 +1159,58 @@ function App() {
       setElevationApiError(true)
     }
   }, [])
+
+  /*
+   * Elevation tiles for the area on screen.
+   *
+   * The backend answers `enabled: false` when it is not in tile mode, and we
+   * stop asking for the rest of the session — there is nothing to download
+   * and nothing to show.
+   */
+  const prefetchDisabledRef = useRef(false)
+  const pollRef = useRef<number | undefined>(undefined)
+
+  const pollPrefetch = useCallback(() => {
+    window.clearTimeout(pollRef.current)
+    pollRef.current = window.setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/elevation/prefetch`)
+        if (!res.ok) return
+        const p: TilePrefetch & { enabled: boolean } = await res.json()
+        if (!p.enabled) { prefetchDisabledRef.current = true; setTilePrefetch(null); return }
+        setTilePrefetch(p.running || p.skipped ? p : null)
+        if (p.running) pollPrefetch()
+      } catch {
+        // The download is best-effort; on-demand lookup still covers the route.
+        setTilePrefetch(null)
+      }
+    }, 400)
+  }, [])
+
+  const handleViewportSettle = useCallback(
+    async (bounds: L.LatLngBounds) => {
+      if (prefetchDisabledRef.current) return
+      try {
+        const res = await fetch(`${API_BASE}/elevation/prefetch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bbox: [bounds.getSouth(), bounds.getWest(), bounds.getNorth(), bounds.getEast()],
+          }),
+        })
+        if (!res.ok) return
+        const p: TilePrefetch & { enabled: boolean } = await res.json()
+        if (!p.enabled) { prefetchDisabledRef.current = true; return }
+        setTilePrefetch(p.running || p.skipped ? p : null)
+        if (p.running) pollPrefetch()
+      } catch {
+        // Backend unreachable — the app keeps working without it.
+      }
+    },
+    [pollPrefetch],
+  )
+
+  useEffect(() => () => window.clearTimeout(pollRef.current), [])
 
   const handleMapClick = useCallback(
     (e: L.LeafletMouseEvent) => {
@@ -1951,6 +2040,7 @@ function App() {
                 ref={map => { if (map) mapRef.current = map }}
               >
                 <MapTiles baseLayerId={baseLayer} hillshade={hillshade} hillshadeOpacity={hillshadeOpacity} />
+                <ViewportReporter onSettle={handleViewportSettle} />
                 {creationWaypoints.map(w => (
                   <Marker
                     key={w.id}
@@ -2080,6 +2170,30 @@ function App() {
 
               {creationWaypoints.length === 0 && (
                 <div className="map-overlay-hint">Click on the map to add waypoints</div>
+              )}
+
+              {tilePrefetch && (
+                <div className={`tile-progress${tilePrefetch.skipped ? ' tile-progress--skipped' : ''}`}>
+                  {tilePrefetch.skipped ? (
+                    <span className="tile-progress-label">Elevation tiles: {tilePrefetch.reason}</span>
+                  ) : (
+                    <>
+                      <span className="tile-progress-label">
+                        Downloading elevation tiles… {tilePrefetch.done}/{tilePrefetch.total}
+                      </span>
+                      <span className="tile-progress-track">
+                        <span
+                          className="tile-progress-bar"
+                          style={{
+                            width: `${tilePrefetch.total > 0
+                              ? Math.round((tilePrefetch.done / tilePrefetch.total) * 100)
+                              : 0}%`,
+                          }}
+                        />
+                      </span>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           </div>

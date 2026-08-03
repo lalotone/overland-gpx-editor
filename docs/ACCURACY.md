@@ -106,17 +106,31 @@ decimated — it always draws full-resolution geometry.
 
 ## Elevation sources
 
-Elevation comes either from the file's own `<ele>` tags or from the configured
-DEM service.
+Elevation comes either from the file's own `<ele>` tags or from one of three
+sources, in order of what the binary is told to use:
 
-- Default dataset is **`srtm30m`** — 30 m horizontal posting, roughly ±16 m
-  absolute vertical accuracy (SRTM's stated LE90 is better, but that is
-  open-terrain best case).
-- `srtm90m` works, but 90 m postings smooth out exactly the short, steep pitches
-  that matter on a trail. Avoid it for gradient work.
+| Source | Resolution | Notes |
+| --- | --- | --- |
+| Terrain tiles (`-elevation-tiles`) | ~30 m | Terrarium rasters read locally; caches to disk |
+| Self-hosted opentopodata (`-elevation-host`) | your dataset | Best if you already run one |
+| Open-Meteo (default) | 90 m | Copernicus GLO-90, public, no setup |
+
+- **90 m postings smooth out exactly the short, steep pitches that matter on a
+  trail.** This is not hypothetical. Sampling one point in the Pyrenees
+  (42.65, −0.04) gives **1920 m** from the 30 m tiles and **1539 m** from
+  Copernicus 90 m — a 380 m disagreement, because a 90 m cell averages across
+  ground that moves that much. Two points on flat terrain nearby agree to
+  within 2 m. Prefer a 30 m source for anything mountainous.
 - A DEM samples the **ground surface**. It does not know about bridges,
   tunnels, or embankments, and in forested terrain SRTM sits somewhere in the
   canopy rather than on the track.
+
+**Reading a raster is itself interpolation.** The tile provider samples
+bilinearly between the four surrounding posts, because nearest-neighbour would
+step the profile in ~14 m terraces that the slope maths would then read as
+walls. Every DEM service does the same internally, but it is worth stating
+plainly: between posts, the surface is a straight-line assumption, and no DEM
+knows what the ground does in the 30 m between two measurements.
 
 **Measured vs interpolated.** Planned routes fetch a real DEM reading for every
 point. Only past **6000 points** (`MAX_ELEVATION_LOOKUPS`) does the app query an

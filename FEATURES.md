@@ -163,8 +163,16 @@ the OSM fuel layer answers as before.
 - `POST /elevation/batch` chunks large lookups to the upstream DEM limit and
   stitches results back in order.
 - Elevation works with no setup: the public Open-Meteo API is the default
-  source, and a self-hosted opentopodata service takes over when
-  `-elevation-host` is set. Both are normalised to one response shape.
+  source, a self-hosted opentopodata service takes over when `-elevation-host`
+  is set, and `-elevation-tiles` reads ~30 m terrain-RGB rasters directly.
+  All three are normalised to one response shape.
+- **Offline elevation**: with `-elevation-tile-cache`, fetched terrain tiles
+  are kept on disk, so a corridor planned at home still profiles in the field
+  with no network.
+- **Tiles download ahead of use.** While planning, the terrain covering the
+  visible map is fetched in the background with a progress readout; pan
+  somewhere else and it follows. Areas too large to be worth caching are
+  reported rather than downloaded.
 - No third-party Go dependencies — standard library only.
 
 ---

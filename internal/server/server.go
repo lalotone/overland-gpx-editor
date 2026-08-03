@@ -22,6 +22,17 @@ type Config struct {
 	// ElevationDataset is used for requests that do not name one. Applies to
 	// ElevationHost only; Open-Meteo serves one dataset.
 	ElevationDataset string
+	// ElevationTiles reads elevation from terrain-RGB tiles instead of an
+	// elevation API. Takes precedence over ElevationHost and Open-Meteo.
+	ElevationTiles bool
+	// ElevationTileURL overrides the tile template ({z}/{x}/{y}).
+	ElevationTileURL string
+	// ElevationTileZoom sets the tile zoom, and with it the resolution and
+	// the bandwidth. 0 uses the default.
+	ElevationTileZoom int
+	// ElevationTileCache is a directory to keep fetched tiles in. Empty keeps
+	// them in memory only, so nothing survives a restart.
+	ElevationTileCache string
 	// Assets is the built frontend. When nil the server is API-only.
 	Assets fs.FS
 }
@@ -39,14 +50,22 @@ func New(cfg Config) (*Server, error) {
 	if err := os.MkdirAll(cfg.GPXDir, 0o755); err != nil {
 		return nil, err
 	}
+	// A DEM lookup of 100 points is not instant, but nothing about it should
+	// take half a minute either.
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	var tiles *tileStore
+	if cfg.ElevationTiles {
+		tiles = newTileStore(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, client)
+	}
+
 	s := &Server{
 		gpxDir: cfg.GPXDir,
 		elevation: &elevationProxy{
+			tiles:          tiles,
 			host:           strings.TrimSpace(cfg.ElevationHost),
 			defaultDataset: cfg.ElevationDataset,
-			// A DEM lookup of 100 points is not instant, but nothing about it
-			// should take half a minute either.
-			client: &http.Client{Timeout: 30 * time.Second},
+			client:         client,
 		},
 		assets: cfg.Assets,
 		mux:    http.NewServeMux(),
@@ -64,6 +83,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /upload", s.handleUpload)
 	s.mux.HandleFunc("GET /elevation", s.handleElevation)
 	s.mux.HandleFunc("POST /elevation/batch", s.handleElevationBatch)
+	s.mux.HandleFunc("POST /elevation/prefetch", s.handlePrefetch)
+	s.mux.HandleFunc("GET /elevation/prefetch", s.handlePrefetchStatus)
 	s.mux.Handle("/", s.assetHandler())
 }
 

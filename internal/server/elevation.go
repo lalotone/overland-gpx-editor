@@ -58,6 +58,10 @@ func (p point) String() string {
 }
 
 type elevationProxy struct {
+	// tiles reads elevation out of terrain-RGB rasters. When set it wins:
+	// it is opt-in, higher resolution than the default, and works offline
+	// once its cache is warm.
+	tiles *tileStore
 	// host is a self-hosted opentopodata-style service. Empty selects
 	// Open-Meteo.
 	host           string
@@ -65,10 +69,13 @@ type elevationProxy struct {
 	client         *http.Client
 }
 
-func (e *elevationProxy) usesOpenMeteo() bool { return e.host == "" }
+func (e *elevationProxy) usesOpenMeteo() bool { return e.tiles == nil && e.host == "" }
 
 // dataset reports the effective dataset name for a request.
 func (e *elevationProxy) dataset(requested string) string {
+	if e.tiles != nil {
+		return tileDataset
+	}
 	if e.usesOpenMeteo() {
 		return openMeteoDataset
 	}
@@ -81,6 +88,9 @@ func (e *elevationProxy) dataset(requested string) string {
 // lookup returns one elevation per point, in order. A nil entry means the
 // service had no value there — never a zero, which would read as sea level.
 func (e *elevationProxy) lookup(ctx context.Context, points []point, dataset string) ([]*float64, error) {
+	if e.tiles != nil {
+		return e.tiles.lookup(ctx, points)
+	}
 	if e.usesOpenMeteo() {
 		return e.lookupOpenMeteo(ctx, points)
 	}
@@ -344,4 +354,62 @@ func parseLocationItem(item json.RawMessage) (string, error) {
 		return point{lat: pair[0], lon: pair[1]}.String(), nil
 	}
 	return "", errors.New("each location must be \"lat,lon\" or [lat, lon]")
+}
+
+/* -- Tile prefetch ---------------------------------------------------- */
+
+type prefetchRequest struct {
+	// Bbox is [south, west, north, east] — the map's own getBounds order.
+	Bbox []float64 `json:"bbox"`
+}
+
+type prefetchResponse struct {
+	// Enabled is false when the server is not in tile mode, so the UI can
+	// stop asking rather than poll something that will never do anything.
+	Enabled bool `json:"enabled"`
+	prefetchProgress
+}
+
+// handlePrefetch warms the tile cache for the area the user is working in.
+func (s *Server) handlePrefetch(w http.ResponseWriter, r *http.Request) {
+	if s.elevation.tiles == nil {
+		writeJSON(w, http.StatusOK, prefetchResponse{Enabled: false})
+		return
+	}
+
+	var payload prefetchRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "Malformed JSON body")
+		return
+	}
+	if len(payload.Bbox) != 4 {
+		writeError(w, http.StatusBadRequest, "bbox must be [south, west, north, east]")
+		return
+	}
+	south, west, north, east := payload.Bbox[0], payload.Bbox[1], payload.Bbox[2], payload.Bbox[3]
+	if _, err := parsePoint(fmt.Sprint(south), fmt.Sprint(west)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := parsePoint(fmt.Sprint(north), fmt.Sprint(east)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, prefetchResponse{
+		Enabled:          true,
+		prefetchProgress: s.elevation.tiles.startPrefetch(south, west, north, east),
+	})
+}
+
+// handlePrefetchStatus is polled while a prefetch runs.
+func (s *Server) handlePrefetchStatus(w http.ResponseWriter, r *http.Request) {
+	if s.elevation.tiles == nil {
+		writeJSON(w, http.StatusOK, prefetchResponse{Enabled: false})
+		return
+	}
+	writeJSON(w, http.StatusOK, prefetchResponse{
+		Enabled:          true,
+		prefetchProgress: s.elevation.tiles.progress(),
+	})
 }

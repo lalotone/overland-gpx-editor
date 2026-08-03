@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,12 @@ func main() {
 		"self-hosted opentopodata-style DEM service; empty uses the public Open-Meteo API")
 	elevationDataset := flag.String("elevation-dataset", envOr("ELEVATION_DATASET", "srtm30m"),
 		"DEM dataset for -elevation-host when a request does not name one")
+	elevationTiles := flag.Bool("elevation-tiles", envOr("ELEVATION_TILES", "") != "",
+		"read elevation from terrain-RGB tiles (~30 m) instead of an elevation API; wins over -elevation-host")
+	tileZoom := flag.Int("elevation-tile-zoom", envInt("ELEVATION_TILE_ZOOM", 0),
+		"tile zoom: higher is finer and heavier (0 uses the default of 13, ~14 m/px)")
+	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", ""),
+		"directory to keep fetched terrain tiles in; set it to keep elevation working offline")
 	flag.Parse()
 
 	assets, hasUI := web.Assets()
@@ -36,10 +43,13 @@ func main() {
 	}
 
 	srv, err := server.New(server.Config{
-		GPXDir:           *gpxDir,
-		ElevationHost:    *elevationHost,
-		ElevationDataset: *elevationDataset,
-		Assets:           assets,
+		GPXDir:             *gpxDir,
+		ElevationHost:      *elevationHost,
+		ElevationDataset:   *elevationDataset,
+		ElevationTiles:     *elevationTiles,
+		ElevationTileZoom:  *tileZoom,
+		ElevationTileCache: *tileCache,
+		Assets:             assets,
 	})
 	if err != nil {
 		log.Fatalf("gpx-editor: %v", err)
@@ -55,7 +65,21 @@ func main() {
 	}
 
 	elevationSource := "Open-Meteo (public, Copernicus 90 m)"
-	if *elevationHost != "" {
+	switch {
+	case *elevationTiles:
+		zoom := *tileZoom
+		if zoom <= 0 {
+			zoom = 13
+		}
+		where := "memory only"
+		if *tileCache != "" {
+			where = "cached in " + *tileCache
+		}
+		elevationSource = fmt.Sprintf("terrain tiles z%d, %s", zoom, where)
+		if *elevationHost != "" {
+			log.Print("both -elevation-tiles and -elevation-host are set; tiles win")
+		}
+	case *elevationHost != "":
 		elevationSource = fmt.Sprintf("%s (%s)", *elevationHost, *elevationDataset)
 	}
 
@@ -82,6 +106,13 @@ func main() {
 	}
 	<-shutdown
 	log.Print("gpx-editor stopped")
+}
+
+func envInt(key string, fallback int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
+		return v
+	}
+	return fallback
 }
 
 func envOr(key, fallback string) string {

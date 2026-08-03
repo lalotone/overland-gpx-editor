@@ -89,12 +89,14 @@ Two rules it is worth repeating here:
 
 - **Backend**: same origin as the frontend in the built binary; `:8000` behind
   the Vite dev proxy. `VITE_API_BASE` overrides it for a remote backend.
-- **Elevation**: proxied via the backend, which picks the source — the public
-  Open-Meteo API (Copernicus 90 m, no setup) by default, or an
-  opentopodata-style service when `ELEVATION_HOST` is set, which is the better
-  data. Both are normalised to `{"results":[{"elevation":…}]}`, so the frontend
-  cannot tell them apart. `VITE_ELEVATION_API` adds an optional direct-from-
-  browser fallback and is empty by default.
+- **Elevation**: proxied via the backend, which picks the source — terrain-RGB
+  tiles with `-elevation-tiles` (~30 m, caches to disk, works offline), an
+  opentopodata-style service when `ELEVATION_HOST` is set, or the public
+  Open-Meteo API (Copernicus 90 m) by default. All three are normalised to
+  `{"results":[{"elevation":…}]}`, so the frontend cannot tell them apart, and
+  a point with no data comes back `null` — never `0`, which reads as sea level.
+  `VITE_ELEVATION_API` adds an optional direct-from-browser fallback and is
+  empty by default.
 - **Routing**: Valhalla at `valhalla1.openstreetmap.de`, `motorcycle` costing,
   falling back to `auto`/`bicycle` then OSRM if unsupported.
 - **Surface**: the same Valhalla instance's `/trace_attributes`, which rejects

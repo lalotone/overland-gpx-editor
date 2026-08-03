@@ -57,7 +57,8 @@ main.go                         Flags, wiring, graceful shutdown
 internal/server/
 ├── server.go                   Routes, CORS, embedded-frontend handler
 ├── files.go                    Track library: list/read/write/upload/delete
-└── elevation.go                DEM proxy with upstream-sized chunking
+├── elevation.go                DEM proxy with upstream-sized chunking
+└── elevation_tiles.go          Terrain-RGB tile reader, cache, interpolation
 web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
 
@@ -82,13 +83,30 @@ directory component; a name such as `../../etc/passwd` is refused with a 400
 before it reaches the filesystem. Writes go to a temp file and are renamed into
 place, so an interrupted save cannot leave a truncated track behind.
 
-**`elevation.go`** proxies to one of two DEM providers and normalises both to
-the same response shape, so the frontend cannot tell them apart:
+**`elevation.go`** proxies to one of three DEM providers and normalises them
+all to the same response shape, so the frontend cannot tell them apart:
 
 | Provider | When | Data |
 | --- | --- | --- |
-| Open-Meteo | default | Copernicus DEM GLO-90 |
+| Terrain tiles | `-elevation-tiles` | Terrarium rasters, ~30 m |
 | opentopodata | `-elevation-host` set | whatever you self-host |
+| Open-Meteo | default | Copernicus DEM GLO-90, 90 m |
+
+`elevation_tiles.go` is the odd one out: rather than asking a service per
+point it fetches 256x256 terrain-RGB tiles and reads the raster directly,
+interpolating bilinearly between posts. Tiles are deduplicated in flight (a
+batch of 100 points usually lands in a handful), held in a 128-tile LRU, and
+optionally written to disk — which is what lets elevation work with no
+network once a corridor is cached.
+
+The prefetch endpoints warm that cache ahead of use: while planning, the map
+reports its bounds once it settles and the server pulls the tiles covering
+them in the background. A newer request cancels the previous one, since the
+map has moved and the old area is no longer what anyone is looking at. Tile
+count grows with the square of how far you zoom out, so a request over
+`maxPrefetchTiles` is refused with a reason rather than quietly pulling
+hundreds of megabytes — on-demand lookup still covers whatever the route
+actually touches.
 
 Coordinates are parsed and range-checked before they reach an upstream URL, and
 requests are chunked to the 100-point limit both services impose, then stitched
@@ -108,6 +126,8 @@ back in order. A point the service has no value for comes back `null`, never
 | `DELETE /gpx/{name}` | Delete a track |
 | `GET /elevation?lat=&lon=&dataset=` | Single-point DEM lookup |
 | `POST /elevation/batch` | `{locations: "lat,lon\|lat,lon…", dataset}` — chunked and stitched |
+| `POST /elevation/prefetch` | `{bbox: [s,w,n,e]}` — warm the tile cache for an area, in the background |
+| `GET /elevation/prefetch` | Progress of the running prefetch, polled by the UI |
 | `GET /*` | The React app; unknown paths fall through to it |
 
 Errors come back as `{"detail": "…"}` with a matching status. CORS is open and

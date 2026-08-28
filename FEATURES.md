@@ -6,9 +6,9 @@ A route planner and track editor for offroad, overlanding and motorbike use.
 
 ## Terrain and topography
 
-- **Base maps** — OpenStreetMap, OpenTopoMap (contour lines + relief), CyclOSM
-  (renders track surface and grade clearly), Esri satellite imagery, Esri
-  shaded relief.
+- **Base maps** — OpenFreeMap vector maps, OpenTopoMap (contour lines + relief),
+  CyclOSM (renders track surface and grade clearly), Esri satellite imagery,
+  Esri shaded relief.
 - **Hillshade overlay** with adjustable strength, drawn in its own map pane
   above the base tiles and below the track. Works over satellite, where
   imagery alone flattens gullies and ridgelines out.

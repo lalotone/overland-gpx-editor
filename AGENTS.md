@@ -109,4 +109,5 @@ Two rules it is worth repeating here:
   Spanish-formatted: decimal commas in prices *and* coordinates, and an empty
   price means "not sold", never zero. `lib/poi.ts` prefers it over Overpass
   for fuel inside Spain and falls back to Overpass whenever it has nothing.
-- **Tiles**: OpenStreetMap, OpenTopoMap, CyclOSM, Esri imagery/relief/hillshade.
+- **Tiles**: OpenFreeMap vectors, OpenStreetMap thumbnails/WebGL fallback,
+  OpenTopoMap, CyclOSM, Esri imagery/relief/hillshade.

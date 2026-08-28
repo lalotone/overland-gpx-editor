@@ -1,7 +1,71 @@
-import { useState } from 'react'
-import { Pane, TileLayer } from 'react-leaflet'
+import { useEffect, useState } from 'react'
+import { maplibreGL } from '@maplibre/maplibre-gl-leaflet'
+import { Pane, TileLayer, useMap } from 'react-leaflet'
 import { BASE_LAYERS, HILLSHADE_LAYER, getBaseLayer } from '../lib/terrain'
-import type { ColorMode } from '../lib/terrain'
+import type { ColorMode, ThumbnailLayerDefinition } from '../lib/terrain'
+
+let webGL2Available: boolean | undefined
+
+function hasWebGL2(): boolean {
+  if (webGL2Available !== undefined) return webGL2Available
+  if (typeof document === 'undefined') return false
+
+  try {
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('webgl2')
+    context?.getExtension('WEBGL_lose_context')?.loseContext()
+    webGL2Available = context !== null
+  } catch {
+    webGL2Available = false
+  }
+
+  return webGL2Available
+}
+
+function VectorBaseLayer({
+  styleUrl,
+  attribution,
+  fallback,
+  onFallback,
+}: {
+  styleUrl: string
+  attribution: string
+  fallback: ThumbnailLayerDefinition
+  onFallback?: () => void
+}) {
+  const map = useMap()
+  const webGL2 = hasWebGL2()
+
+  useEffect(() => {
+    if (!webGL2) return
+
+    const layer = maplibreGL({
+      style: styleUrl,
+      attributionControl: false,
+    }).addTo(map)
+    map.attributionControl.addAttribution(attribution)
+
+    return () => {
+      map.attributionControl.removeAttribution(attribution)
+      if (map.hasLayer(layer)) map.removeLayer(layer)
+    }
+  }, [attribution, map, styleUrl, webGL2])
+
+  useEffect(() => {
+    if (!webGL2) onFallback?.()
+  }, [onFallback, webGL2])
+
+  if (webGL2) return null
+
+  return (
+    <TileLayer
+      url={fallback.url}
+      attribution={fallback.attribution}
+      maxZoom={fallback.maxZoom}
+      maxNativeZoom={fallback.maxZoom}
+    />
+  )
+}
 
 /**
  * Base tiles plus an optional hillshade relief overlay.
@@ -14,22 +78,34 @@ export function MapTiles({
   baseLayerId,
   hillshade,
   hillshadeOpacity,
+  onVectorFallback,
 }: {
   baseLayerId: string
   hillshade: boolean
   hillshadeOpacity: number
+  onVectorFallback?: () => void
 }) {
   const base = getBaseLayer(baseLayerId)
 
   return (
     <>
-      <TileLayer
-        key={base.id}
-        url={base.url}
-        attribution={base.attribution}
-        maxZoom={base.maxZoom}
-        maxNativeZoom={base.maxZoom}
-      />
+      {base.kind === 'vector' ? (
+        <VectorBaseLayer
+          key={base.id}
+          styleUrl={base.styleUrl}
+          attribution={base.attribution}
+          fallback={base.fallback}
+          onFallback={onVectorFallback}
+        />
+      ) : (
+        <TileLayer
+          key={base.id}
+          url={base.url}
+          attribution={base.attribution}
+          maxZoom={base.maxZoom}
+          maxNativeZoom={base.maxZoom}
+        />
+      )}
       {hillshade && (
         <Pane name="hillshade-pane" style={{ zIndex: 250 }}>
           <TileLayer
@@ -70,6 +146,7 @@ export function TerrainControls({
 }) {
   const [open, setOpen] = useState(false)
   const base = getBaseLayer(baseLayerId)
+  const vectorFallback = base.kind === 'vector' && !hasWebGL2()
 
   // Collapsed by default: the expanded panel is useful but covers a corner of
   // the map, which matters when you are reading terrain under it.
@@ -84,7 +161,7 @@ export function TerrainControls({
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <path d="M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z" />
         </svg>
-        <span className="terrain-fab-label">{base.label}</span>
+        <span className="terrain-fab-label">{vectorFallback ? 'OSM' : base.label}</span>
         {hillshade && <span className="terrain-fab-dot" title="Relief on" />}
       </button>
     )
@@ -140,6 +217,11 @@ export function TerrainControls({
       </div>
 
       {base.hasContours && <div className="terrain-row terrain-note">Contour lines included</div>}
+      {base.kind === 'vector' && (
+        <div className="terrain-row terrain-note">
+          {vectorFallback ? 'OSM raster fallback — WebGL2 unavailable' : 'OpenFreeMap vector'}
+        </div>
+      )}
 
       {colorMode && onColorMode && (
         <div className="terrain-row terrain-row--colormode">

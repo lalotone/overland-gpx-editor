@@ -48,7 +48,7 @@ import type { RoutingProfile } from './lib/routing'
 import { availableFuels, DEFAULT_FUEL_REFERENCE, fuelBandColors, FUEL_PRICE_BANDS } from './lib/fuel'
 import { fetchRouteSurface, summarizeSurface, surfaceDefinition } from './lib/surface'
 import type { SurfaceClass } from './lib/surface'
-import { altitudeColor, getBaseLayer, getSegmentColor } from './lib/terrain'
+import { altitudeColor, getSegmentColor, getThumbnailLayer } from './lib/terrain'
 import type { ColorMode } from './lib/terrain'
 import type { Coordinate, GpxWaypoint, Track } from './lib/types'
 
@@ -413,7 +413,10 @@ function App() {
 
   /* -- Terrain / map presentation ----------------------------------- */
 
-  const [baseLayer, setBaseLayer] = useState(() => localStorage.getItem('gpx-base-layer') ?? 'topo')
+  const [baseLayer, setBaseLayer] = useState(() => {
+    const stored = localStorage.getItem('gpx-base-layer')
+    return stored === 'osm' ? 'openfreemap' : stored ?? 'openfreemap'
+  })
   const [hillshade, setHillshade] = useState(() => localStorage.getItem('gpx-hillshade') !== 'off')
   const [hillshadeOpacity, setHillshadeOpacity] = useState(
     () => parseFloat(localStorage.getItem('gpx-hillshade-opacity') ?? '0.45'),
@@ -422,8 +425,8 @@ function App() {
     () => (localStorage.getItem('gpx-color-mode') as ColorMode) ?? 'slope',
   )
 
-  /** Library thumbnails use whichever base map the user reads the map in. */
-  const thumbnailLayer = useMemo(() => getBaseLayer(baseLayer), [baseLayer])
+  /** Vector maps use an image-tile fallback so each card stays lightweight. */
+  const thumbnailLayer = useMemo(() => getThumbnailLayer(baseLayer), [baseLayer])
 
   useEffect(() => { localStorage.setItem('gpx-base-layer', baseLayer) }, [baseLayer])
   useEffect(() => { localStorage.setItem('gpx-hillshade', hillshade ? 'on' : 'off') }, [hillshade])
@@ -508,6 +511,7 @@ function App() {
 
   const mapRef = useRef<L.Map | null>(null)
   const notifIdRef = useRef(0)
+  const vectorFallbackNotifiedRef = useRef(false)
   const routeSeqRef = useRef(0)
 
   /* -- Notifications ------------------------------------------------ */
@@ -521,6 +525,15 @@ function App() {
   const dismissNotification = useCallback((id: number) => {
     setNotifications(prev => prev.filter(n => n.id !== id))
   }, [])
+
+  const notifyVectorFallback = useCallback(() => {
+    if (vectorFallbackNotifiedRef.current) return
+    vectorFallbackNotifiedRef.current = true
+    notify(
+      'WebGL2 is unavailable, so the map is using OSM raster tiles. Enable WebGL2 or use a WebGL2-capable browser for OpenFreeMap vectors.',
+      'info',
+    )
+  }, [notify])
 
   /* -- Saved files -------------------------------------------------- */
 
@@ -2045,11 +2058,17 @@ function App() {
               <MapContainer
                 center={[41.65, -0.88]}
                 zoom={9}
+                minZoom={1}
                 style={{ width: '100%', height: '100%' }}
                 scrollWheelZoom
                 ref={map => { if (map) mapRef.current = map }}
               >
-                <MapTiles baseLayerId={baseLayer} hillshade={hillshade} hillshadeOpacity={hillshadeOpacity} />
+                <MapTiles
+                  baseLayerId={baseLayer}
+                  hillshade={hillshade}
+                  hillshadeOpacity={hillshadeOpacity}
+                  onVectorFallback={notifyVectorFallback}
+                />
                 <ViewportReporter onSettle={handleViewportSettle} />
                 {creationWaypoints.map(w => (
                   <Marker
@@ -2502,10 +2521,16 @@ function App() {
             <MapContainer
               center={[currentTrack.coordinates[0]?.lat ?? 0, currentTrack.coordinates[0]?.lon ?? 0]}
               zoom={13}
+              minZoom={1}
               style={{ width: '100%', flex: 1 }}
               ref={map => { if (map) mapRef.current = map }}
             >
-              <MapTiles baseLayerId={baseLayer} hillshade={hillshade} hillshadeOpacity={hillshadeOpacity} />
+              <MapTiles
+                baseLayerId={baseLayer}
+                hillshade={hillshade}
+                hillshadeOpacity={hillshadeOpacity}
+                onVectorFallback={notifyVectorFallback}
+              />
               <MapClickHandler onClick={handleViewMapClick} />
 
               <ColoredTrack

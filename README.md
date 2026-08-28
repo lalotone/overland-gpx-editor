@@ -185,9 +185,9 @@ bundle at build time.
 
 Full detail in **[FEATURES.md](FEATURES.md)**. In brief:
 
-**Terrain** — OpenStreetMap / OpenTopoMap / CyclOSM / Esri satellite and shaded
-relief, plus a hillshade overlay that works over any base. Track colouring by
-gradient or altitude. Live ground elevation under the cursor.
+**Terrain** — OpenFreeMap vector maps / OpenTopoMap / CyclOSM / Esri satellite
+and shaded relief, plus a hillshade overlay that works over any base. Track
+colouring by gradient or altitude. Live ground elevation under the cursor.
 
 **Analysis** — distance, min/max altitude, gain/loss, moving time and average
 moving speed from recorded timestamps, longest gap without fuel.
@@ -249,7 +249,8 @@ All are public and keyless. Attribution is rendered on the map by Leaflet.
 
 | Service | Used for |
 | --- | --- |
-| [OpenStreetMap](https://www.openstreetmap.org/copyright) | Base map — see the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) |
+| [OpenFreeMap](https://openfreemap.org) | Vector base map (OpenStreetMap data) |
+| [OpenStreetMap](https://www.openstreetmap.org/copyright) | Raster library thumbnails and non-WebGL fallback — see the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) |
 | [OpenTopoMap](https://opentopomap.org) | Contour base map (CC-BY-SA, low volume only) |
 | [CyclOSM](https://www.cyclosm.org) | Surface/grade base map |
 | Esri ArcGIS | Satellite, relief, hillshade (attribution required) |

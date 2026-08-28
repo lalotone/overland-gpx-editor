@@ -87,6 +87,7 @@ func newElevationServer(t *testing.T, dem *fakeDEM) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestServer(t, s)
 	return s
 }
 
@@ -102,6 +103,7 @@ func newOpenMeteoServer(t *testing.T, dem *fakeDEM) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestServer(t, s)
 	return s
 }
 
@@ -345,6 +347,7 @@ func TestOpenMeteoErrorBodyIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestServer(t, s)
 
 	rec := postBatch(t, s, `{"locations":"42.5,-0.4"}`)
 	if rec.Code != http.StatusBadGateway {

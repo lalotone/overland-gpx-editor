@@ -27,7 +27,17 @@ func newTestServer(t *testing.T, assets ...fstest.MapFS) *Server {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	cleanupTestServer(t, s)
 	return s
+}
+
+func cleanupTestServer(t *testing.T, s *Server) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 }
 
 func do(t *testing.T, s *Server, method, target string, body io.Reader) *httptest.ResponseRecorder {
@@ -58,6 +68,7 @@ func TestConfigEndpoint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			cleanupTestServer(t, s)
 
 			rec := do(t, s, http.MethodGet, "/config", nil)
 			if rec.Code != http.StatusOK {
@@ -79,8 +90,7 @@ func TestConfigEndpoint(t *testing.T) {
 	}
 }
 
-func TestSafeGPXPathRejectsEscapes(t *testing.T) {
-	dir := "/library"
+func TestSafeGPXFilenameRejectsEscapes(t *testing.T) {
 	bad := []string{
 		"../../etc/passwd.gpx",
 		"../secret.gpx",
@@ -93,19 +103,19 @@ func TestSafeGPXPathRejectsEscapes(t *testing.T) {
 		"track.gpx\x00.txt",
 	}
 	for _, name := range bad {
-		if got, err := safeGPXPath(dir, name); err == nil {
-			t.Errorf("safeGPXPath(%q) = %q, want error", name, got)
+		if got, err := safeGPXFilename(name); err == nil {
+			t.Errorf("safeGPXFilename(%q) = %q, want error", name, got)
 		}
 	}
 
 	for _, name := range []string{"track.gpx", "Mountain Route.GPX", "2020-01-01_09-30_Wed.gpx"} {
-		got, err := safeGPXPath(dir, name)
+		got, err := safeGPXFilename(name)
 		if err != nil {
-			t.Errorf("safeGPXPath(%q): unexpected error %v", name, err)
+			t.Errorf("safeGPXFilename(%q): unexpected error %v", name, err)
 			continue
 		}
-		if want := filepath.Join(dir, name); got != want {
-			t.Errorf("safeGPXPath(%q) = %q, want %q", name, got, want)
+		if got != name {
+			t.Errorf("safeGPXFilename(%q) = %q", name, got)
 		}
 	}
 }
@@ -125,6 +135,64 @@ func TestTraversalDeleteIsRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatalf("file outside the library was deleted: %v", err)
+	}
+}
+
+func TestGPXRootRejectsSymlinkEscape(t *testing.T) {
+	s := newTestServer(t)
+	outside := filepath.Join(t.TempDir(), "outside.gpx")
+	const secret = "outside the GPX directory"
+	if err := os.WriteFile(outside, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(s.gpxDir, "leak.gpx")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rec := do(t, s, http.MethodGet, "/gpx/leak.gpx", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET symlink status = %d, want 404 (%s)", rec.Code, rec.Body)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+		t.Fatal("GET disclosed a file outside the GPX library")
+	}
+
+	rec = do(t, s, http.MethodGet, "/files", nil)
+	if bytes.Contains(rec.Body.Bytes(), []byte("leak.gpx")) {
+		t.Fatal("library listing included an escaping symlink")
+	}
+}
+
+func TestSaveReplacesSymlinkWithoutFollowingIt(t *testing.T) {
+	s := newTestServer(t)
+	outside := filepath.Join(t.TempDir(), "outside.gpx")
+	const original = "<gpx><name>outside</name></gpx>"
+	const replacement = "<gpx><name>inside</name></gpx>"
+	if err := os.WriteFile(outside, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(s.gpxDir, "route.gpx")
+	if err := os.Symlink(outside, inside); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rec := do(t, s, http.MethodPost, "/gpx/route.gpx", bytes.NewBufferString(replacement))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	gotOutside, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotOutside) != original {
+		t.Fatalf("save followed symlink and replaced outside file: %q", gotOutside)
+	}
+	gotInside, err := os.ReadFile(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotInside) != replacement {
+		t.Fatalf("saved file = %q, want %q", gotInside, replacement)
 	}
 }
 
@@ -171,22 +239,37 @@ func TestSaveRejectsEmptyBody(t *testing.T) {
 	}
 }
 
-func TestUpload(t *testing.T) {
-	s := newTestServer(t)
-
+func newUploadRequest(t *testing.T, filename, content string) *http.Request {
+	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	part, err := mw.CreateFormFile("file", "morning-loop.gpx")
+	part, err := mw.CreateFormFile("file", filename)
 	if err != nil {
 		t.Fatal(err)
 	}
-	part.Write([]byte("<gpx/>"))
-	mw.Close()
+	if _, err := part.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/upload", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return req
+}
+
+func uploadFile(t *testing.T, s *Server, filename, content string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := newUploadRequest(t, filename, content)
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestUpload(t *testing.T) {
+	s := newTestServer(t)
+	rec := uploadFile(t, s, "morning-loop.gpx", "<gpx/>")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
@@ -197,19 +280,108 @@ func TestUpload(t *testing.T) {
 	}
 }
 
-func TestUploadRejectsNonGPX(t *testing.T) {
+func TestUploadRejectsOversizedBody(t *testing.T) {
 	s := newTestServer(t)
-
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	part, _ := mw.CreateFormFile("file", "../evil.sh")
-	part.Write([]byte("rm -rf /"))
-	mw.Close()
-
-	req := httptest.NewRequest(http.MethodPost, "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req := httptest.NewRequest(http.MethodPost, "/upload", nil)
+	req.ContentLength = maxUploadBytes + 1
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", rec.Code, rec.Body)
+	}
+}
+
+func TestUploadDoesNotFollowSymlink(t *testing.T) {
+	s := newTestServer(t)
+	outside := filepath.Join(t.TempDir(), "outside.gpx")
+	const original = "<gpx><name>outside</name></gpx>"
+	if err := os.WriteFile(outside, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(s.gpxDir, "route.gpx")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rec := uploadFile(t, s, "route.gpx", "<gpx><name>replacement</name></gpx>")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	content, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != original {
+		t.Fatalf("upload followed symlink and replaced outside file: %q", content)
+	}
+}
+
+func TestUploadDoesNotReplaceExistingFile(t *testing.T) {
+	s := newTestServer(t)
+	path := filepath.Join(s.gpxDir, "route.gpx")
+	const original = "<gpx><metadata><name>original</name></metadata></gpx>"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := uploadFile(t, s, "route.gpx", "<gpx><metadata><name>replacement</name></metadata></gpx>")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(saved) != original {
+		t.Fatalf("existing file was replaced: %q", saved)
+	}
+}
+
+func TestConcurrentUploadsDoNotReplace(t *testing.T) {
+	s := newTestServer(t)
+	requests := []*http.Request{
+		newUploadRequest(t, "route.gpx", "<gpx><name>first</name></gpx>"),
+		newUploadRequest(t, "route.gpx", "<gpx><name>second</name></gpx>"),
+	}
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	for _, req := range requests {
+		go func(req *http.Request) {
+			<-start
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			results <- rec.Code
+		}(req)
+	}
+	close(start)
+
+	succeeded, conflicted := 0, 0
+	for range 2 {
+		switch status := <-results; status {
+		case http.StatusOK:
+			succeeded++
+		case http.StatusConflict:
+			conflicted++
+		default:
+			t.Fatalf("upload status = %d, want 200 or 409", status)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("succeeded = %d, conflicted = %d; want 1 each", succeeded, conflicted)
+	}
+	content, err := os.ReadFile(filepath.Join(s.gpxDir, "route.gpx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := "<gpx><name>first</name></gpx>"
+	second := "<gpx><name>second</name></gpx>"
+	if string(content) != first && string(content) != second {
+		t.Fatalf("created partial or unexpected content: %q", content)
+	}
+}
+
+func TestUploadRejectsNonGPX(t *testing.T) {
+	s := newTestServer(t)
+	rec := uploadFile(t, s, "../evil.sh", "rm -rf /")
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)

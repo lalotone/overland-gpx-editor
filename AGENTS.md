@@ -74,12 +74,16 @@ Two rules it is worth repeating here:
   Deriving the filename from `<name>` forks a second file on every save, and
   tracks that share a `<name>` (four of the sample library are "Created Track")
   collapse onto one filename, silently overwriting each other.
+- **Opening a local file is not permission to replace a library file.**
+  `POST /upload` is create-only and returns 409 when the filename exists;
+  explicit saves through `/gpx/{filename}` keep their replace semantics.
 - **The frontend must keep working with no backend.** Library, upload and
   elevation calls are all best-effort; a dropped GPX file still parses and
   displays. Do not turn a backend failure into a dead screen.
 - **Treat every filename from the network as hostile.** Anything touching the
-  library goes through `safeGPXPath`, which refuses directory components and
-  non-`.gpx` names. There is no authentication in front of it.
+  library goes through `safeGPXFilename`, which refuses directory components
+  and non-`.gpx` names, then through `os.Root` so symlinks cannot escape
+  `GPX_DIR`. There is no authentication in front of it.
 - **Never assume an untagged surface is sealed.** Edges with no OSM `surface`
   tag are reported as `unknown` and counted towards neither the paved nor the
   unpaved share — rolling them into either invents a number the data does not

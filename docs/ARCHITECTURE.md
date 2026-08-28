@@ -73,16 +73,19 @@ gpx/                            Local track library (gitignored)
 
 ## Backend
 
-**No third-party dependencies.** Routing is `http.ServeMux` with Go 1.22 method
-patterns (`GET /gpx/{filename}`), and `go.mod` has an empty require block.
+**No third-party dependencies.** Routing is `http.ServeMux` with method patterns
+(`GET /gpx/{filename}`), and `go.mod` has an empty require block. Go 1.25 is the
+minimum because the library uses the traversal-resistant `os.Root` file APIs.
 Keep it that way unless there is a real reason — the point of the Go rewrite is
 one dependency-free binary.
 
 **`files.go`** is a track library over a directory. Every filename arriving from
-the network goes through `safeGPXPath`, which requires a bare `*.gpx` with no
-directory component; a name such as `../../etc/passwd` is refused with a 400
-before it reaches the filesystem. Writes go to a temp file and are renamed into
-place, so an interrupted save cannot leave a truncated track behind.
+the network goes through `safeGPXFilename`, which requires a bare `*.gpx` with no
+directory component; a name such as `../../etc/passwd` is refused with a 400.
+Every filesystem operation then goes through `os.Root`, so a symlink inside the
+library cannot escape it. Saves use a rooted temp file and rename, so an
+interrupted save cannot leave a truncated track behind. Uploads use exclusive
+creation and return 409 rather than replacing an existing filename.
 
 **`elevation.go`** proxies to one of three DEM providers and normalises them
 all to the same response shape, so the frontend cannot tell them apart:
@@ -123,7 +126,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /files` | Track library listing |
 | `GET /gpx/{name}` | Read a track |
 | `PUT` / `POST /gpx/{name}` | Write a track (atomic replace) |
-| `POST /upload` | Multipart upload, field `file` |
+| `POST /upload` | Create-only multipart upload, field `file`; returns 409 when the filename exists |
 | `DELETE /gpx/{name}` | Delete a track |
 | `GET /elevation?lat=&lon=&dataset=` | Single-point DEM lookup |
 | `POST /elevation/batch` | `{locations: "lat,lon\|lat,lon…", dataset}` — chunked and stitched |

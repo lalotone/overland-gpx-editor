@@ -279,6 +279,7 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestServer(t, s)
 
 	rec := postBatch(t, s, `{"locations":"42.0,-0.5|42.001,-0.501"}`)
 	if rec.Code != http.StatusOK {
@@ -383,6 +384,7 @@ func TestConfiguredHostWinsOverTiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestServer(t, s)
 
 	rec := postBatch(t, s, `{"locations":"42.0,-0.5"}`)
 	if rec.Code != http.StatusOK {
@@ -433,6 +435,7 @@ func TestPrefetchEndpointValidatesBbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestServer(t, s)
 	for _, body := range []string{`{}`, `{"bbox":[1,2]}`, `{"bbox":[95,0,96,1]}`, `nonsense`} {
 		rec := do(t, s, http.MethodPost, "/elevation/prefetch", strings.NewReader(body))
 		if rec.Code != http.StatusBadRequest {

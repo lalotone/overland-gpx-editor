@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -45,6 +46,8 @@ const defaultNominatimURL = "https://nominatim.openstreetmap.org"
 // Server is an http.Handler exposing the whole app.
 type Server struct {
 	gpxDir       string
+	gpxRoot      *os.Root
+	gpxMu        sync.RWMutex
 	elevation    *elevationProxy
 	nominatimURL string
 	assets       fs.FS
@@ -54,6 +57,10 @@ type Server struct {
 // New validates cfg, creates the GPX directory and returns the handler.
 func New(cfg Config) (*Server, error) {
 	if err := os.MkdirAll(cfg.GPXDir, 0o755); err != nil {
+		return nil, err
+	}
+	gpxRoot, err := os.OpenRoot(cfg.GPXDir)
+	if err != nil {
 		return nil, err
 	}
 	// A DEM lookup of 100 points is not instant, but nothing about it should
@@ -73,7 +80,8 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		gpxDir: cfg.GPXDir,
+		gpxDir:  cfg.GPXDir,
+		gpxRoot: gpxRoot,
 		elevation: &elevationProxy{
 			tiles:          tiles,
 			host:           strings.TrimSpace(cfg.ElevationHost),
@@ -86,6 +94,14 @@ func New(cfg Config) (*Server, error) {
 	}
 	s.routes()
 	return s, nil
+}
+
+// Close releases the directory handle used to confine library operations.
+// Call it after the HTTP server has stopped accepting requests.
+func (s *Server) Close() error {
+	s.gpxMu.Lock()
+	defer s.gpxMu.Unlock()
+	return s.gpxRoot.Close()
 }
 
 func (s *Server) routes() {

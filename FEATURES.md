@@ -151,7 +151,8 @@ the OSM fuel layer answers as before.
   segments), `<rte>` route files, and file-level `<wpt>` waypoints.
 - **Writing** GPX 1.1 with proper namespace declarations, XML escaping, and
   preservation of per-point elevation, timestamps and waypoints.
-- Upload by drag-and-drop or picker; save to and load from the backend library.
+- Upload by drag-and-drop or picker; existing library files are never silently
+  replaced by a local file with the same name.
 
 ## Backend (Go, `internal/server`)
 
@@ -159,8 +160,11 @@ the OSM fuel layer answers as before.
   and served from the same origin as the API, so deploying is one file plus a
   directory of tracks.
 - GPX library: list, read, write, upload, delete — all filename-sanitised
-  against path traversal. Saves are atomic, so an interrupted write cannot
-  leave a truncated track in the library.
+  against path traversal. Saves are atomic, and uploads are create-only, so an
+  interrupted write or duplicate local filename cannot damage an existing
+  track. Tracks default to the `gpx` subdirectory of the XDG data directory;
+  elevation tiles default to the `tiles` subdirectory of the XDG cache
+  directory.
 - `POST /elevation/batch` chunks large lookups to the upstream DEM limit and
   stitches results back in order.
 - Elevation works with no setup: ~30 m terrain-RGB tiles are the default, a

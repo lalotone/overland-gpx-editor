@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,7 +28,7 @@ var version = "dev"
 func main() {
 	addr := flag.String("addr", envOr("ADDR", ":8000"),
 		"address to listen on")
-	gpxDir := flag.String("gpx-dir", envOr("GPX_DIR", "gpx"),
+	gpxDir := flag.String("gpx-dir", envOr("GPX_DIR", defaultGPXDir()),
 		"directory holding the track library")
 	elevationHost := flag.String("elevation-host", envOr("ELEVATION_HOST", ""),
 		"self-hosted opentopodata-style DEM service; empty uses tiles or Open-Meteo")
@@ -37,7 +38,7 @@ func main() {
 		"read elevation from terrain-RGB tiles (~30 m); -elevation-tiles=false falls back to the Open-Meteo API")
 	tileZoom := flag.Int("elevation-tile-zoom", envInt("ELEVATION_TILE_ZOOM", 0),
 		"tile zoom: higher is finer and heavier (0 uses the default of 13, ~14 m/px)")
-	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", "tiles"),
+	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", defaultTileCacheDir()),
 		"directory to keep fetched terrain tiles in, so elevation keeps working offline")
 	nominatimURL := flag.String("nominatim-url", envOr("NOMINATIM_URL", "https://nominatim.openstreetmap.org"),
 		"Nominatim-compatible place-search URL exposed to the frontend")
@@ -67,6 +68,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("gpx-editor: %v", err)
 	}
+	defer srv.Close()
 
 	httpSrv := &http.Server{
 		Addr:    *addr,
@@ -143,6 +145,28 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func defaultGPXDir() string {
+	if base := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(base) {
+		return filepath.Join(base, "overland", "gpx")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "gpx"
+	}
+	return filepath.Join(home, ".local", "share", "overland", "gpx")
+}
+
+func defaultTileCacheDir() string {
+	if base := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(base) {
+		return filepath.Join(base, "overland", "tiles")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "tiles"
+	}
+	return filepath.Join(home, ".cache", "overland", "tiles")
 }
 
 func logRequests(next http.Handler) http.Handler {

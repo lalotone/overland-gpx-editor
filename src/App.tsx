@@ -643,8 +643,13 @@ function App() {
         try {
           const formData = new FormData()
           formData.append('file', gpxFile)
-          await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData })
-          loadSavedFiles()
+          const response = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData })
+          if (response.ok) {
+            loadSavedFiles()
+          } else if (response.status === 409) {
+            loadSavedFiles()
+            notify(`${gpxFile.name} is already in the library. Opened the local copy without replacing it.`, 'info')
+          }
         } catch {
           // Backend unavailable.
         }

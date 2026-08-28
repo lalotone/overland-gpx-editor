@@ -7,10 +7,11 @@
  * linearly interpolated in between — that interpolation was then written into
  * the saved GPX as if it were measured. We fetch every point instead.
  *
- * Calls go through the backend proxy, which picks the DEM source: the public
- * Open-Meteo API by default, or a self-hosted opentopodata instance when one
- * is configured. A direct browser call is the fallback, and only exists for
- * installs that set VITE_ELEVATION_API.
+ * Calls go through the backend proxy, which picks the DEM source: cached
+ * terrain tiles by default, the public Open-Meteo API when tiles are disabled,
+ * or a self-hosted opentopodata instance when one is configured. A direct
+ * browser call is the fallback, and only exists for installs that set
+ * VITE_ELEVATION_API.
  */
 
 import type { Coordinate } from './types'

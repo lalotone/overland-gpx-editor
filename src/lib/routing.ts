@@ -9,9 +9,15 @@
  */
 
 import type { Coordinate } from './types'
+import { createRateLimitedFetch } from './rateLimit'
 
 export const VALHALLA_API = 'https://valhalla1.openstreetmap.de'
 const OSRM_API = 'https://router.project-osrm.org'
+export const FOSSGIS_REQUEST_INTERVAL_MS = 1000
+
+// Both hosts are operated by FOSSGIS. Its public routing policy permits one
+// request per second and scripts must keep to one connection.
+export const fetchFossgis = createRateLimitedFetch(FOSSGIS_REQUEST_INTERVAL_MS)
 
 export type RoutingProfile = 'road' | 'mixed' | 'trail'
 
@@ -113,7 +119,7 @@ async function valhallaRoute(
   costing: ValhallaCosting,
   signal?: AbortSignal,
 ): Promise<RouteResult | null> {
-  const res = await fetch(`${VALHALLA_API}/route`, {
+  const res = await fetchFossgis(`${VALHALLA_API}/route`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -145,7 +151,7 @@ async function valhallaRoute(
 
 async function osrmRoute(waypoints: Coordinate[], signal?: AbortSignal): Promise<RouteResult | null> {
   const path = waypoints.map(w => `${w.lon.toFixed(6)},${w.lat.toFixed(6)}`).join(';')
-  const res = await fetch(
+  const res = await fetchFossgis(
     `${OSRM_API}/route/v1/driving/${path}?overview=full&geometries=geojson`,
     { signal },
   )

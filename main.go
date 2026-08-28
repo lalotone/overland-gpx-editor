@@ -30,7 +30,7 @@ func main() {
 	gpxDir := flag.String("gpx-dir", envOr("GPX_DIR", "gpx"),
 		"directory holding the track library")
 	elevationHost := flag.String("elevation-host", envOr("ELEVATION_HOST", ""),
-		"self-hosted opentopodata-style DEM service; empty uses the public Open-Meteo API")
+		"self-hosted opentopodata-style DEM service; empty uses tiles or Open-Meteo")
 	elevationDataset := flag.String("elevation-dataset", envOr("ELEVATION_DATASET", "srtm30m"),
 		"DEM dataset for -elevation-host when a request does not name one")
 	elevationTiles := flag.Bool("elevation-tiles", envBool("ELEVATION_TILES", true),
@@ -39,6 +39,8 @@ func main() {
 		"tile zoom: higher is finer and heavier (0 uses the default of 13, ~14 m/px)")
 	tileCache := flag.String("elevation-tile-cache", envOr("ELEVATION_TILE_CACHE", "tiles"),
 		"directory to keep fetched terrain tiles in, so elevation keeps working offline")
+	nominatimURL := flag.String("nominatim-url", envOr("NOMINATIM_URL", "https://nominatim.openstreetmap.org"),
+		"Nominatim-compatible place-search URL exposed to the frontend")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -59,6 +61,7 @@ func main() {
 		ElevationTiles:     *elevationTiles,
 		ElevationTileZoom:  *tileZoom,
 		ElevationTileCache: *tileCache,
+		NominatimURL:       *nominatimURL,
 		Assets:             assets,
 	})
 	if err != nil {
@@ -74,7 +77,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	elevationSource := "Open-Meteo (public, Copernicus 90 m)"
+	elevationSource := "Open-Meteo (free non-commercial API, Copernicus 90 m)"
 	switch {
 	case *elevationHost != "":
 		elevationSource = fmt.Sprintf("%s (%s)", *elevationHost, *elevationDataset)

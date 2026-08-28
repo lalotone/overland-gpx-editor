@@ -60,12 +60,13 @@ Applies to any loaded track, with undo:
   - **Trail** — maximum offroad, narrow tracks and paths where legal
   Falls back to `auto`/`bicycle`, then OSRM, if the server lacks motorcycle
   costing — and says so, because travel time then models a different vehicle.
-- Requests are debounced and cancelled, so a slow earlier response can never
-  overwrite a newer route.
+- Requests are debounced, cancelled, and serialized at one per second across
+  routing and surface calls, so they respect the public FOSSGIS service limit.
 - Elevation is fetched for **every** routed point in batched, concurrent
   requests. Only past ~6000 points is it sampled and interpolated, and that
   is reported rather than silently written to file.
-- Place search via Nominatim.
+- Place search via Nominatim, throttled to one request per second and cached for
+  the session. The provider is runtime-configurable with `NOMINATIM_URL`.
 
 ## Surface
 
@@ -162,10 +163,10 @@ the OSM fuel layer answers as before.
   leave a truncated track in the library.
 - `POST /elevation/batch` chunks large lookups to the upstream DEM limit and
   stitches results back in order.
-- Elevation works with no setup: the public Open-Meteo API is the default
-  source, a self-hosted opentopodata service takes over when `-elevation-host`
-  is set, and `-elevation-tiles` reads ~30 m terrain-RGB rasters directly.
-  All three are normalised to one response shape.
+- Elevation works with no setup: ~30 m terrain-RGB tiles are the default, a
+  self-hosted opentopodata service takes over when `-elevation-host` is set,
+  and disabling tiles selects the public Open-Meteo API. All three are
+  normalised to one response shape.
 - **Offline elevation**: with `-elevation-tile-cache`, fetched terrain tiles
   are kept on disk, so a corridor planned at home still profiles in the field
   with no network.

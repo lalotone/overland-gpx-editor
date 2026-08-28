@@ -14,7 +14,7 @@
  */
 
 import { haversineDistance } from './geo'
-import { motorcycleCosting, VALHALLA_API } from './routing'
+import { fetchFossgis, motorcycleCosting, VALHALLA_API } from './routing'
 import type { RoutingProfile } from './routing'
 import type { Coordinate } from './types'
 
@@ -112,8 +112,6 @@ export function classifySurface(surface: string | undefined): SurfaceClass {
  */
 const MAX_TRACE_KM = 150
 const MAX_TRACE_POINTS = 5000
-/** Public instance — chunks go two at a time rather than all at once. */
-const CONCURRENCY = 2
 /*
  * How far the matched shape may drift from the one we sent before the result
  * is called approximate: a few points for a chunk that ends mid-edge, or 1%
@@ -188,7 +186,7 @@ async function traceChunk(
   signal?: AbortSignal,
 ): Promise<{ classes: SurfaceClass[]; approximate: boolean }> {
   const costing = motorcycleCosting(profile)
-  const res = await fetch(`${VALHALLA_API}/trace_attributes`, {
+  const res = await fetchFossgis(`${VALHALLA_API}/trace_attributes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -278,16 +276,10 @@ export async function fetchRouteSurface(
   const segments: SurfaceClass[] = new Array(coordinates.length - 1).fill('unknown')
   let approximate = false
 
-  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
-    const batch = chunks.slice(i, i + CONCURRENCY)
-    const results = await Promise.all(
-      batch.map(c => traceChunk(c.points, profile, signal)),
-    )
-    results.forEach((result, j) => {
-      const offset = batch[j].start
-      result.classes.forEach((cls, k) => { segments[offset + k] = cls })
-      approximate = approximate || result.approximate
-    })
+  for (const chunk of chunks) {
+    const result = await traceChunk(chunk.points, profile, signal)
+    result.classes.forEach((cls, i) => { segments[chunk.start + i] = cls })
+    approximate = approximate || result.approximate
   }
 
   return { segments, approximate }

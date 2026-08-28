@@ -36,7 +36,12 @@ const {
   availableFuels,
   FUEL_PRICE_BANDS,
   FUEL_NO_PRICE_COLOR,
+  FUEL_PRICE_ENDPOINT,
 } = await import('../src/lib/fuel')
+const { createRateLimitedFetch } = await import('../src/lib/rateLimit')
+const { NOMINATIM_REQUEST_INTERVAL_MS } = await import('../src/lib/geocoding')
+const { FOSSGIS_REQUEST_INTERVAL_MS } = await import('../src/lib/routing')
+const { getThumbnailLayer, SERVICE_ATTRIBUTIONS } = await import('../src/lib/terrain')
 
 let failures = 0
 let checks = 0
@@ -511,6 +516,45 @@ check('filename slug strips accents and spaces',
   console.log(
     `  price bands: ${spread.map((p, i) => `${p.toFixed(2)}→${bands[i]}`).join('  ')}`,
   )
+}
+
+/* -- Public-service policy ------------------------------------------- */
+
+console.log(`\nPublic-service policy checks\n${'='.repeat(78)}`)
+
+{
+  let active = 0
+  let maxActive = 0
+  const starts: number[] = []
+  const limitedFetch = createRateLimitedFetch(25, async () => {
+    starts.push(Date.now())
+    active++
+    maxActive = Math.max(maxActive, active)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    active--
+    return new Response(null, { status: 204 })
+  })
+
+  await Promise.all([
+    limitedFetch('https://example.test/1'),
+    limitedFetch('https://example.test/2'),
+    limitedFetch('https://example.test/3'),
+  ])
+
+  check('rate-limited requests use one connection', maxActive === 1, `${maxActive} active`)
+  check('rate-limited request starts are spaced apart',
+    starts.slice(1).every((start, i) => start - starts[i] >= 20), starts.join(', '))
+  check('FOSSGIS routing interval is at least one second', FOSSGIS_REQUEST_INTERVAL_MS >= 1000)
+  check('Nominatim interval is at least one second', NOMINATIM_REQUEST_INTERVAL_MS >= 1000)
+  check('OSM thumbnails use the policy hostname',
+    getThumbnailLayer('openfreemap').url === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
+  check('service attribution links to fix-the-map',
+    SERVICE_ATTRIBUTIONS.some(credit => credit.includes('openstreetmap.org/fixthemap')))
+  check('service attribution names elevation sources',
+    SERVICE_ATTRIBUTIONS.some(credit => credit.includes('tilezen/joerd')) &&
+      SERVICE_ATTRIBUTIONS.some(credit => credit.includes('open-meteo.com')))
+  check('fuel prices use the ministry current host',
+    FUEL_PRICE_ENDPOINT.startsWith('https://energia.serviciosmin.gob.es/'))
 }
 
 /* -- Surface classification and chunking ---------------------------- */

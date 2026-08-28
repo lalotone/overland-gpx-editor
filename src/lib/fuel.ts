@@ -25,8 +25,8 @@
 import { haversineDistance } from './geo'
 import type { BoundingBox, Poi, PoiDetail } from './poi'
 
-const ENDPOINT =
-  'https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/'
+export const FUEL_PRICE_ENDPOINT =
+  'https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/'
 
 /**
  * Rough envelope of Spanish territory. Only used to decide whether it is
@@ -211,7 +211,7 @@ let cached: FuelDataset | null = null
 let inflight: Promise<FuelDataset> | null = null
 
 async function download(): Promise<FuelDataset> {
-  const res = await fetch(ENDPOINT)
+  const res = await fetch(FUEL_PRICE_ENDPOINT)
   if (!res.ok) throw new Error(`Fuel price service returned ${res.status}`)
 
   const data = (await res.json()) as {

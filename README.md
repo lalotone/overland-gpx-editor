@@ -88,14 +88,14 @@ make            # installs npm deps, builds the frontend, builds the binary
 ```
 
 That is the whole app — frontend, API and track library in one process. Tracks
-live as plain `.gpx` files in `$XDG_DATA_HOME/overland` (normally
-`~/.local/share/overland`), so your library stays readable by every other tool
-you own.
+live as plain `.gpx` files in `$XDG_DATA_HOME/overland/gpx` (normally
+`~/.local/share/overland/gpx`), so your library stays readable by every other
+tool you own and the rest of the app data has room alongside it.
 
 ```
 Usage of ./gpx-editor:
   -addr string                address to listen on (default ":8000")
-  -gpx-dir string             directory holding the track library (default XDG data dir)
+  -gpx-dir string             directory holding the track library (default XDG data gpx dir)
   -elevation-host string      self-hosted opentopodata-style DEM service;
                               empty uses tiles or Open-Meteo
   -elevation-dataset string   DEM dataset for -elevation-host (default "srtm30m")
@@ -127,9 +127,9 @@ it behind a reverse proxy with auth, or keep it on a trusted network.
 ## Elevation
 
 Out of the box the backend reads elevation from **terrain tiles** — ~30 m
-Terrarium rasters, cached in `$XDG_CACHE_HOME/overland` (normally
-`~/.cache/overland`). Nothing to configure and no per-point API quota to run
-into.
+Terrarium rasters, cached in `$XDG_CACHE_HOME/overland/tiles` (normally
+`~/.cache/overland/tiles`). Nothing to configure and no per-point API quota to
+run into.
 
 Tiles are read locally rather than asked for a point at a time, which is why
 they are the default: a 95 km route needs 27 tiles (2.6 MB) and about 5
@@ -171,11 +171,11 @@ bundle at build time.
 | Variable | Side | Default | Purpose |
 | --- | --- | --- | --- |
 | `ADDR` | backend | `:8000` | Listen address |
-| `GPX_DIR` | backend | `$XDG_DATA_HOME/overland` (`~/.local/share/overland`) | Track library directory |
+| `GPX_DIR` | backend | `$XDG_DATA_HOME/overland/gpx` (`~/.local/share/overland/gpx`) | Track library directory |
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
-| `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland` (`~/.cache/overland`) | Where tiles are kept, so elevation works offline |
+| `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland/tiles` (`~/.cache/overland/tiles`) | Where tiles are kept, so elevation works offline |
 | `ELEVATION_HOST` | backend | *(empty)* | Self-hosted opentopodata-style DEM. Takes precedence over tiles |
 | `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
 | `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at a backend on another host |

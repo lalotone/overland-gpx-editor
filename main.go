@@ -149,24 +149,24 @@ func envOr(key, fallback string) string {
 
 func defaultGPXDir() string {
 	if base := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "overland")
+		return filepath.Join(base, "overland", "gpx")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "gpx"
 	}
-	return filepath.Join(home, ".local", "share", "overland")
+	return filepath.Join(home, ".local", "share", "overland", "gpx")
 }
 
 func defaultTileCacheDir() string {
 	if base := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "overland")
+		return filepath.Join(base, "overland", "tiles")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "tiles"
 	}
-	return filepath.Join(home, ".cache", "overland")
+	return filepath.Join(home, ".cache", "overland", "tiles")
 }
 
 func logRequests(next http.Handler) http.Handler {

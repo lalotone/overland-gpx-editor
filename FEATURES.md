@@ -162,8 +162,9 @@ the OSM fuel layer answers as before.
 - GPX library: list, read, write, upload, delete — all filename-sanitised
   against path traversal. Saves are atomic, and uploads are create-only, so an
   interrupted write or duplicate local filename cannot damage an existing
-  track. Tracks default to the XDG data directory; elevation tiles default to
-  the XDG cache directory.
+  track. Tracks default to the `gpx` subdirectory of the XDG data directory;
+  elevation tiles default to the `tiles` subdirectory of the XDG cache
+  directory.
 - `POST /elevation/batch` chunks large lookups to the upstream DEM limit and
   stitches results back in order.
 - Elevation works with no setup: ~30 m terrain-RGB tiles are the default, a

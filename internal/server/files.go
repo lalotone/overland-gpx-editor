@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // Generous enough for a long recorded track with per-point extensions, small
@@ -47,7 +49,7 @@ func ValidateGPXFilename(filename string) error {
 // resolveFile pulls {filename} off the request and validates it, writing the
 // error response itself when the name is unusable.
 func (s *Server) resolveFile(w http.ResponseWriter, r *http.Request) (string, bool) {
-	filename, err := safeGPXFilename(r.PathValue("filename"))
+	filename, err := safeGPXFilename(chi.URLParam(r, "filename"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false

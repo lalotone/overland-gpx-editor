@@ -9,7 +9,7 @@ shipped as one self-contained binary.
 
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
-[![Go dependencies](https://img.shields.io/badge/Go%20dependencies-1-brightgreen)](go.mod)
+[![Go dependencies](https://img.shields.io/badge/Go%20dependencies-3-brightgreen)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -122,8 +122,13 @@ since nothing here uses cgo — `make packages` does want
 Vite proxies the API paths to `:8000`, so the app uses the same URLs in dev as
 it does inside the binary.
 
-**Running it as a service:** there is no authentication and CORS is open. Put
-it behind a reverse proxy with auth, or keep it on a trusted network.
+**Running it as a service:** the server listens on loopback by default and has
+no authentication. Put it behind a reverse proxy with auth before binding it to
+a public interface. Browser writes are loopback-only by default; pass one or
+more exact `--allowed-origin https://planner.example.com` values for every
+non-loopback UI origin, including a public same-origin deployment. Origin
+checks reduce browser abuse but do not authenticate command-line or network
+clients.
 
 ---
 
@@ -173,9 +178,10 @@ bundle at build time.
 
 | Variable | Side | Default | Purpose |
 | --- | --- | --- | --- |
-| `ADDR` | backend | `:8000` | Listen address |
+| `ADDR` | backend | `127.0.0.1:8000` | Listen address; use a public interface only behind authentication |
 | `GPX_DIR` | backend | `$XDG_DATA_HOME/overland/gpx` (`~/.local/share/overland/gpx`) | Track library directory |
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
+| `ALLOWED_ORIGINS` | backend | *(empty)* | Comma-separated exact browser origins allowed to call the API |
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
 | `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland/tiles` (`~/.cache/overland/tiles`) | Where tiles are kept, so elevation works offline |
@@ -291,9 +297,10 @@ a proxy and publish the operator contact required by the FOSSGIS terms.
   not flagged.
 - **Desktop-shaped.** The creation screen assumes a wide window.
 - **Distance is 2D**, so steep tracks read very slightly short.
-- **No authentication**, and CORS is wide open. The backend reads, writes and
-  deletes files in the configured track library. Bind it to a trusted network
-  only.
+- **No built-in authentication.** The backend reads, writes and deletes files
+  in the configured track library. It defaults to loopback and rejects
+  untrusted browser-originated writes, but public deployments still need an
+  authenticated reverse proxy.
 
 ---
 
@@ -305,8 +312,8 @@ Issues and pull requests are welcome. Before opening one:
 2. Read [docs/ACCURACY.md](docs/ACCURACY.md) first if you are touching
    distance, elevation or slope. The methodology there is deliberate, and
    several obvious "simplifications" are the bugs it exists to prevent.
-3. Keep `src/lib/` free of React and DOM globals, and the Go HTTP backend free
-   of third-party dependencies.
+3. Keep `src/lib/` free of React and DOM globals, and keep Go HTTP dependencies
+   limited to the existing Chi routing stack unless there is a concrete need.
 
 | Document | Contents |
 | --- | --- |

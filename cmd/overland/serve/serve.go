@@ -31,7 +31,7 @@ func Flags() []cli.Flag {
 		&cli.StringFlag{
 			Name:    "addr",
 			Usage:   "address to listen on",
-			Value:   ":8000",
+			Value:   "127.0.0.1:8000",
 			Sources: util.NonEmptyEnv("ADDR"),
 		},
 		util.GPXDirFlag(),
@@ -69,6 +69,11 @@ func Flags() []cli.Flag {
 			Value:   "https://nominatim.openstreetmap.org",
 			Sources: util.NonEmptyEnv("NOMINATIM_URL"),
 		},
+		&cli.StringSliceFlag{
+			Name:    "allowed-origin",
+			Usage:   "exact browser origin allowed to call the API; repeat for multiple origins",
+			Sources: util.NonEmptyEnv("ALLOWED_ORIGINS"),
+		},
 	}
 }
 
@@ -90,6 +95,7 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		ElevationTileZoom:  tileZoom,
 		ElevationTileCache: tileCache,
 		NominatimURL:       cmd.String("nominatim-url"),
+		AllowedOrigins:     cmd.StringSlice("allowed-origin"),
 		Assets:             assets,
 	})
 	if err != nil {
@@ -98,12 +104,12 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	defer srv.Close()
 
 	httpServer := &http.Server{
-		Addr:    cmd.String("addr"),
-		Handler: logRequests(srv),
-		// Uploads and DEM proxying can be slow; only the header deadline is
-		// safe to keep tight.
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		Addr:              cmd.String("addr"),
+		Handler:           logRequests(srv),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
 	}
 
 	elevationSource := "Open-Meteo (free non-commercial API, Copernicus 90 m)"

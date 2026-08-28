@@ -59,7 +59,7 @@ cmd/overland/
 ├── import/                     Create-only GPX library import
 └── util/                       Shared CLI flags
 internal/server/
-├── server.go                   Routes, CORS, embedded-frontend handler
+├── server.go                   Chi routes, middleware, embedded-frontend handler
 ├── files.go                    Track library: list/read/write/upload/delete
 ├── elevation.go                DEM proxy with upstream-sized chunking
 └── elevation_tiles.go          Terrain-RGB tile reader, cache, interpolation
@@ -77,11 +77,19 @@ gpx/                            Local track library (gitignored)
 
 ## Backend
 
-The CLI uses `urfave/cli`; the HTTP backend remains standard-library-only.
-Routing is `http.ServeMux` with method patterns (`GET /gpx/{filename}`). Go 1.25
-is the minimum because the library uses the traversal-resistant `os.Root` file
-APIs. Keep dependencies out of `internal/server` unless there is a concrete
-reason to add one.
+The CLI uses `urfave/cli`; the HTTP backend uses Chi for routing and middleware.
+The global stack assigns request IDs, recovers panics, compresses eligible
+responses, caps concurrent work, supplies security headers and handles explicit
+CORS origins. Go 1.25 is the minimum because the library uses the
+traversal-resistant `os.Root` file APIs. Keep dependencies beyond the existing
+Chi stack out of `internal/server` unless there is a concrete reason to add one.
+
+The listener defaults to `127.0.0.1:8000`, limits header size and read time, and
+has bounded idle and header-read deadlines. Browser-originated writes are
+accepted only from an exact configured origin, or from matching loopback origins
+in the default local setup. Requests without an `Origin` remain valid for CLI
+clients, so these checks are not authentication; public deployments still need
+an authenticated reverse proxy.
 
 **`files.go`** is a track library over a directory. Every filename arriving from
 the network goes through `safeGPXFilename`, which requires a bare `*.gpx` with no
@@ -137,10 +145,12 @@ back in order. A point the service has no value for comes back `null`, never
 | `POST /elevation/prefetch` | `{bbox: [s,w,n,e]}` — warm the tile cache for an area, in the background |
 | `GET /elevation/prefetch` | Progress of the running prefetch, polled by the UI |
 | `GET /config` | Runtime public-service configuration, currently the Nominatim-compatible search URL |
+| `GET /healthz` | Lightweight liveness check; returns 204 |
 | `GET /*` | The React app; unknown paths fall through to it |
 
-Errors come back as `{"detail": "…"}` with a matching status. CORS is open and
-there is no authentication of any kind.
+Application errors come back as `{"detail": "…"}` with a matching status.
+Cross-origin access is disabled unless exact origins are configured. There is
+no built-in authentication.
 
 ---
 

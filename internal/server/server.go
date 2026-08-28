@@ -4,13 +4,20 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 )
 
 // Config wires a Server up. Only GPXDir is required.
@@ -37,25 +44,37 @@ type Config struct {
 	// NominatimURL is the browser-facing place-search service. It is exposed
 	// through /config so operators can switch providers without rebuilding.
 	NominatimURL string
+	// AllowedOrigins lists exact browser origins allowed to call the API.
+	// Empty permits same-origin requests only when the request host is loopback.
+	AllowedOrigins []string
 	// Assets is the built frontend. When nil the server is API-only.
 	Assets fs.FS
 }
 
-const defaultNominatimURL = "https://nominatim.openstreetmap.org"
+const (
+	defaultNominatimURL = "https://nominatim.openstreetmap.org"
+	maxInFlightRequests = 32
+	maxQueuedRequests   = 64
+)
 
 // Server is an http.Handler exposing the whole app.
 type Server struct {
-	gpxDir       string
-	gpxRoot      *os.Root
-	gpxMu        sync.RWMutex
-	elevation    *elevationProxy
-	nominatimURL string
-	assets       fs.FS
-	mux          *http.ServeMux
+	gpxDir         string
+	gpxRoot        *os.Root
+	gpxMu          sync.RWMutex
+	elevation      *elevationProxy
+	nominatimURL   string
+	allowedOrigins map[string]struct{}
+	assets         fs.FS
+	handler        http.Handler
 }
 
 // New validates cfg, creates the GPX directory and returns the handler.
 func New(cfg Config) (*Server, error) {
+	allowedOrigins, err := normalizeOrigins(cfg.AllowedOrigins)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.GPXDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -88,11 +107,11 @@ func New(cfg Config) (*Server, error) {
 			defaultDataset: cfg.ElevationDataset,
 			client:         client,
 		},
-		nominatimURL: nominatimURL,
-		assets:       cfg.Assets,
-		mux:          http.NewServeMux(),
+		nominatimURL:   nominatimURL,
+		allowedOrigins: allowedOrigins,
+		assets:         cfg.Assets,
 	}
-	s.routes()
+	s.handler = s.routes()
 	return s, nil
 }
 
@@ -104,19 +123,48 @@ func (s *Server) Close() error {
 	return s.gpxRoot.Close()
 }
 
-func (s *Server) routes() {
-	s.mux.HandleFunc("GET /files", s.handleListFiles)
-	s.mux.HandleFunc("GET /gpx/{filename}", s.handleGetFile)
-	s.mux.HandleFunc("PUT /gpx/{filename}", s.handleSaveFile)
-	s.mux.HandleFunc("POST /gpx/{filename}", s.handleSaveFile)
-	s.mux.HandleFunc("DELETE /gpx/{filename}", s.handleDeleteFile)
-	s.mux.HandleFunc("POST /upload", s.handleUpload)
-	s.mux.HandleFunc("GET /elevation", s.handleElevation)
-	s.mux.HandleFunc("POST /elevation/batch", s.handleElevationBatch)
-	s.mux.HandleFunc("POST /elevation/prefetch", s.handlePrefetch)
-	s.mux.HandleFunc("GET /elevation/prefetch", s.handlePrefetchStatus)
-	s.mux.HandleFunc("GET /config", s.handleConfig)
-	s.mux.Handle("/", s.assetHandler())
+func (s *Server) routes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Recoverer)
+	r.Use(securityHeaders)
+	r.Use(middleware.ThrottleBacklog(maxInFlightRequests, maxQueuedRequests, 5*time.Second))
+	r.Use(middleware.Compress(5))
+	r.Use(middleware.GetHead)
+	r.Use(s.protectBrowserWrites)
+	if len(s.allowedOrigins) > 0 {
+		r.Use(cors.Handler(cors.Options{
+			AllowedOrigins:     mapKeys(s.allowedOrigins),
+			AllowedMethods:     []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+			AllowedHeaders:     []string{"Accept", "Content-Type"},
+			AllowCredentials:   false,
+			MaxAge:             300,
+			OptionsPassthrough: true,
+		}))
+	}
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	r.Get("/files", s.handleListFiles)
+	r.Get("/gpx/{filename}", s.handleGetFile)
+	r.Put("/gpx/{filename}", s.handleSaveFile)
+	r.Post("/gpx/{filename}", s.handleSaveFile)
+	r.Delete("/gpx/{filename}", s.handleDeleteFile)
+	r.Post("/upload", s.handleUpload)
+	r.Get("/elevation", s.handleElevation)
+	r.Post("/elevation/batch", s.handleElevationBatch)
+	r.Post("/elevation/prefetch", s.handlePrefetch)
+	r.Get("/elevation/prefetch", s.handlePrefetchStatus)
+	r.Get("/config", s.handleConfig)
+	r.Options("/*", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	r.Get("/*", s.assetHandler().ServeHTTP)
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "Not found")
+	})
+	return r
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
@@ -127,22 +175,90 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// CORS is handled ahead of the mux so preflight requests to routes that
-	// only accept PUT/DELETE do not fall through to a 405.
-	//
-	// allow_credentials stays off while the origin is "*" — browsers reject
-	// the combination, and this API has no cookie or auth story that needs it.
-	h := w.Header()
-	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Vary", "Origin")
-	if r.Method == http.MethodOptions {
-		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "Content-Type")
-		h.Set("Access-Control-Max-Age", "86400")
-		w.WriteHeader(http.StatusNoContent)
-		return
+	s.handler.ServeHTTP(w, r)
+}
+
+func normalizeOrigins(origins []string) (map[string]struct{}, error) {
+	normalized := make(map[string]struct{}, len(origins))
+	for _, raw := range origins {
+		origin, err := normalizeOrigin(raw)
+		if err != nil {
+			return nil, fmt.Errorf("allowed origin %q: %w", raw, err)
+		}
+		normalized[origin] = struct{}{}
 	}
-	s.mux.ServeHTTP(w, r)
+	return normalized, nil
+}
+
+func normalizeOrigin(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
+		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("must be an exact http or https origin")
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host), nil
+}
+
+func mapKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for value := range values {
+		keys = append(keys, value)
+	}
+	return keys
+}
+
+func (s *Server) protectBrowserWrites(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodPut &&
+			r.Method != http.MethodPatch && r.Method != http.MethodDelete {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+				writeError(w, http.StatusForbidden, "Cross-origin request refused")
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		normalized, err := normalizeOrigin(origin)
+		if err == nil {
+			if _, ok := s.allowedOrigins[normalized]; ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if len(s.allowedOrigins) == 0 && loopbackSameOrigin(normalized, r.Host) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		writeError(w, http.StatusForbidden, "Cross-origin request refused")
+	})
+}
+
+func loopbackSameOrigin(origin, requestHost string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || !strings.EqualFold(u.Host, requestHost) {
+		return false
+	}
+	host := u.Hostname()
+	return strings.EqualFold(host, "localhost") || net.ParseIP(host).IsLoopback()
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		next.ServeHTTP(w, r)
+	})
 }
 
 /* -- Frontend --------------------------------------------------------- */

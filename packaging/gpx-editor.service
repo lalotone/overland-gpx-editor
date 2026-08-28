@@ -6,8 +6,8 @@
 #   sudo cp /usr/share/doc/gpx-editor/gpx-editor.service /etc/systemd/system/
 #   sudo systemctl enable --now gpx-editor
 #
-# There is no authentication and CORS is open, so keep it on a trusted network
-# or put a reverse proxy with auth in front of it.
+# There is no built-in authentication. Keep it on loopback and put
+# authentication in the reverse proxy in front of it.
 
 [Unit]
 Description=GPX Editor

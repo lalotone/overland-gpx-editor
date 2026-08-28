@@ -56,8 +56,9 @@ Two rules it is worth repeating here:
 
 - Keep `src/lib/` free of React and DOM globals apart from `gpx.ts`, which
   needs `DOMParser` (the verify harness supplies one via jsdom).
-- The backend is standard library only. Keep it that way unless there is a
-  real reason — the point of the Go rewrite is one dependency-free binary.
+- The backend is standard library plus Chi routing and middleware. Keep other
+  dependencies out unless there is a real reason; the binary should remain
+  operationally self-contained.
 
 ## Conventions
 

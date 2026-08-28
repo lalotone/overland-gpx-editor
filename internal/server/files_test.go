@@ -409,20 +409,149 @@ func TestListingSkipsNonGPXAndTempFiles(t *testing.T) {
 }
 
 func TestCORS(t *testing.T) {
-	s := newTestServer(t)
-	rec := do(t, s, http.MethodOptions, "/gpx/track.gpx", nil)
+	s, err := New(Config{
+		GPXDir:           t.TempDir(),
+		ElevationHost:    "http://elevation.invalid",
+		ElevationDataset: "srtm30m",
+		AllowedOrigins:   []string{"https://planner.example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+
+	req := httptest.NewRequest(http.MethodOptions, "/gpx/track.gpx", nil)
+	req.Header.Set("Origin", "https://planner.example.test")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	req.Header.Set("Access-Control-Request-Headers", "Content-Type")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("preflight status = %d, want 204", rec.Code)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://planner.example.test" {
 		t.Errorf("Allow-Origin = %q", got)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
-		t.Error("missing Allow-Methods on preflight")
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != http.MethodPut {
+		t.Errorf("Allow-Methods = %q, want PUT", got)
 	}
-	// Credentials must stay off while the origin is "*".
 	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
 		t.Errorf("Allow-Credentials = %q, want unset", got)
+	}
+
+	req = httptest.NewRequest(http.MethodOptions, "/gpx/track.gpx", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("denied Allow-Origin = %q, want unset", got)
+	}
+}
+
+func TestCrossOriginWritesAreRefused(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPut, "/gpx/track.gpx", bytes.NewBufferString("<gpx/>"))
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(filepath.Join(s.gpxDir, "track.gpx")); !os.IsNotExist(err) {
+		t.Fatalf("cross-origin write created a file: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "https://public.example.test/gpx/public.gpx", bytes.NewBufferString("<gpx/>"))
+	req.Header.Set("Origin", "https://public.example.test")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unconfigured public origin status = %d, want 403", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/gpx/fetch-metadata.gpx", bytes.NewBufferString("<gpx/>"))
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site fetch status = %d, want 403", rec.Code)
+	}
+}
+
+func TestConfiguredOriginCanWrite(t *testing.T) {
+	s, err := New(Config{
+		GPXDir:         t.TempDir(),
+		ElevationHost:  "http://elevation.invalid",
+		AllowedOrigins: []string{"https://planner.example.test/"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+
+	req := httptest.NewRequest(http.MethodPut, "/gpx/track.gpx", bytes.NewBufferString("<gpx/>"))
+	req.Header.Set("Origin", "https://planner.example.test")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://planner.example.test" {
+		t.Errorf("Allow-Origin = %q", got)
+	}
+}
+
+func TestLoopbackSameOriginCanWrite(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:8000/gpx/track.gpx", bytes.NewBufferString("<gpx/>"))
+	req.Header.Set("Origin", "http://127.0.0.1:8000")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+}
+
+func TestInvalidAllowedOriginIsRejected(t *testing.T) {
+	_, err := New(Config{
+		GPXDir:         t.TempDir(),
+		AllowedOrigins: []string{"https://example.test/path"},
+	})
+	if err == nil {
+		t.Fatal("New accepted an origin containing a path")
+	}
+}
+
+func TestHTTPHardening(t *testing.T) {
+	s := newTestServer(t)
+	rec := do(t, s, http.MethodGet, "/healthz", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("health status = %d, want 204", rec.Code)
+	}
+	for name, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "strict-origin-when-cross-origin",
+		"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
+	} {
+		if got := rec.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+
+	rec = do(t, s, http.MethodPost, "/files", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /files status = %d, want 405", rec.Code)
+	}
+	if allow := rec.Header().Get("Allow"); allow == "" {
+		t.Error("POST /files response has no Allow header")
+	}
+
+	rec = do(t, s, http.MethodHead, "/files", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HEAD /files status = %d, want 200", rec.Code)
 	}
 }
 

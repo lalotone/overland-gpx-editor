@@ -7,30 +7,62 @@
  * satellite, where imagery alone flattens gullies and ridgelines out.
  */
 
-export interface BaseLayerDefinition {
+interface BaseLayerCommon {
   id: string
   label: string
   title: string
-  url: string
   attribution: string
-  maxZoom: number
   /** True when the layer already draws contour lines. */
   hasContours?: boolean
 }
 
+export interface RasterBaseLayerDefinition extends BaseLayerCommon {
+  kind: 'raster'
+  url: string
+  maxZoom: number
+}
+
+export interface VectorBaseLayerDefinition extends BaseLayerCommon {
+  kind: 'vector'
+  styleUrl: string
+  fallback: ThumbnailLayerDefinition
+}
+
+export type BaseLayerDefinition = RasterBaseLayerDefinition | VectorBaseLayerDefinition
+
+export interface ThumbnailLayerDefinition {
+  url: string
+  attribution: string
+  maxZoom: number
+}
+
+const OSM_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+
+const OSM_THUMBNAIL_LAYER: ThumbnailLayerDefinition = {
+  url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  attribution: OSM_ATTRIBUTION,
+  maxZoom: 19,
+}
+
 export const BASE_LAYERS: BaseLayerDefinition[] = [
   {
-    id: 'osm',
-    label: 'Map',
-    title: 'OpenStreetMap — standard road map',
-    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19,
+    id: 'openfreemap',
+    label: 'OFM',
+    title: 'OpenFreeMap Liberty — fast, sharp vector map',
+    kind: 'vector',
+    styleUrl: 'https://tiles.openfreemap.org/styles/liberty',
+    attribution:
+      '<a href="https://openfreemap.org">OpenFreeMap</a> | ' +
+      '&copy; <a href="https://www.openmaptiles.org/">OpenMapTiles</a> | ' +
+      'Data from <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    fallback: OSM_THUMBNAIL_LAYER,
   },
   {
     id: 'topo',
     label: 'Topo',
     title: 'OpenTopoMap — contour lines and shaded relief',
+    kind: 'raster',
     url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
     attribution:
       'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | ' +
@@ -42,6 +74,7 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     id: 'cyclosm',
     label: 'Trails',
     title: 'CyclOSM — renders track surface and grade clearly',
+    kind: 'raster',
     url: 'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',
     attribution:
       '<a href="https://github.com/cyclosm/cyclosm-cartocss-style/releases">CyclOSM</a> | ' +
@@ -52,6 +85,7 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     id: 'satellite',
     label: 'Sat',
     title: 'Esri World Imagery — check a track really exists on the ground',
+    kind: 'raster',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attribution: 'Tiles &copy; Esri — Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP',
     maxZoom: 19,
@@ -60,6 +94,7 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     id: 'relief',
     label: 'Relief',
     title: 'Esri World Shaded Relief — landform shape without clutter',
+    kind: 'raster',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}',
     attribution: 'Tiles &copy; Esri — Source: Esri',
     maxZoom: 13,
@@ -75,6 +110,12 @@ export const HILLSHADE_LAYER = {
 
 export function getBaseLayer(id: string): BaseLayerDefinition {
   return BASE_LAYERS.find(l => l.id === id) ?? BASE_LAYERS[0]
+}
+
+/** Library cards stay as image tiles instead of creating a WebGL map per card. */
+export function getThumbnailLayer(id: string): ThumbnailLayerDefinition {
+  const layer = getBaseLayer(id)
+  return layer.kind === 'raster' ? layer : layer.fallback
 }
 
 /* -- Gradient colouring ---------------------------------------------- */

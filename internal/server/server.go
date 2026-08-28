@@ -17,7 +17,7 @@ type Config struct {
 	// GPXDir is the track library directory. It is created if missing.
 	GPXDir string
 	// ElevationHost is a self-hosted opentopodata-style DEM service. Empty
-	// uses the public Open-Meteo API, which needs no setup.
+	// uses tiles when enabled, otherwise the public Open-Meteo API.
 	ElevationHost string
 	// ElevationDataset is used for requests that do not name one. Applies to
 	// ElevationHost only; Open-Meteo serves one dataset.
@@ -33,16 +33,22 @@ type Config struct {
 	// ElevationTileCache is a directory to keep fetched tiles in. Empty keeps
 	// them in memory only, so nothing survives a restart.
 	ElevationTileCache string
+	// NominatimURL is the browser-facing place-search service. It is exposed
+	// through /config so operators can switch providers without rebuilding.
+	NominatimURL string
 	// Assets is the built frontend. When nil the server is API-only.
 	Assets fs.FS
 }
 
+const defaultNominatimURL = "https://nominatim.openstreetmap.org"
+
 // Server is an http.Handler exposing the whole app.
 type Server struct {
-	gpxDir    string
-	elevation *elevationProxy
-	assets    fs.FS
-	mux       *http.ServeMux
+	gpxDir       string
+	elevation    *elevationProxy
+	nominatimURL string
+	assets       fs.FS
+	mux          *http.ServeMux
 }
 
 // New validates cfg, creates the GPX directory and returns the handler.
@@ -61,6 +67,11 @@ func New(cfg Config) (*Server, error) {
 		tiles = newTileStore(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, client)
 	}
 
+	nominatimURL := strings.TrimRight(strings.TrimSpace(cfg.NominatimURL), "/")
+	if nominatimURL == "" {
+		nominatimURL = defaultNominatimURL
+	}
+
 	s := &Server{
 		gpxDir: cfg.GPXDir,
 		elevation: &elevationProxy{
@@ -69,8 +80,9 @@ func New(cfg Config) (*Server, error) {
 			defaultDataset: cfg.ElevationDataset,
 			client:         client,
 		},
-		assets: cfg.Assets,
-		mux:    http.NewServeMux(),
+		nominatimURL: nominatimURL,
+		assets:       cfg.Assets,
+		mux:          http.NewServeMux(),
 	}
 	s.routes()
 	return s, nil
@@ -87,7 +99,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /elevation/batch", s.handleElevationBatch)
 	s.mux.HandleFunc("POST /elevation/prefetch", s.handlePrefetch)
 	s.mux.HandleFunc("GET /elevation/prefetch", s.handlePrefetchStatus)
+	s.mux.HandleFunc("GET /config", s.handleConfig)
 	s.mux.Handle("/", s.assetHandler())
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
+	writeJSON(w, http.StatusOK, struct {
+		NominatimURL string `json:"nominatimUrl"`
+	}{NominatimURL: s.nominatimURL})
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

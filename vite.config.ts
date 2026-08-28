@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 // Paths the Go backend owns. In production it serves this bundle too, so the
 // app talks to the same origin; in dev the backend is a separate process and
 // these are proxied to it, which keeps the frontend URLs identical either way.
-const API_PATHS = ['/files', '/gpx', '/upload', '/elevation']
+const API_PATHS = ['/files', '/gpx', '/upload', '/elevation', '/config']
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')

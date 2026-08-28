@@ -34,6 +34,8 @@ import {
   slopePercent,
   smoothElevations,
 } from './lib/geo'
+import { DEFAULT_NOMINATIM_API, searchPlaces } from './lib/geocoding'
+import type { PlaceResult } from './lib/geocoding'
 import { buildGPX, fromGpxFilename, parseGPX, toGpxFilename } from './lib/gpx'
 import {
   boundingBoxSpanKm,
@@ -506,13 +508,16 @@ function App() {
   const [surfaceLoading, setSurfaceLoading] = useState(false)
   const [surfaceError, setSurfaceError] = useState<string | null>(null)
   const [placeSearch, setPlaceSearch] = useState('')
-  const [placeResults, setPlaceResults] = useState<{ display_name: string; lat: string; lon: string }[]>([])
+  const [placeResults, setPlaceResults] = useState<PlaceResult[]>([])
   const [placeSearching, setPlaceSearching] = useState(false)
+  const [nominatimApi, setNominatimApi] = useState(DEFAULT_NOMINATIM_API)
 
   const mapRef = useRef<L.Map | null>(null)
   const notifIdRef = useRef(0)
   const vectorFallbackNotifiedRef = useRef(false)
   const routeSeqRef = useRef(0)
+  const placeSearchSeqRef = useRef(0)
+  const placeSearchAbortRef = useRef<AbortController | null>(null)
 
   /* -- Notifications ------------------------------------------------ */
 
@@ -524,6 +529,19 @@ function App() {
 
   const dismissNotification = useCallback((id: number) => {
     setNotifications(prev => prev.filter(n => n.id !== id))
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch(`${API_BASE}/config`, { signal: controller.signal })
+      .then(res => res.ok ? res.json() : null)
+      .then((config: { nominatimUrl?: unknown } | null) => {
+        if (typeof config?.nominatimUrl === 'string' && config.nominatimUrl) {
+          setNominatimApi(config.nominatimUrl)
+        }
+      })
+      .catch(() => {})
+    return () => controller.abort()
   }, [])
 
   const notifyVectorFallback = useCallback(() => {
@@ -1297,19 +1315,33 @@ function App() {
   }, [viewMode])
 
   const searchPlace = useCallback(async (query: string) => {
-    if (!query.trim()) { setPlaceResults([]); return }
+    const seq = ++placeSearchSeqRef.current
+    placeSearchAbortRef.current?.abort()
+    if (!query.trim()) {
+      setPlaceResults([])
+      setPlaceSearching(false)
+      placeSearchAbortRef.current = null
+      return
+    }
+
+    const controller = new AbortController()
+    placeSearchAbortRef.current = controller
     setPlaceSearching(true)
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5`,
-        { headers: { 'Accept-Language': 'en' } },
-      )
-      setPlaceResults(await res.json())
-    } catch {
-      setPlaceResults([])
+      const results = await searchPlaces(query, controller.signal, nominatimApi)
+      if (seq === placeSearchSeqRef.current) setPlaceResults(results)
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError' && seq === placeSearchSeqRef.current) {
+        setPlaceResults([])
+        notify((err as Error).message || 'Place search unavailable', 'error')
+      }
+    } finally {
+      if (seq === placeSearchSeqRef.current) {
+        setPlaceSearching(false)
+        placeSearchAbortRef.current = null
+      }
     }
-    setPlaceSearching(false)
-  }, [])
+  }, [nominatimApi, notify])
 
   const flyToPlace = useCallback((lat: string, lon: string) => {
     mapRef.current?.flyTo([parseFloat(lat), parseFloat(lon)], 13, { duration: FLY_TO_DURATION })
@@ -1752,20 +1784,20 @@ function App() {
                     placeholder="Search village or place…"
                     value={placeSearch}
                     onChange={e => setPlaceSearch(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && searchPlace(placeSearch)}
+                    onKeyDown={e => { if (e.key === 'Enter') void searchPlace(placeSearch) }}
                   />
                   {placeSearching ? (
                     <span className="place-search-spinner" />
                   ) : (
-                    <button className="place-search-btn" onClick={() => searchPlace(placeSearch)} title="Search">
+                    <button className="place-search-btn" onClick={() => void searchPlace(placeSearch)} title="Search">
                       Go
                     </button>
                   )}
                 </div>
                 {placeResults.length > 0 && (
                   <ul className="place-results">
-                    {placeResults.map((r, i) => (
-                      <li key={i} onClick={() => flyToPlace(r.lat, r.lon)} title={r.display_name}>
+                    {placeResults.map(r => (
+                      <li key={r.place_id} onClick={() => flyToPlace(r.lat, r.lon)} title={r.display_name}>
                         {r.display_name}
                       </li>
                     ))}

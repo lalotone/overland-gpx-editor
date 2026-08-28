@@ -92,22 +92,30 @@ Two rules it is worth repeating here:
 - **Elevation**: proxied via the backend, which picks the source — terrain-RGB
   tiles with `-elevation-tiles` (~30 m, caches to disk, works offline), an
   opentopodata-style service when `ELEVATION_HOST` is set, or the public
-  Open-Meteo API (Copernicus 90 m) by default. All three are normalised to
-  `{"results":[{"elevation":…}]}`, so the frontend cannot tell them apart, and
-  a point with no data comes back `null` — never `0`, which reads as sea level.
+  Open-Meteo API (Copernicus 90 m) when tiles are disabled. All three are
+  normalised to `{"results":[{"elevation":…}]}`, so the frontend cannot tell
+  them apart, and a point with no data comes back `null` — never `0`, which
+  reads as sea level.
   `VITE_ELEVATION_API` adds an optional direct-from-browser fallback and is
   empty by default.
 - **Routing**: Valhalla at `valhalla1.openstreetmap.de`, `motorcycle` costing,
-  falling back to `auto`/`bicycle` then OSRM if unsupported.
+  falling back to `auto`/`bicycle` then OSRM if unsupported. Both public hosts
+  are operated by FOSSGIS, so every request goes through the shared
+  `fetchFossgis` one-request-per-second queue.
 - **Surface**: the same Valhalla instance's `/trace_attributes`, which rejects
   any path over 200 km — `lib/surface.ts` chunks around that limit, and the
-  verify harness asserts the chunking so it cannot regress silently.
-- **Places**: Nominatim. **POIs**: Overpass.
-- **Fuel prices (Spain)**: `sedeaplicaciones.minetur.gob.es`
-  `/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/` — note
+  verify harness asserts the chunking so it cannot regress silently. Chunks are
+  sent sequentially through the same FOSSGIS queue as route requests.
+- **Places**: Nominatim, with a one-request-per-second queue and session cache.
+  `NOMINATIM_URL` changes the provider at runtime through `/config`.
+  **POIs**: Overpass.
+- **Fuel prices (Spain)**: `energia.serviciosmin.gob.es`
+  `/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/` — note
   `Precios` plural, the singular 404s. CORS is open, so no proxy. The feed is
   Spanish-formatted: decimal commas in prices *and* coordinates, and an empty
   price means "not sold", never zero. `lib/poi.ts` prefers it over Overpass
   for fuel inside Spain and falls back to Overpass whenever it has nothing.
 - **Tiles**: OpenFreeMap vectors, OpenStreetMap thumbnails/WebGL fallback,
-  OpenTopoMap, CyclOSM, Esri imagery/relief/hillshade.
+  OpenTopoMap, CyclOSM, Esri imagery/relief/hillshade. The OSM fallback must use
+  the exact `https://tile.openstreetmap.org/{z}/{x}/{y}.png` policy URL, with no
+  `{s}` subdomains.

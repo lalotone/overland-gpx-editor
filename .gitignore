@@ -24,6 +24,7 @@ tiles/
 !.env.example
 
 # Local tooling state — machine paths, not project config
+.octmp/
 .claude/settings.local.json
 .venv/
 __pycache__/

@@ -38,6 +38,47 @@ func do(t *testing.T, s *Server, method, target string, body io.Reader) *httptes
 	return rec
 }
 
+func TestConfigEndpoint(t *testing.T) {
+	tests := []struct {
+		name string
+		set  string
+		want string
+	}{
+		{name: "default", want: defaultNominatimURL},
+		{name: "configured", set: " https://search.example.test/ ", want: "https://search.example.test"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := New(Config{
+				GPXDir:        t.TempDir(),
+				ElevationHost: "http://elevation.invalid",
+				NominatimURL:  tt.set,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rec := do(t, s, http.MethodGet, "/config", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			var got struct {
+				NominatimURL string `json:"nominatimUrl"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.NominatimURL != tt.want {
+				t.Errorf("nominatimUrl = %q, want %q", got.NominatimURL, tt.want)
+			}
+			if cache := rec.Header().Get("Cache-Control"); cache != "no-cache" {
+				t.Errorf("Cache-Control = %q, want no-cache", cache)
+			}
+		})
+	}
+}
+
 func TestSafeGPXPathRejectsEscapes(t *testing.T) {
 	dir := "/library"
 	bad := []string{

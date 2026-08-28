@@ -96,11 +96,12 @@ Usage of ./gpx-editor:
   -addr string                address to listen on (default ":8000")
   -gpx-dir string             directory holding the track library (default "gpx")
   -elevation-host string      self-hosted opentopodata-style DEM service;
-                              empty uses the public Open-Meteo API
+                              empty uses tiles or Open-Meteo
   -elevation-dataset string   DEM dataset for -elevation-host (default "srtm30m")
   -elevation-tiles            read elevation from ~30 m terrain tiles (default true)
   -elevation-tile-zoom int    tile zoom (default 13, ~14 m/px)
   -elevation-tile-cache dir   where tiles are kept (default "tiles")
+  -nominatim-url string       Nominatim-compatible place-search URL
 ```
 
 `make cross` writes Linux, macOS and Windows binaries to `build/`, and
@@ -126,7 +127,7 @@ it behind a reverse proxy with auth, or keep it on a trusted network.
 
 Out of the box the backend reads elevation from **terrain tiles** — ~30 m
 Terrarium rasters, cached to `tiles/` next to the binary. Nothing to configure
-and no API quota to run into.
+and no per-point API quota to run into.
 
 Tiles are read locally rather than asked for a point at a time, which is why
 they are the default: a 95 km route needs 27 tiles (2.6 MB) and about 5
@@ -147,10 +148,10 @@ Two alternatives:
 # A DEM you already run. Takes precedence over tiles.
 ./gpx-editor -elevation-host http://dem.lan:30110 -elevation-dataset srtm30m
 
-# The public Open-Meteo API. No downloads, but Copernicus 90 m and a daily
-# request quota — 90 m postings smooth out exactly the gradients that matter
-# on a trail. One Pyrenean point reads 1539 m from it and 1920 m from 30 m
-# tiles.
+# The free non-commercial Open-Meteo API. No downloads, but Copernicus 90 m
+# and a daily request quota — 90 m postings smooth out exactly the gradients
+# that matter on a trail. One Pyrenean point reads 1539 m from it and 1920 m
+# from 30 m tiles.
 ./gpx-editor -elevation-tiles=false
 ```
 
@@ -169,6 +170,7 @@ bundle at build time.
 | --- | --- | --- | --- |
 | `ADDR` | backend | `:8000` | Listen address |
 | `GPX_DIR` | backend | `gpx` | Track library directory |
+| `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
 | `ELEVATION_TILE_CACHE` | backend | `tiles` | Where tiles are kept, so elevation works offline |
@@ -245,7 +247,8 @@ How it fits together, the file tree and the HTTP API are in
 
 ## External services
 
-All are public and keyless. Attribution is rendered on the map by Leaflet.
+All are public and keyless. Attribution for map, OSM-derived and elevation data
+is rendered on the map by Leaflet.
 
 | Service | Used for |
 | --- | --- |
@@ -253,16 +256,23 @@ All are public and keyless. Attribution is rendered on the map by Leaflet.
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | Raster library thumbnails and non-WebGL fallback — see the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) |
 | [OpenTopoMap](https://opentopomap.org) | Contour base map (CC-BY-SA, low volume only) |
 | [CyclOSM](https://www.cyclosm.org) | Surface/grade base map |
-| Esri ArcGIS | Satellite, relief, hillshade (attribution required) |
-| [Valhalla](https://valhalla1.openstreetmap.de) | Routing, with [OSRM](https://router.project-osrm.org) as fallback |
-| [Nominatim](https://nominatim.org) | Place search (max 1 request/second) |
-| [Overpass](https://overpass-api.de) | Fuel / water / campsite POIs |
-| [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) | Elevation by default — SRTM, NED and others, public domain |
-| [Open-Meteo](https://open-meteo.com/en/docs/elevation-api) | Elevation with `-elevation-tiles=false`; has a daily request quota |
+| Esri ArcGIS | Satellite, relief, hillshade (attribution required; World Shaded Relief retires March 2028) |
+| [Valhalla](https://valhalla1.openstreetmap.de) | Routing, with [OSRM](https://router.project-osrm.org) as fallback; serialized to the [FOSSGIS limit](https://www.fossgis.de/arbeitsgruppen/osm-server/nutzungsbedingungen/) of one request/second |
+| [Nominatim](https://nominatim.org) | Place search, throttled to one request/second and cached; switchable with `NOMINATIM_URL` |
+| [Overpass](https://overpass-api.de) | User-triggered fuel / water / campsite POIs |
+| [Spanish fuel-price feed](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas) | Official national snapshot, downloaded once per session |
+| [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) | Elevation by default — mixed-source data with [source-specific attribution](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) |
+| [Open-Meteo](https://open-meteo.com/en/docs/elevation-api) | Elevation with `-elevation-tiles=false`; free endpoint is non-commercial and quota-limited |
 
-These are shared community resources on donated infrastructure. The app is
-built for personal-scale use and does not cache tiles or throttle aggressively.
-If you point it at heavy or automated workloads, self-host the services first.
+These are shared community resources. Routing and Nominatim requests are
+serialized to their one-request-per-second limits, and repeated place searches
+are cached. Basemap tiles use only browser-managed caches and are never prefetched.
+For high-traffic, commercial or automated workloads, use contracted or
+self-hosted services instead.
+
+The request queues are per browser, matching the intended personal-scale
+deployment. A shared public deployment must enforce application-wide limits in
+a proxy and publish the operator contact required by the FOSSGIS terms.
 
 ---
 

@@ -129,6 +129,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `POST /elevation/batch` | `{locations: "lat,lon\|lat,lon…", dataset}` — chunked and stitched |
 | `POST /elevation/prefetch` | `{bbox: [s,w,n,e]}` — warm the tile cache for an area, in the background |
 | `GET /elevation/prefetch` | Progress of the running prefetch, polled by the UI |
+| `GET /config` | Runtime public-service configuration, currently the Nominatim-compatible search URL |
 | `GET /*` | The React app; unknown paths fall through to it |
 
 Errors come back as `{"detail": "…"}` with a matching status. CORS is open and

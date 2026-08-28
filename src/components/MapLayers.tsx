@@ -1,10 +1,23 @@
 import { useEffect, useState } from 'react'
 import { maplibreGL } from '@maplibre/maplibre-gl-leaflet'
 import { Pane, TileLayer, useMap } from 'react-leaflet'
-import { BASE_LAYERS, HILLSHADE_LAYER, getBaseLayer } from '../lib/terrain'
+import { BASE_LAYERS, HILLSHADE_LAYER, SERVICE_ATTRIBUTIONS, getBaseLayer } from '../lib/terrain'
 import type { ColorMode, ThumbnailLayerDefinition } from '../lib/terrain'
 
 let webGL2Available: boolean | undefined
+
+function ServiceAttributions() {
+  const map = useMap()
+
+  useEffect(() => {
+    SERVICE_ATTRIBUTIONS.forEach(credit => map.attributionControl.addAttribution(credit))
+    return () => {
+      SERVICE_ATTRIBUTIONS.forEach(credit => map.attributionControl.removeAttribution(credit))
+    }
+  }, [map])
+
+  return null
+}
 
 function hasWebGL2(): boolean {
   if (webGL2Available !== undefined) return webGL2Available
@@ -89,6 +102,7 @@ export function MapTiles({
 
   return (
     <>
+      <ServiceAttributions />
       {base.kind === 'vector' ? (
         <VectorBaseLayer
           key={base.id}

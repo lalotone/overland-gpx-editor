@@ -39,8 +39,19 @@ export interface ThumbnailLayerDefinition {
 const OSM_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 
+/** Credits for non-tile services whose data remains visible over any base map. */
+export const SERVICE_ATTRIBUTIONS = [
+  'OSM services: Data &copy; ' +
+    '<a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> ' +
+    '(<a href="https://opendatacommons.org/licenses/odbl/">ODbL</a>) | ' +
+    '<a href="https://www.openstreetmap.org/fixthemap">fix/report</a>',
+  'Elevation: <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md">' +
+    'USGS, Copernicus &amp; other terrain sources</a> | ' +
+    '<a href="https://open-meteo.com/">data by Open-Meteo.com</a>',
+]
+
 const OSM_THUMBNAIL_LAYER: ThumbnailLayerDefinition = {
-  url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
   attribution: OSM_ATTRIBUTION,
   maxZoom: 19,
 }
@@ -87,7 +98,7 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     title: 'Esri World Imagery — check a track really exists on the ground',
     kind: 'raster',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    attribution: 'Tiles &copy; Esri — Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP',
+    attribution: 'Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community',
     maxZoom: 19,
   },
   {
@@ -96,7 +107,7 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     title: 'Esri World Shaded Relief — landform shape without clutter',
     kind: 'raster',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}',
-    attribution: 'Tiles &copy; Esri — Source: Esri',
+    attribution: 'Copyright &copy; 2014 Esri',
     maxZoom: 13,
   },
 ]
@@ -104,7 +115,11 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
 /** Semi-transparent relief, drawn between the base tiles and the track. */
 export const HILLSHADE_LAYER = {
   url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
-  attribution: 'Hillshade &copy; Esri — Esri, USGS, NOAA',
+  attribution:
+    '<a href="https://goto.arcgisonline.com/maps/Elevation/World_Hillshade" ' +
+    'title="Sources: Esri, Vantor, Airbus DS, USGS, NGA, NASA, CGIAR, N Robinson, NCEAS, NLS, OS, NMA, ' +
+    'Geodatastyrelsen, Rijkswaterstaat, GSA, Geoland, FEMA, Intermap, and the GIS user community">' +
+    'Hillshade &copy; Esri and data providers</a>',
   maxZoom: 16,
 }
 

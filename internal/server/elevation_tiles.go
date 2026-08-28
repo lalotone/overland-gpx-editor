@@ -24,7 +24,7 @@ import (
  * tile is a 256x256 grid of ground heights. Two things follow from that.
  *
  * The data is ~30 m where the underlying sources are (SRTM, NED and friends)
- * against Copernicus 90 m from the default provider, which matters most on
+ * against Copernicus 90 m from the fallback API, which matters most on
  * exactly the steep ground this app is used for — a 90 m cell averages across
  * terrain that can move hundreds of metres.
  *

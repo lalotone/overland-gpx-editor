@@ -15,10 +15,10 @@ import (
 /*
  * Elevation lookups.
  *
- * Two providers, one response shape. Open-Meteo is the default because it
- * needs no setup and works from anywhere; a self-hosted opentopodata instance
- * is better data (30 m postings against Copernicus 90 m — see docs/ACCURACY.md
- * on why that matters on a trail) and takes over as soon as its host is set.
+ * Two API providers, one response shape. Open-Meteo is the no-setup fallback
+ * when terrain tiles are disabled; a self-hosted opentopodata instance can
+ * provide better data (30 m postings against Copernicus 90 m — see
+ * docs/ACCURACY.md) and takes over as soon as its host is set.
  */
 
 // Both upstreams cap a single request at 100 coordinates.

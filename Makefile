@@ -1,7 +1,8 @@
-BINARY  := gpx-editor
+BINARY  := overland
+DIST    := gpx-editor
 # node_modules contains a stray Go package, so ./... is not usable here.
-PKGS    := . ./internal/... ./web/...
-# Stamped into the binary and reported by -version. Falls back to "dev" outside
+PKGS    := ./cmd/... ./internal/... ./web/...
+# Stamped into the binary and reported by --version. Falls back to "dev" outside
 # a git checkout, so a tarball build still says something honest.
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -27,11 +28,11 @@ frontend: node_modules
 	npm run build
 
 backend:
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/$(BINARY)
 
 ## run: build everything and serve on :8000
 run: build
-	./$(BINARY)
+	./$(BINARY) serve
 
 ## test: Go tests plus the frontend logic harness
 test: node_modules
@@ -55,11 +56,11 @@ cross: frontend
 	@rm -rf build && mkdir -p build
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
-		out=build/$(BINARY)-$$os-$$arch; \
+		out=build/$(DIST)-$$os-$$arch; \
 		bin=$(BINARY); [ "$$os" = windows ] && bin=$(BINARY).exe; \
 		mkdir -p $$out; \
 		echo "  $$os/$$arch"; \
-		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $$out/$$bin . || exit 1; \
+		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $$out/$$bin ./cmd/$(BINARY) || exit 1; \
 		cp README.md LICENSE $$out/; \
 	done
 
@@ -76,7 +77,7 @@ packages: cross
 		echo "nfpm not found: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest"; exit 1; }
 	@mkdir -p build/pkgroot
 	@for arch in amd64 arm64; do \
-		cp build/$(BINARY)-linux-$$arch/$(BINARY) build/pkgroot/$(BINARY); \
+		cp build/$(DIST)-linux-$$arch/$(BINARY) build/pkgroot/$(BINARY); \
 		for format in deb rpm; do \
 			ARCH=$$arch VERSION=$(DEB_VERSION) $(NFPM) package \
 				--config packaging/nfpm.yaml --packager $$format --target build/ || exit 1; \
@@ -87,7 +88,7 @@ packages: cross
 
 ## dist: the archives, packages and checksums that go on a GitHub release
 dist: packages
-	@cd build && for dir in $(BINARY)-*/; do \
+	@cd build && for dir in $(DIST)-*/; do \
 		dir=$${dir%/}; \
 		case $$dir in \
 			*windows*) zip -qr $$dir.zip $$dir ;; \

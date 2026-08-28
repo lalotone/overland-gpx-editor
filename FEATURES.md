@@ -178,7 +178,7 @@ the OSM fuel layer answers as before.
   visible map is fetched in the background with a progress readout; pan
   somewhere else and it follows. Areas too large to be worth caching are
   reported rather than downloaded.
-- No third-party Go dependencies — standard library only.
+- Standard-library-only HTTP backend; the command interface uses `urfave/cli`.
 
 ---
 

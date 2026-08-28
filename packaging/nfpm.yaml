@@ -23,8 +23,8 @@ description: |
 contents:
   # The Makefile stages the right binary here before each run: nfpm expands
   # environment variables in the metadata above but not in content paths.
-  - src: ./build/pkgroot/gpx-editor
-    dst: /usr/bin/gpx-editor
+  - src: ./build/pkgroot/overland
+    dst: /usr/bin/overland
 
   - src: ./README.md
     dst: /usr/share/doc/gpx-editor/README.md

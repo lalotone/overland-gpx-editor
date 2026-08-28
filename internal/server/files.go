@@ -28,13 +28,20 @@ func safeGPXFilename(filename string) (string, error) {
 	}
 	// Reject anything with a directory component rather than stripping it:
 	// silently rewriting a path the caller asked for is its own surprise.
-	if strings.ContainsAny(filename, `/\`) || strings.ContainsRune(filename, 0) {
+	if strings.HasPrefix(filename, ".") || strings.ContainsAny(filename, `/\`) || strings.ContainsRune(filename, 0) {
 		return "", errBadFilename
 	}
 	if filename != filepath.Base(filename) || filename == "." || filename == ".." {
 		return "", errBadFilename
 	}
 	return filename, nil
+}
+
+// ValidateGPXFilename reports whether filename can be addressed through the
+// track library API.
+func ValidateGPXFilename(filename string) error {
+	_, err := safeGPXFilename(filename)
+	return err
 }
 
 // resolveFile pulls {filename} off the request and validates it, writing the

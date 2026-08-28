@@ -10,12 +10,12 @@ origin, and there is nothing to deploy alongside it.
 
 ```
 npm run build   →  web/dist/{index.html,assets/*}
-go build        →  //go:embed all:dist  →  ./gpx-editor
+go build ./cmd/overland → //go:embed all:dist → ./overland
 ```
 
 Build order matters: Go embeds whatever is in `web/dist` at compile time.
-`make` runs both in sequence; `go build` on its own produces a working
-API-only binary that logs that it has no UI.
+`make` runs both in sequence; `go build ./cmd/overland` on its own produces a
+working API-only binary that logs that it has no UI.
 
 Two consequences worth knowing:
 
@@ -53,7 +53,11 @@ src/
     ├── terrain.ts              Map layers and colour scales
     └── poi.ts                  Overpass fuel / water / campsite lookups
 
-main.go                         Flags, wiring, graceful shutdown
+cmd/overland/
+├── main.go                     Minimal urfave/cli entry point
+├── serve/                      HTTP server flags and graceful shutdown
+├── import/                     Create-only GPX library import
+└── util/                       Shared CLI flags
 internal/server/
 ├── server.go                   Routes, CORS, embedded-frontend handler
 ├── files.go                    Track library: list/read/write/upload/delete
@@ -73,11 +77,11 @@ gpx/                            Local track library (gitignored)
 
 ## Backend
 
-**No third-party dependencies.** Routing is `http.ServeMux` with method patterns
-(`GET /gpx/{filename}`), and `go.mod` has an empty require block. Go 1.25 is the
-minimum because the library uses the traversal-resistant `os.Root` file APIs.
-Keep it that way unless there is a real reason — the point of the Go rewrite is
-one dependency-free binary.
+The CLI uses `urfave/cli`; the HTTP backend remains standard-library-only.
+Routing is `http.ServeMux` with method patterns (`GET /gpx/{filename}`). Go 1.25
+is the minimum because the library uses the traversal-resistant `os.Root` file
+APIs. Keep dependencies out of `internal/server` unless there is a concrete
+reason to add one.
 
 **`files.go`** is a track library over a directory. Every filename arriving from
 the network goes through `safeGPXFilename`, which requires a bare `*.gpx` with no

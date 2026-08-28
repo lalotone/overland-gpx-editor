@@ -26,7 +26,7 @@ npx tsc --noEmit         # type check
 npm run verify           # logic checks against the real files in ./gpx
 npm run lint             # eslint
 go test ./internal/...   # backend tests — NOT ./..., see below
-go vet ./internal/... .
+go vet ./cmd/... ./internal/... ./web/...
 ```
 
 `npm run verify` is the important one for anything touching parsing, elevation
@@ -38,10 +38,11 @@ commands to `. ./internal/... ./web/...` (what the Makefile does).
 
 ### Common Commands
 ```bash
-npm install         # frontend dependencies (Go has none)
-make                # npm run build + go build → ./gpx-editor
+npm install         # frontend dependencies (the Go CLI uses urfave/cli)
+make                # npm run build + go build → ./overland
 make run            # build and serve on :8000
-./gpx-editor -h     # flags
+./overland --help # commands
+./overland serve --help
 npm run dev         # frontend dev server (http://localhost:5173)
 ```
 

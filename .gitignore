@@ -5,8 +5,9 @@ node_modules/
 web/dist/*
 !web/dist/.gitkeep
 
-# Compiled binaries. `make` produces gpx-editor; a bare `go build .` names the
-# binary after the module instead.
+# Compiled binaries. `make` produces overland; older builds used the project
+# name instead.
+/overland
 /gpx-editor
 /overland-gpx-editor
 /build/

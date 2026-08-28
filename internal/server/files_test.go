@@ -98,6 +98,7 @@ func TestSafeGPXFilenameRejectsEscapes(t *testing.T) {
 		`sub\dir.gpx`,
 		"/etc/passwd.gpx",
 		"notes.txt",
+		".hidden.gpx",
 		"",
 		"..",
 		"track.gpx\x00.txt",

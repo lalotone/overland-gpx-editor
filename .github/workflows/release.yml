@@ -5,7 +5,7 @@ name: Release
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # The tag is also the version — the Makefile stamps it into the binary with
-# git describe, so `gpx-editor -version` reports what was released.
+# git describe, so `overland --version` reports what was released.
 on:
   push:
     tags: ['v*']
@@ -61,7 +61,7 @@ jobs:
           ```bash
           tar xzf gpx-editor-linux-amd64.tar.gz
           cd gpx-editor-linux-amd64
-          ./gpx-editor
+          ./overland serve
           ```
 
           On Debian, Ubuntu, Fedora or RHEL there are packages instead:
@@ -71,12 +71,12 @@ jobs:
           sudo dnf install ./gpx-editor-*.x86_64.rpm
           ```
 
-          They install `/usr/bin/gpx-editor` and drop an example systemd unit
+          They install `/usr/bin/overland` and drop an example systemd unit
           in `/usr/share/doc/gpx-editor/` — deliberately not registered, since
           the user and library directory are yours to choose.
 
           **macOS** — the binaries are unsigned, so Gatekeeper quarantines
-          them. Clear it once with `xattr -dr com.apple.quarantine ./gpx-editor`,
+          them. Clear it once with `xattr -dr com.apple.quarantine ./overland`,
           or right-click the binary and choose Open.
 
           **Windows** — SmartScreen warns about an unrecognised app for the

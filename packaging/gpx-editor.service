@@ -16,9 +16,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/gpx-editor -addr 127.0.0.1:8000 \
-    -gpx-dir /var/lib/gpx-editor/gpx \
-    -elevation-tile-cache /var/lib/gpx-editor/tiles
+ExecStart=/usr/bin/overland serve --addr 127.0.0.1:8000 \
+    --gpx-dir /var/lib/gpx-editor/gpx \
+    --elevation-tile-cache /var/lib/gpx-editor/tiles
 User=gpx
 Group=gpx
 WorkingDirectory=/var/lib/gpx-editor

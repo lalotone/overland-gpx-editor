@@ -9,7 +9,7 @@ shipped as one self-contained binary.
 
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
-[![Go dependencies](https://img.shields.io/badge/Go%20dependencies-0-brightgreen)](go.mod)
+[![Go dependencies](https://img.shields.io/badge/Go%20dependencies-1-brightgreen)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -51,7 +51,7 @@ library — on <http://localhost:8000>. There is nothing else to install.
 ```bash
 tar xzf gpx-editor-linux-amd64.tar.gz
 cd gpx-editor-linux-amd64
-./gpx-editor
+./overland serve
 ```
 
 On Debian, Ubuntu, Fedora or RHEL there are packages instead:
@@ -61,7 +61,7 @@ sudo apt install ./gpx-editor_0.1.0_amd64.deb     # or
 sudo dnf install ./gpx-editor-0.1.0-1.x86_64.rpm
 ```
 
-They install `/usr/bin/gpx-editor` and leave an example systemd unit in
+They install `/usr/bin/overland` and leave an example systemd unit in
 `/usr/share/doc/gpx-editor/`. It is deliberately not registered with systemd:
 the user, the library directory and the listen address are yours to choose,
 and a package that silently starts serving on `:8000` is not a nice surprise.
@@ -69,7 +69,7 @@ and a package that silently starts serving on `:8000` is not a nice surprise.
 The binaries are unsigned, so both desktop platforms will object once:
 
 - **macOS** — Gatekeeper quarantines the download. Clear it with
-  `xattr -dr com.apple.quarantine ./gpx-editor`, or right-click → Open.
+  `xattr -dr com.apple.quarantine ./overland`, or right-click → Open.
 - **Windows** — SmartScreen warns about an unrecognised app. More info →
   Run anyway.
 
@@ -84,7 +84,7 @@ Each release ships `SHA256SUMS`; check a download with
 git clone https://github.com/lalotone/overland-gpx-editor.git
 cd overland-gpx-editor
 make            # installs npm deps, builds the frontend, builds the binary
-./gpx-editor    # http://localhost:8000
+./overland serve    # http://localhost:8000
 ```
 
 That is the whole app — frontend, API and track library in one process. Tracks
@@ -92,18 +92,20 @@ live as plain `.gpx` files in `$XDG_DATA_HOME/overland/gpx` (normally
 `~/.local/share/overland/gpx`), so your library stays readable by every other
 tool you own and the rest of the app data has room alongside it.
 
+The CLI has two commands:
+
+```bash
+# Start the web app and API.
+./overland serve [options]
+
+# Add one or more files to the library without replacing existing tracks.
+./overland import [--gpx-dir DIR] FILE...
 ```
-Usage of ./gpx-editor:
-  -addr string                address to listen on (default ":8000")
-  -gpx-dir string             directory holding the track library (default XDG data gpx dir)
-  -elevation-host string      self-hosted opentopodata-style DEM service;
-                              empty uses tiles or Open-Meteo
-  -elevation-dataset string   DEM dataset for -elevation-host (default "srtm30m")
-  -elevation-tiles            read elevation from ~30 m terrain tiles (default true)
-  -elevation-tile-zoom int    tile zoom (default 13, ~14 m/px)
-  -elevation-tile-cache dir   where tiles are kept (default XDG cache dir)
-  -nominatim-url string       Nominatim-compatible place-search URL
-```
+
+Run `./overland serve --help` for server and elevation options, or
+`./overland import --help` for import usage. Both commands read `GPX_DIR` and
+default to `$XDG_DATA_HOME/overland/gpx` (normally
+`~/.local/share/overland/gpx`).
 
 `make cross` writes Linux, macOS and Windows binaries to `build/`, and
 `make dist` archives them with `.deb`/`.rpm` packages and checksums the way a
@@ -112,10 +114,11 @@ since nothing here uses cgo — `make packages` does want
 [nfpm](https://nfpm.goreleaser.com) on `PATH`.
 
 > [!NOTE]
-> The frontend build output is not committed, so `go install` on its own
-> produces an **API-only** binary. Build with `make` to get the app.
+> The frontend build output is not committed, so
+> `go install ./cmd/overland` produces an **API-only** binary. Build with
+> `make` to get the app.
 
-**Working on the frontend:** run `./gpx-editor` and `npm run dev` side by side.
+**Working on the frontend:** run `./overland serve` and `npm run dev` side by side.
 Vite proxies the API paths to `:8000`, so the app uses the same URLs in dev as
 it does inside the binary.
 
@@ -148,13 +151,13 @@ Two alternatives:
 
 ```bash
 # A DEM you already run. Takes precedence over tiles.
-./gpx-editor -elevation-host http://dem.lan:30110 -elevation-dataset srtm30m
+./overland serve --elevation-host http://dem.lan:30110 --elevation-dataset srtm30m
 
 # The free non-commercial Open-Meteo API. No downloads, but Copernicus 90 m
 # and a daily request quota — 90 m postings smooth out exactly the gradients
 # that matter on a trail. One Pyrenean point reads 1539 m from it and 1920 m
 # from 30 m tiles.
-./gpx-editor -elevation-tiles=false
+./overland serve --elevation-tiles=false
 ```
 
 Whichever you use, tracks that already carry `<ele>` data display and analyse
@@ -233,7 +236,7 @@ make check     # tests plus go vet, gofmt, tsc, eslint
 make cross     # release binaries for linux/darwin/windows
 make packages  # .deb and .rpm (needs nfpm)
 make dist      # all of the above, archived with SHA256SUMS
-npm run dev    # frontend dev server with HMR (needs ./gpx-editor running)
+npm run dev    # frontend dev server with HMR (needs ./overland serve running)
 ```
 
 Pushing a `v*` tag builds and publishes a release; every push and pull request
@@ -302,8 +305,8 @@ Issues and pull requests are welcome. Before opening one:
 2. Read [docs/ACCURACY.md](docs/ACCURACY.md) first if you are touching
    distance, elevation or slope. The methodology there is deliberate, and
    several obvious "simplifications" are the bugs it exists to prevent.
-3. Keep `src/lib/` free of React and DOM globals, and the Go backend free of
-   third-party dependencies.
+3. Keep `src/lib/` free of React and DOM globals, and the Go HTTP backend free
+   of third-party dependencies.
 
 | Document | Contents |
 | --- | --- |

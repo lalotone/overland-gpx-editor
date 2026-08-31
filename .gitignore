@@ -11,6 +11,8 @@ web/dist/*
 /gpx-editor
 /overland-gpx-editor
 /build/
+/playwright-report/
+/test-results/
 
 # Your track library. Never commit this: GPX files are a log of where you have
 # physically been, timestamped.
@@ -29,3 +31,5 @@ tiles/
 .claude/settings.local.json
 .venv/
 __pycache__/
+.kata.local.toml
+/overlandx

@@ -3,7 +3,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -40,10 +42,35 @@ type Config struct {
 	ElevationTileZoom int
 	// ElevationTileCache is a directory to keep fetched tiles in. Empty keeps
 	// them in memory only, so nothing survives a restart.
-	ElevationTileCache string
+	ElevationTileCache         string
+	ElevationTileCacheMaxBytes int64
 	// NominatimURL is the browser-facing place-search service. It is exposed
 	// through /config so operators can switch providers without rebuilding.
 	NominatimURL string
+	// OfflineCacheDir stores privacy-sensitive provider responses. Empty
+	// disables generic persistence while retaining bounded proxy behavior.
+	OfflineCacheDir        string
+	OfflineCacheMaxBytes   int64
+	OfflineCacheMaxEntries int
+	// OfflineMode is "auto" or "cache-only". Cache-only never uses an
+	// outbound transport, including for elevation tile misses.
+	OfflineMode string
+	// UpstreamContact is appended to the stable outbound User-Agent.
+	UpstreamContact string
+	// TrustedUIOrigin authorizes cache-management requests from a separately
+	// hosted frontend. It is never returned by /config.
+	TrustedUIOrigin   string
+	OfflineAdminToken string
+	ValhallaURL       string
+	OSRMURL           string
+	OverpassURL       string
+	FuelURL           string
+	// OpenFreeMapURL enables the persistent OpenFreeMap-compatible map proxy.
+	// The CLI supplies the public Liberty style by default.
+	OpenFreeMapURL       string
+	OpenFreeMapAllowBulk bool
+	// HTTPClient is an injection seam for tests and controlled embeddings.
+	HTTPClient *http.Client
 	// AllowedOrigins lists exact browser origins allowed to call the API.
 	// Empty permits same-origin requests only when the request host is loopback.
 	AllowedOrigins []string
@@ -52,21 +79,40 @@ type Config struct {
 }
 
 const (
-	defaultNominatimURL = "https://nominatim.openstreetmap.org"
-	maxInFlightRequests = 32
-	maxQueuedRequests   = 64
+	defaultNominatimURL            = "https://nominatim.openstreetmap.org"
+	defaultValhallaURL             = "https://valhalla1.openstreetmap.de"
+	defaultOSRMURL                 = "https://router.project-osrm.org"
+	defaultOverpassURL             = "https://overpass-api.de/api/interpreter"
+	defaultFuelURL                 = "https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/"
+	defaultCacheBytes              = int64(1 << 30)
+	defaultElevationTileCacheBytes = int64(1 << 30)
+	defaultCacheEntries            = 100000
+	maxInFlightRequests            = 32
+	maxQueuedRequests              = 64
 )
 
 // Server is an http.Handler exposing the whole app.
 type Server struct {
-	gpxDir         string
-	gpxRoot        *os.Root
-	gpxMu          sync.RWMutex
-	elevation      *elevationProxy
-	nominatimURL   string
-	allowedOrigins map[string]struct{}
-	assets         fs.FS
-	handler        http.Handler
+	gpxDir          string
+	gpxRoot         *os.Root
+	gpxMu           sync.RWMutex
+	elevation       *elevationProxy
+	nominatimURL    string
+	mode            offlineMode
+	cache           *cacheStore
+	outbound        *outboundClient
+	providers       map[string]*providerPolicy
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	trustedUIOrigin string
+	adminToken      string
+	openFreeMap     *openFreeMapManager
+	rasterMaps      map[string]*rasterAdapter
+	packs           *packManager
+	allowedOrigins  map[string]struct{}
+	assets          fs.FS
+	handler         http.Handler
 }
 
 // New validates cfg, creates the GPX directory and returns the handler.
@@ -82,25 +128,144 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	mode := offlineMode(strings.TrimSpace(cfg.OfflineMode))
+	if mode == "" {
+		mode = modeAuto
+	}
+	if mode != modeAuto && mode != modeCacheOnly {
+		gpxRoot.Close()
+		return nil, errors.New("offline mode must be auto or cache-only")
+	}
+	if cfg.OfflineCacheMaxBytes == 0 {
+		cfg.OfflineCacheMaxBytes = defaultCacheBytes
+	}
+	if cfg.OfflineCacheMaxEntries == 0 {
+		cfg.OfflineCacheMaxEntries = defaultCacheEntries
+	}
+	if cfg.ElevationTileCacheMaxBytes == 0 {
+		cfg.ElevationTileCacheMaxBytes = defaultElevationTileCacheBytes
+	}
+	if cfg.ElevationTileCacheMaxBytes < 0 {
+		gpxRoot.Close()
+		return nil, errors.New("elevation tile cache max bytes must be positive")
+	}
+	cache, err := newCacheStore(cfg.OfflineCacheDir, cfg.OfflineCacheMaxBytes, cfg.OfflineCacheMaxEntries)
+	if err != nil {
+		gpxRoot.Close()
+		return nil, err
+	}
+	trustedUIOrigin := ""
+	if strings.TrimSpace(cfg.TrustedUIOrigin) != "" {
+		trustedUIOrigin, err = normalizeOrigin(cfg.TrustedUIOrigin)
+		if err != nil {
+			gpxRoot.Close()
+			cache.close()
+			return nil, fmt.Errorf("trusted UI origin: %w", err)
+		}
+		allowedOrigins[trustedUIOrigin] = struct{}{}
+	}
+
+	providerURLs := map[string]string{
+		"nominatim": valueOrDefault(cfg.NominatimURL, defaultNominatimURL),
+		"valhalla":  valueOrDefault(cfg.ValhallaURL, defaultValhallaURL),
+		"osrm":      valueOrDefault(cfg.OSRMURL, defaultOSRMURL),
+		"overpass":  valueOrDefault(cfg.OverpassURL, defaultOverpassURL),
+		"fuel":      valueOrDefault(cfg.FuelURL, defaultFuelURL),
+	}
+	parsedURLs := make(map[string]*url.URL, len(providerURLs))
+	for name, raw := range providerURLs {
+		parsedURLs[name], err = parseProviderURL(name, raw)
+		if err != nil {
+			gpxRoot.Close()
+			cache.close()
+			return nil, err
+		}
+	}
+	var openFreeMapURL *url.URL
+	if strings.TrimSpace(cfg.OpenFreeMapURL) != "" {
+		openFreeMapURL, err = parseProviderURL("openfreemap", cfg.OpenFreeMapURL)
+		if err != nil {
+			gpxRoot.Close()
+			cache.close()
+			return nil, err
+		}
+	}
+	controlReserve := int64(maxStoredPackManifests * maxPackManifestBytes)
+	if openFreeMapURL != nil {
+		controlReserve += maxMapGenerationBytes
+	}
+	if err := cache.setReservedBytes(controlReserve); err != nil {
+		gpxRoot.Close()
+		cache.close()
+		return nil, fmt.Errorf("reserve offline control storage: %w", err)
+	}
+
+	rootCtx, cancel := context.WithCancel(context.Background())
 	// A DEM lookup of 100 points is not instant, but nothing about it should
 	// take half a minute either.
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	} else {
+		clone := *client
+		client = &clone
+		if client.Timeout == 0 {
+			client.Timeout = 30 * time.Second
+		}
+	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		if len(via) > 0 && (!strings.EqualFold(req.URL.Scheme, via[0].URL.Scheme) || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+			return errors.New("redirect left approved provider origin")
+		}
+		return nil
+	}
+	contact := strings.TrimSpace(cfg.UpstreamContact)
+	if contact == "" {
+		contact = "https://github.com/lalotone/overland-gpx-editor"
+	}
+	ua := "gpx-editor/1 (" + strings.ReplaceAll(contact, ")", "") + ")"
+	fossgis := newRateGroup(time.Second)
+	nominatimGroup := newRateGroup(time.Second)
+	overpassGroup := newRateGroup(time.Second)
+	providers := map[string]*providerPolicy{
+		"fuel":           newProviderPolicy("fuel", "fuel", parsedURLs["fuel"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json"}, nil, true),
+		"places":         newProviderPolicy("nominatim", "places", parsedURLs["nominatim"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 2<<20, []string{"application/json"}, nominatimGroup, false),
+		"pois":           newProviderPolicy("overpass", "pois", parsedURLs["overpass"], time.Hour, 7*24*time.Hour, 30*24*time.Hour, true, 8<<20, []string{"application/json"}, overpassGroup, true),
+		"valhalla-route": newProviderPolicy("valhalla-route", "routing", parsedURLs["valhalla"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
+		"osrm-route":     newProviderPolicy("osrm-route", "routing", parsedURLs["osrm"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
+		"surface":        newProviderPolicy("valhalla-surface", "surface", parsedURLs["valhalla"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
+	}
+	providers["fuel"].maxFresh = 24 * time.Hour
+	providers["fuel"].applicationData = true
 
 	// An explicitly configured DEM host is a deliberate choice, so it wins over
 	// the tile default.
 	var tiles *tileStore
 	if cfg.ElevationTiles && strings.TrimSpace(cfg.ElevationHost) == "" {
-		tiles = newTileStore(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, client)
+		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client)
+		if tiles.cacheErr != nil {
+			cancel()
+			gpxRoot.Close()
+			cache.close()
+			return nil, fmt.Errorf("open elevation tile cache: %w", tiles.cacheErr)
+		}
 	}
 
-	nominatimURL := strings.TrimRight(strings.TrimSpace(cfg.NominatimURL), "/")
-	if nominatimURL == "" {
-		nominatimURL = defaultNominatimURL
-	}
+	nominatimURL := strings.TrimRight(parsedURLs["nominatim"].String(), "/")
 
 	s := &Server{
-		gpxDir:  cfg.GPXDir,
-		gpxRoot: gpxRoot,
+		gpxDir:          cfg.GPXDir,
+		gpxRoot:         gpxRoot,
+		mode:            mode,
+		cache:           cache,
+		providers:       providers,
+		ctx:             rootCtx,
+		cancel:          cancel,
+		trustedUIOrigin: trustedUIOrigin,
+		adminToken:      cfg.OfflineAdminToken,
 		elevation: &elevationProxy{
 			tiles:          tiles,
 			host:           strings.TrimSpace(cfg.ElevationHost),
@@ -111,6 +276,56 @@ func New(cfg Config) (*Server, error) {
 		allowedOrigins: allowedOrigins,
 		assets:         cfg.Assets,
 	}
+	// The tile store must join the server-owned lifecycle, not a detached
+	// prefetch WaitGroup.
+	if tiles != nil {
+		tiles.configureLifecycle(mode == modeCacheOnly, rootCtx, &s.wg)
+		tiles.userAgent = ua
+	}
+	s.outbound = newOutboundClient(mode, cache, client, rootCtx, &s.wg, ua)
+	s.rasterMaps, err = newRasterAdapters()
+	if err != nil {
+		cancel()
+		gpxRoot.Close()
+		cache.close()
+		if tiles != nil {
+			tiles.closeCache()
+		}
+		return nil, err
+	}
+	s.elevation.outbound = s.outbound
+	if s.elevation.tiles == nil {
+		var elevationBase *url.URL
+		if s.elevation.host != "" {
+			elevationBase, err = parseProviderURL("elevation", s.elevation.host)
+		} else {
+			elevationBase, err = parseProviderURL("open-meteo", openMeteoURL)
+		}
+		if err != nil {
+			cancel()
+			gpxRoot.Close()
+			cache.close()
+			if tiles != nil {
+				tiles.closeCache()
+			}
+			return nil, err
+		}
+		s.elevation.policy = newProviderPolicy("elevation", "elevation", elevationBase, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, maxElevationBodyBytes, []string{"application/json", "text/plain"}, newConcurrentRateGroup(0, 2), true)
+	}
+	s.packs, err = newPackManager(s)
+	if err != nil {
+		cancel()
+		gpxRoot.Close()
+		cache.close()
+		if tiles != nil {
+			tiles.closeCache()
+		}
+		return nil, err
+	}
+	if openFreeMapURL != nil {
+		s.openFreeMap = newOpenFreeMapManager(s, openFreeMapURL, cfg.OpenFreeMapAllowBulk)
+		s.openFreeMap.activate(rootCtx)
+	}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -118,9 +333,35 @@ func New(cfg Config) (*Server, error) {
 // Close releases the directory handle used to confine library operations.
 // Call it after the HTTP server has stopped accepting requests.
 func (s *Server) Close() error {
+	s.cancel()
+	if s.elevation.tiles != nil {
+		s.elevation.tiles.close()
+	}
+	s.wg.Wait()
+	s.cache.flushAccesses()
+	var tileCacheErr error
+	if s.elevation.tiles != nil {
+		tileCacheErr = s.elevation.tiles.closeCache()
+	}
 	s.gpxMu.Lock()
-	defer s.gpxMu.Unlock()
-	return s.gpxRoot.Close()
+	gpxErr := s.gpxRoot.Close()
+	s.gpxMu.Unlock()
+	return errors.Join(gpxErr, s.cache.close(), tileCacheErr)
+}
+
+func valueOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func newProviderPolicy(name, scope string, base *url.URL, fresh, stale, retention time.Duration, staleOnError bool, maxBody int64, contentTypes []string, group *rateGroup, packEligible bool) *providerPolicy {
+	allowStale := stale >= 0
+	if stale < 0 {
+		stale = 0
+	}
+	return &providerPolicy{name: name, scope: scope, baseURL: base, sourceFingerprint: sourceFingerprint(base), fallbackFresh: fresh, maxStale: stale, allowStale: allowStale, retention: retention, staleOnError: staleOnError, maxBody: maxBody, contentTypes: contentTypes, group: group, packEligible: packEligible, approvedHosts: map[string]struct{}{strings.ToLower(base.Host): {}}}
 }
 
 func (s *Server) routes() http.Handler {
@@ -136,7 +377,8 @@ func (s *Server) routes() http.Handler {
 		r.Use(cors.Handler(cors.Options{
 			AllowedOrigins:     mapKeys(s.allowedOrigins),
 			AllowedMethods:     []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-			AllowedHeaders:     []string{"Accept", "Content-Type"},
+			AllowedHeaders:     []string{"Accept", "Content-Type", "Authorization", "X-GPX-Editor"},
+			ExposedHeaders:     []string{"X-GPX-Cache", "X-GPX-Cached-At", "Age"},
 			AllowCredentials:   false,
 			MaxAge:             300,
 			OptionsPassthrough: true,
@@ -152,10 +394,82 @@ func (s *Server) routes() http.Handler {
 	r.Post("/gpx/{filename}", s.handleSaveFile)
 	r.Delete("/gpx/{filename}", s.handleDeleteFile)
 	r.Post("/upload", s.handleUpload)
-	r.Get("/elevation", s.handleElevation)
-	r.Post("/elevation/batch", s.handleElevationBatch)
-	r.Post("/elevation/prefetch", s.handlePrefetch)
+	r.Get("/elevation", s.protectOutboundResource(s.handleElevation))
+	r.Post("/elevation/batch", s.protectOutboundResource(s.handleElevationBatch))
+	r.Post("/elevation/prefetch", s.protectOutboundResource(s.handlePrefetch))
 	r.Get("/elevation/prefetch", s.handlePrefetchStatus)
+	r.Get("/fuel", s.protectOutboundResource(s.handleFuel))
+	r.Get("/places/search", s.protectOutboundResource(s.handlePlaceSearch))
+	r.Post("/pois/search", s.protectOutboundResource(s.handlePOISearch))
+	r.Post("/routing/valhalla/route", s.protectOutboundResource(s.handleValhallaRoute))
+	r.Post("/routing/osrm/route", s.protectOutboundResource(s.handleOSRMRoute))
+	r.Post("/routing/valhalla/surface", s.protectOutboundResource(s.handleValhallaSurface))
+	r.Get("/map/raster/{layer}/{z}/{x}/{y}", s.protectOutboundResource(s.handleRasterMap))
+	r.Get("/map/openfreemap/style.json", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleStyle(w, r)
+	}))
+	r.Get("/map/openfreemap/source/{source}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleSource(w, r)
+	}))
+	r.Get("/map/openfreemap/source.json", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleSource(w, r)
+	}))
+	r.Get("/map/openfreemap/tiles/{source}/{z}/{x}/{y}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleTile(w, r, false)
+	}))
+	r.Get("/map/openfreemap/tiles/{z}/{x}/{y}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleTile(w, r, false)
+	}))
+	r.Get("/map/openfreemap/raster/{source}/{z}/{x}/{y}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleTile(w, r, true)
+	}))
+	r.Get("/map/openfreemap/glyphs/{fontstack}/{range}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleGlyph(w, r)
+	}))
+	r.Get("/map/openfreemap/{variant:sprite(?:@2x)?\\.(?:json|png)}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
+		if s.openFreeMap == nil {
+			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
+			return
+		}
+		s.openFreeMap.handleSprite(w, r)
+	}))
+	r.Get("/offline/status", s.handleOfflineStatus)
+	r.Get("/offline/packs", s.requireOfflineRead(s.handleListPacks))
+	r.Post("/offline/packs/estimate", s.requireOfflineControl(s.handleEstimatePack))
+	r.Post("/offline/packs", s.requireOfflineControl(s.handleCreatePack))
+	r.Get("/offline/packs/{id}", s.requireOfflineRead(s.handleGetPack))
+	r.Post("/offline/packs/{id}/cancel", s.requireOfflineControl(s.handleCancelPack))
+	r.Delete("/offline/packs/{id}", s.requireOfflineControl(s.handleDeletePack))
+	r.Delete("/offline/cache", s.requireOfflineControl(s.handleClearCache))
+	r.Options("/offline/*", s.handleOfflineOptions)
 	r.Get("/config", s.handleConfig)
 	r.Options("/*", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -165,13 +479,6 @@ func (s *Server) routes() http.Handler {
 		writeError(w, http.StatusNotFound, "Not found")
 	})
 	return r
-}
-
-func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Cache-Control", "no-cache")
-	writeJSON(w, http.StatusOK, struct {
-		NominatimURL string `json:"nominatimUrl"`
-	}{NominatimURL: s.nominatimURL})
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +534,10 @@ func (s *Server) protectBrowserWrites(next http.Handler) http.Handler {
 
 		normalized, err := normalizeOrigin(origin)
 		if err == nil {
+			if strings.HasPrefix(r.URL.Path, "/offline/") && s.isTrustedManagementOrigin(origin, r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if _, ok := s.allowedOrigins[normalized]; ok {
 				next.ServeHTTP(w, r)
 				return

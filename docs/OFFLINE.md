@@ -1,0 +1,101 @@
+# Offline Cache
+
+Offline mode assumes the browser can still reach the `overland serve` process
+and its embedded frontend, but that the Go process cannot reach public
+providers. It is not a service worker and it does not supply a routing graph.
+
+## Storage
+
+The generic response cache defaults to
+`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`), with a
+1 GiB and 100,000-entry ceiling. An explicitly empty `OFFLINE_CACHE_DIR`
+disables new persistent response storage while retaining bounded pass-through
+APIs. Terrarium elevation keeps its existing, separate
+`$XDG_CACHE_HOME/overland/tiles` tree so upgrades do not move or invalidate
+already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` bounds that
+separate tree to 1 GiB by default; oldest disk tiles are evicted first.
+
+Response filenames are hashes. Search text, route coordinates and POI bounds do
+not appear in paths or request logs. Cache directories use mode `0700` and files
+use `0600`; writes use temporary files followed by rename. Bodies, sidecars and
+pack manifests count towards the quota. Expired entries are removed first,
+then least-recently-used unpinned entries. A pack cannot extend a provider's
+retention ceiling.
+
+Route, place and POI caches reveal location history. Set `OFFLINE_CACHE_DIR=`
+to opt out of persistence, use the management API to clear an individual
+scope, or remove the cache directory while the server is stopped.
+
+## Modes
+
+`auto` serves fresh hits, revalidates stale entries and uses provider-permitted
+stale data after retryable failures. `cache-only` makes no outbound request:
+memory and disk hits work, and a miss returns `offline_cache_miss` immediately.
+This gate includes API elevation, Terrarium misses, background prefetch and pack
+workers. The frontend does not bypass an advertised cache-only backend through
+its standalone direct-provider fallbacks.
+
+## Provider Policy
+
+Reviewed 28 August 2026. Provider terms can change; review the linked policies
+before changing an adapter or release default.
+
+| Resource | Passive persistent cache | Pack/prefetch |
+| --- | --- | --- |
+| OSM standard raster | Viewed tiles only; honor headers, seven-day fallback when unusable, no expired replay | Prohibited |
+| OpenTopoMap | Viewed tiles with attribution; dated stale replay | Prohibited without operator permission |
+| CyclOSM | Viewed tiles, at most 72 hours, no expired replay | Prohibited |
+| Esri live imagery/relief/hillshade | Disabled; remains browser-direct | Prohibited |
+| Public OpenFreeMap live service | Enabled by default; honor upstream cache headers and attribution | Bounded trip-pack prefetch enabled by default |
+| Configured compatible map source | Set with `OPENFREEMAP_URL` | Controlled by `OPENFREEMAP_ALLOW_BULK`, which defaults to `true` |
+| Terrarium elevation | Existing immutable tile cache | Bounded viewport/corridor prefetch |
+| Fuel snapshot | Explicit open-data snapshot, dated by source and cache | One bounded snapshot |
+| Nominatim | Exact user searches, one server-wide request/second | No autocomplete, grid or area sweep |
+| Overpass | Exact bounded user POI query | No tiled sweeps or harvesting |
+| Valhalla/OSRM/surface | Exact requests, shared FOSSGIS one/second queue | No speculative routes |
+| API elevation | Exact source/dataset coordinates | Bounded requests subject to provider licence/quota |
+
+Policy sources: [OSMF tiles](https://operations.osmfoundation.org/policies/tiles/),
+[OpenTopoMap](https://opentopomap.org/about),
+[CyclOSM](https://www.cyclosm.org/),
+[Esri terms](https://www.esri.com/en-us/legal/terms/full-master-agreement),
+[OpenFreeMap public-instance policy](https://openfreemap.org/) and
+[terms](https://openfreemap.org/tos/),
+[Nominatim](https://operations.osmfoundation.org/policies/nominatim/),
+[Overpass](https://dev.overpass-api.de/overpass-doc/en/preface/commons.html),
+[FOSSGIS](https://www.fossgis.de/arbeitsgruppen/osm-server/nutzungsbedingungen/),
+[Open-Meteo](https://open-meteo.com/en/terms), and the
+[Spanish fuel catalogue](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas).
+
+## Trip Packs
+
+Opening or selecting a GPX makes its route the active automatic pack. The
+frontend estimates first, then starts preparation without a second user action.
+The readiness control reports each resource independently and replaces the
+active status when another route is loaded. Recent packs remain pinned; once
+the manifest limit is reached, starting a new automatic pack releases the oldest
+completed automatic one. Editing an already loaded track does not restart the
+job.
+
+Estimates perform no provider traffic. They report resource counts, estimated
+and reusable bytes, remaining quota, and every blocked provider. Long and
+antimeridian routes are split into bounded corridor POI searches. Jobs have hard
+count, byte, zoom, coordinate and worker limits, can be cancelled through the
+API, and persist progress after each resource.
+
+A completed pack may contain Terrarium corridor tiles, one fuel snapshot,
+bounded trip POIs, selected exact cached data and bounded OpenFreeMap coverage.
+It never generates speculative routes, sweeps Nominatim or downloads public
+raster basemaps. Cancellation or process restart leaves a pack incomplete;
+completed shared cache entries remain valid. A failed provider marks its own
+resource unavailable while preparation continues for unrelated resources.
+
+## Management Security
+
+Browser mutations require a trusted same-origin request and the
+`X-GPX-Editor` header. Separately hosted frontends must set
+`TRUSTED_UI_ORIGIN`. Requests without an `Origin` are accepted only from a
+loopback peer or with `Authorization: Bearer <OFFLINE_ADMIN_TOKEN>`. These
+checks reduce CSRF and relay abuse; they do not authenticate the rest of a
+public deployment. Keep the server on loopback or put it behind an
+authenticated reverse proxy.

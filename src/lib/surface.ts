@@ -17,6 +17,8 @@ import { haversineDistance } from './geo'
 import { fetchFossgis, motorcycleCosting, VALHALLA_API } from './routing'
 import type { RoutingProfile } from './routing'
 import type { Coordinate } from './types'
+import { fetchRuntimeService, responseError } from './offline'
+import type { CacheMetadata, RuntimeRequestContext } from './offline'
 
 export type SurfaceClass = 'paved' | 'compacted' | 'dirt' | 'path' | 'unknown'
 
@@ -143,6 +145,7 @@ export interface SurfaceResult {
    * the UI rather than passed off as an exact read.
    */
   approximate: boolean
+  cache?: CacheMetadata
 }
 
 interface TraceEdge {
@@ -184,32 +187,46 @@ async function traceChunk(
   points: Coordinate[],
   profile: RoutingProfile,
   signal?: AbortSignal,
-): Promise<{ classes: SurfaceClass[]; approximate: boolean }> {
+  context: RuntimeRequestContext = {},
+): Promise<{ classes: SurfaceClass[]; approximate: boolean; cache?: CacheMetadata }> {
   const costing = motorcycleCosting(profile)
-  const res = await fetchFossgis(`${VALHALLA_API}/trace_attributes`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      shape: points.map(p => ({ lat: p.lat, lon: p.lon })),
-      // walk_or_snap follows our own shape edge by edge where it can and only
-      // falls back to map matching where it cannot, which keeps the returned
-      // shape indices aligned with the points we sent.
-      shape_match: 'walk_or_snap',
-      ...costing,
-      filters: {
-        action: 'include',
-        attributes: ['edge.surface', 'edge.begin_shape_index', 'edge.end_shape_index', 'shape'],
-      },
-    }),
+  const directBody = JSON.stringify({
+    shape: points.map(p => ({ lat: p.lat, lon: p.lon })),
+    shape_match: 'walk_or_snap',
+    ...costing,
+    filters: {
+      action: 'include',
+      attributes: ['edge.surface', 'edge.begin_shape_index', 'edge.end_shape_index', 'shape'],
+    },
+  })
+  const backendBody = JSON.stringify({
+    points: points.map(p => ({ lat: p.lat, lon: p.lon })),
+    costing: costing.costing,
+    profile,
+  })
+  const { response: res, cache } = await fetchRuntimeService({
+    ...context,
+    service: 'surface',
+    directUrl: `${VALHALLA_API}/trace_attributes`,
+    backendInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: backendBody,
+    },
+    directInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: directBody,
+    },
     signal,
+    fetcher: context.runtime?.services.surface ? fetch : fetchFossgis,
   })
 
   if (!res.ok) {
-    throw new SurfaceUnavailableError(
-      res.status === 400
-        ? 'The routing server could not match this route to known roads'
-        : `Surface lookup failed (${res.status})`,
-    )
+    if (res.status === 400) {
+      throw new SurfaceUnavailableError('The routing server could not match this route to known roads')
+    }
+    throw await responseError(res, `Surface lookup failed (${res.status})`)
   }
 
   const data = (await res.json()) as { edges?: TraceEdge[]; shape?: string }
@@ -240,7 +257,7 @@ async function traceChunk(
     for (let i = begin; i < end; i++) classes[i] = cls
   }
 
-  return { classes, approximate }
+  return { classes, approximate, cache }
 }
 
 /** Point count of a precision-6 polyline, without materialising the points. */
@@ -269,20 +286,23 @@ export async function fetchRouteSurface(
   coordinates: Coordinate[],
   profile: RoutingProfile,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<SurfaceResult> {
   if (coordinates.length < 2) return { segments: [], approximate: false }
 
   const chunks = chunkShape(coordinates)
   const segments: SurfaceClass[] = new Array(coordinates.length - 1).fill('unknown')
   let approximate = false
+  let cache: CacheMetadata | undefined
 
   for (const chunk of chunks) {
-    const result = await traceChunk(chunk.points, profile, signal)
+    const result = await traceChunk(chunk.points, profile, signal, context)
     result.classes.forEach((cls, i) => { segments[chunk.start + i] = cls })
     approximate = approximate || result.approximate
+    if (result.cache?.stale || !cache) cache = result.cache ?? cache
   }
 
-  return { segments, approximate }
+  return { segments, approximate, cache }
 }
 
 /* -- Summary ---------------------------------------------------------- */

@@ -7,7 +7,7 @@ PKGS    := ./cmd/... ./internal/... ./web/...
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build frontend backend deps test check lint clean run cross packages dist
+.PHONY: all build frontend backend deps test check lint e2e clean run cross packages dist
 
 ## build: frontend + single self-contained binary
 all: build
@@ -46,6 +46,9 @@ lint: node_modules
 	gofmt -l . | grep -v node_modules || true
 	npx tsc --noEmit
 	npm run lint
+
+e2e: node_modules
+	npm run test:e2e
 
 # Every target is pure Go, so one Linux machine builds all of them with no
 # cross-toolchain, no container and no macOS runner.

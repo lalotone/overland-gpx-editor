@@ -4,16 +4,19 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/png" // Terrarium tiles are PNG; decoder registration only.
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 /*
@@ -76,11 +79,18 @@ type tileFetch struct {
 }
 
 type tileStore struct {
-	url      string
-	zoom     int
-	cacheDir string
-	client   *http.Client
-	sem      chan struct{}
+	url          string
+	zoom         int
+	cacheDir     string
+	cacheRoot    *os.Root
+	cacheErr     error
+	maxDiskBytes int64
+	client       *http.Client
+	userAgent    string
+	sem          chan struct{}
+	offline      bool
+	ctx          context.Context
+	wg           *sync.WaitGroup
 
 	mu       sync.Mutex
 	lru      *list.List // front = most recently used, values are lruEntry
@@ -88,6 +98,16 @@ type tileStore struct {
 	inflight map[tileKey]*tileFetch
 
 	prefetch prefetchState
+
+	diskMu    sync.Mutex
+	diskBytes int64
+	diskFiles map[string]tileDiskFile
+}
+
+type tileDiskFile struct {
+	key        tileKey
+	size       int64
+	lastAccess time.Time
 }
 
 type lruEntry struct {
@@ -96,22 +116,79 @@ type lruEntry struct {
 }
 
 func newTileStore(url string, zoom int, cacheDir string, client *http.Client) *tileStore {
+	return newTileStoreWithQuota(url, zoom, cacheDir, defaultElevationTileCacheBytes, client)
+}
+
+func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes int64, client *http.Client) *tileStore {
 	if url == "" {
 		url = defaultTileURL
+	}
+	if maxDiskBytes <= 0 {
+		maxDiskBytes = defaultElevationTileCacheBytes
 	}
 	if zoom <= 0 {
 		zoom = defaultTileZoom
 	}
-	return &tileStore{
-		url:      url,
-		zoom:     zoom,
-		cacheDir: cacheDir,
-		client:   client,
-		sem:      make(chan struct{}, tileFetchConcurrency),
-		lru:      list.New(),
-		index:    make(map[tileKey]*list.Element),
-		inflight: make(map[tileKey]*tileFetch),
+	store := &tileStore{
+		url:          url,
+		zoom:         zoom,
+		cacheDir:     cacheDir,
+		client:       client,
+		userAgent:    userAgent,
+		sem:          make(chan struct{}, tileFetchConcurrency),
+		lru:          list.New(),
+		index:        make(map[tileKey]*list.Element),
+		inflight:     make(map[tileKey]*tileFetch),
+		maxDiskBytes: maxDiskBytes,
+		diskFiles:    make(map[string]tileDiskFile),
+		ctx:          context.Background(),
+		wg:           &sync.WaitGroup{},
 	}
+	if cacheDir != "" {
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			store.cacheErr = err
+			return store
+		}
+		root, err := os.OpenRoot(cacheDir)
+		if err != nil {
+			store.cacheErr = err
+			return store
+		}
+		store.cacheRoot = root
+		if err := root.Chmod(".", 0o700); err != nil {
+			root.Close()
+			store.cacheRoot = nil
+			store.cacheErr = err
+			return store
+		}
+		if err := store.loadDiskIndex(); err != nil {
+			root.Close()
+			store.cacheRoot = nil
+			store.cacheErr = err
+		}
+	}
+	return store
+}
+
+func (s *tileStore) configureLifecycle(offline bool, ctx context.Context, wg *sync.WaitGroup) {
+	s.offline = offline
+	s.ctx = ctx
+	s.wg = wg
+}
+
+func (s *tileStore) close() {
+	s.prefetch.mu.Lock()
+	if s.prefetch.cancel != nil {
+		s.prefetch.cancel()
+	}
+	s.prefetch.mu.Unlock()
+}
+
+func (s *tileStore) closeCache() error {
+	if s.cacheRoot == nil {
+		return nil
+	}
+	return s.cacheRoot.Close()
 }
 
 /* -- Sampling --------------------------------------------------------- */
@@ -209,6 +286,7 @@ func (s *tileStore) grid(ctx context.Context, key tileKey) (*tileGrid, error) {
 		s.lru.MoveToFront(el)
 		grid := el.Value.(*lruEntry).grid
 		s.mu.Unlock()
+		s.touchDisk(key)
 		return grid, nil
 	}
 	if f, ok := s.inflight[key]; ok {
@@ -246,6 +324,9 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 	if raw, ok := s.readDisk(key); ok {
 		return decodeTerrarium(raw)
 	}
+	if s.offline {
+		return nil, &offlineMissError{Scope: "elevation-tiles"}
+	}
 
 	select {
 	case s.sem <- struct{}{}:
@@ -264,13 +345,18 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", s.userAgent)
+	req.Header.Set("Referer", "https://github.com/lalotone/overland-gpx-editor")
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return nil, fmt.Errorf("terrain tile content encoding %q is not accepted", encoding)
+	}
 
 	// Outside coverage. Not an error: the caller reports no data for those
 	// points and the rest of the route is unaffected.
@@ -281,15 +367,20 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 		return nil, fmt.Errorf("terrain tile %s returned %d", key.path(), resp.StatusCode)
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxElevationBodyBytes))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxElevationBodyBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > maxElevationBodyBytes {
+		return nil, errors.New("terrain tile exceeds response limit")
 	}
 	grid, err := decodeTerrarium(raw)
 	if err != nil {
 		return nil, err
 	}
-	s.writeDisk(key, raw)
+	if err := s.writeDisk(key, raw); err != nil {
+		return nil, err
+	}
 	return grid, nil
 }
 
@@ -297,14 +388,24 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 //
 //	elevation = (R * 256 + G + B / 256) - 32768
 func decodeTerrarium(raw []byte) (*tileGrid, error) {
-	img, _, err := image.Decode(bytes.NewReader(raw))
+	config, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("terrain tile is not a readable image: %w", err)
 	}
-	b := img.Bounds()
-	if b.Dx() != tileSize || b.Dy() != tileSize {
-		return nil, fmt.Errorf("terrain tile is %dx%d, want %dx%d", b.Dx(), b.Dy(), tileSize, tileSize)
+	if format != "png" {
+		return nil, fmt.Errorf("terrain tile format is %q, want png", format)
 	}
+	if config.Width != tileSize || config.Height != tileSize {
+		return nil, fmt.Errorf("terrain tile is %dx%d, want %dx%d", config.Width, config.Height, tileSize, tileSize)
+	}
+	img, decodedFormat, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("terrain tile is not a readable PNG: %w", err)
+	}
+	if decodedFormat != "png" {
+		return nil, fmt.Errorf("terrain tile decoded as %q, want png", decodedFormat)
+	}
+	b := img.Bounds()
 
 	grid := &tileGrid{ele: make([]float32, tileSize*tileSize)}
 	for y := 0; y < tileSize; y++ {
@@ -323,44 +424,190 @@ func decodeTerrarium(raw []byte) (*tileGrid, error) {
 // Tiles are immutable, so the cache never needs invalidating — which is what
 // makes planning at home and riding with no signal work.
 
-func (s *tileStore) diskPath(key tileKey) string {
-	return filepath.Join(s.cacheDir, fmt.Sprint(key.z), fmt.Sprint(key.x), fmt.Sprintf("%d.png", key.y))
-}
-
 func (s *tileStore) readDisk(key tileKey) ([]byte, bool) {
-	if s.cacheDir == "" {
+	if s.cacheRoot == nil {
 		return nil, false
 	}
-	raw, err := os.ReadFile(s.diskPath(key))
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	f, err := s.cacheRoot.Open(key.path())
 	if err != nil {
 		return nil, false
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxElevationBodyBytes {
+		return nil, false
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxElevationBodyBytes+1))
+	if err != nil || len(raw) > maxElevationBodyBytes {
+		return nil, false
+	}
+	path := key.path()
+	entry, indexed := s.diskFiles[path]
+	if !indexed {
+		s.diskBytes += int64(len(raw))
+	} else {
+		s.diskBytes += int64(len(raw)) - entry.size
+	}
+	entry.key = key
+	entry.size = int64(len(raw))
+	entry.lastAccess = time.Now().UTC()
+	s.diskFiles[path] = entry
 	return raw, true
 }
 
-func (s *tileStore) writeDisk(key tileKey, raw []byte) {
-	if s.cacheDir == "" {
-		return
+func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
+	if s.cacheRoot == nil {
+		return nil
 	}
-	path := s.diskPath(key)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	path := key.path()
+	dir := filepath.Dir(path)
+	if err := s.cacheRoot.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.png")
+	_ = s.cacheRoot.Chmod(dir, 0o700)
+	if err := s.makeDiskRoomLocked(path, int64(len(raw))); err != nil {
+		return err
+	}
+	tmp, err := writeTempFileAt(s.cacheRoot, dir, raw)
 	if err != nil {
-		return
+		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		return
-	}
+	defer s.cacheRoot.Remove(tmp)
 	// A half-written tile would decode as garbage elevation, so it is only
 	// given its real name once complete.
-	_ = os.Rename(tmp.Name(), path)
+	if err := s.cacheRoot.Rename(tmp, path); err != nil {
+		return err
+	}
+	if err := syncRootDir(s.cacheRoot, dir); err != nil {
+		return err
+	}
+	old := s.diskFiles[path]
+	s.diskBytes -= old.size
+	s.diskFiles[path] = tileDiskFile{key: key, size: int64(len(raw)), lastAccess: time.Now().UTC()}
+	s.diskBytes += int64(len(raw))
+	if s.diskBytes > s.maxDiskBytes {
+		return errors.New("elevation tile cache quota exceeded after write")
+	}
+	return nil
+}
+
+func (s *tileStore) diskFileSize(key tileKey) (int64, bool) {
+	if s.cacheRoot == nil {
+		return 0, false
+	}
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	entry, ok := s.diskFiles[key.path()]
+	if !ok {
+		return 0, false
+	}
+	return entry.size, true
+}
+
+func (s *tileStore) touchDisk(key tileKey) {
+	if s.cacheRoot == nil {
+		return
+	}
+	s.diskMu.Lock()
+	entry, ok := s.diskFiles[key.path()]
+	if ok {
+		entry.lastAccess = time.Now().UTC()
+		s.diskFiles[key.path()] = entry
+	}
+	s.diskMu.Unlock()
+}
+
+func (s *tileStore) loadDiskIndex() error {
+	if err := fs.WalkDir(s.cacheRoot.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".png") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		key, ok := tileKeyFromPath(path)
+		if !ok {
+			return nil
+		}
+		s.diskFiles[path] = tileDiskFile{key: key, size: info.Size(), lastAccess: info.ModTime()}
+		s.diskBytes += info.Size()
+		return nil
+	}); err != nil {
+		return err
+	}
+	return s.enforceDiskQuotaLocked("")
+}
+
+func tileKeyFromPath(path string) (tileKey, bool) {
+	var key tileKey
+	normalized := filepath.ToSlash(path)
+	if _, err := fmt.Sscanf(normalized, "%d/%d/%d.png", &key.z, &key.x, &key.y); err != nil ||
+		key.z < 0 || key.x < 0 || key.y < 0 || normalized != key.path() {
+		return tileKey{}, false
+	}
+	return key, true
+}
+
+func (s *tileStore) makeDiskRoomLocked(path string, size int64) error {
+	if size > s.maxDiskBytes {
+		return errors.New("elevation tile exceeds cache quota")
+	}
+	old := s.diskFiles[path]
+	for s.diskBytes-old.size+size > s.maxDiskBytes {
+		if err := s.evictOldestDiskLocked(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *tileStore) enforceDiskQuotaLocked(exclude string) error {
+	for s.diskBytes > s.maxDiskBytes {
+		if err := s.evictOldestDiskLocked(exclude); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *tileStore) evictOldestDiskLocked(exclude string) error {
+	oldestPath := ""
+	var oldest tileDiskFile
+	for path, entry := range s.diskFiles {
+		if path == exclude || (oldestPath != "" && !entry.lastAccess.Before(oldest.lastAccess)) {
+			continue
+		}
+		oldestPath, oldest = path, entry
+	}
+	if oldestPath == "" {
+		return errors.New("elevation tile cache quota cannot be satisfied")
+	}
+	if err := s.cacheRoot.Remove(oldestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("evict elevation tile: %w", err)
+	}
+	if err := syncRootDir(s.cacheRoot, filepath.Dir(oldestPath)); err != nil {
+		return fmt.Errorf("sync elevation tile eviction: %w", err)
+	}
+	delete(s.diskFiles, oldestPath)
+	s.diskBytes -= oldest.size
+	s.mu.Lock()
+	if element := s.index[oldest.key]; element != nil {
+		s.lru.Remove(element)
+		delete(s.index, oldest.key)
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 /* -- Prefetch --------------------------------------------------------- */
@@ -481,12 +728,20 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		s.prefetch.running = false
 		return prefetchProgress{Running: false, Clamped: clamped, Reason: reason}
 	}
+	if s.offline {
+		s.prefetch.running = false
+		s.prefetch.skipped = true
+		s.prefetch.reason = "cache-only mode: uncached tiles were not fetched"
+		return prefetchProgress{Running: false, Total: len(missing), Skipped: true, Reason: s.prefetch.reason}
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.ctx)
 	s.prefetch.cancel = cancel
 	s.prefetch.running = true
 
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		var wg sync.WaitGroup
 		for _, key := range missing {
 			if ctx.Err() != nil {
@@ -514,6 +769,17 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 
 	return prefetchProgress{Running: true, Done: 0, Total: len(missing), Clamped: clamped, Reason: reason}
 }
+
+func (s *tileStore) diskStats() (int64, int) {
+	if s.cacheRoot == nil {
+		return 0, 0
+	}
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	return s.diskBytes, len(s.diskFiles)
+}
+
+func (s *tileStore) diskQuota() int64 { return s.maxDiskBytes }
 
 func (s *tileStore) progress() prefetchProgress {
 	s.prefetch.mu.Lock()

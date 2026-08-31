@@ -35,6 +35,8 @@ the part I want.
   on any track you load
 - 🏍️ **Motorbike routing** — Valhalla `motorcycle` costing with road / dirt /
   trail profiles, not a repurposed bicycle model
+- 🧭 **Prepared for dead zones** — viewed resources and trip packs survive a
+  restart, with a strict cache-only mode that makes no upstream requests
 - 📦 **One binary** — the React app is embedded in the Go server with
   `go:embed`. Copy ~7 MB to a machine and run it: no runtime, no dependencies,
   no container needed
@@ -168,6 +170,29 @@ Two alternatives:
 Whichever you use, tracks that already carry `<ele>` data display and analyse
 correctly with no elevation service reachable at all.
 
+## Offline use
+
+The Go server keeps policy-permitted provider responses in
+`$XDG_CACHE_HOME/overland/responses` (normally
+`~/.cache/overland/responses`). Opening a GPX automatically prepares a bounded
+pack for that route. The **Offline** pill appears directly below Terrain and
+shows live readiness for the vector map, elevation, fuel, water and campsites;
+open it for per-resource progress and item counts. Recent prepared routes remain
+pinned; at the manifest limit the oldest completed automatic pack is released.
+
+`--offline-mode cache-only` is the deterministic no-network mode. Cached data
+is served with its source and cache date; unknown resources fail immediately
+without bypassing the server or stopping GPX editing. It does not calculate a
+new route without a local Valhalla/OSRM service, and it does not make the web UI
+available when the browser cannot reach the Go server itself.
+
+OpenFreeMap is cached through the backend and supports bounded trip-pack
+prefetch by default. Attribution remains visible, and the source can be
+overridden or bulk fetching disabled at startup. OSM, OpenTopoMap and CyclOSM
+are cached only as they are viewed and are never area-prefetched. Esri live
+layers remain browser-direct and are not stored by the server. See
+**[docs/OFFLINE.md](docs/OFFLINE.md)** for provider and privacy details.
+
 ---
 
 ## Configuration
@@ -182,9 +207,21 @@ bundle at build time.
 | `GPX_DIR` | backend | `$XDG_DATA_HOME/overland/gpx` (`~/.local/share/overland/gpx`) | Track library directory |
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ALLOWED_ORIGINS` | backend | *(empty)* | Comma-separated exact browser origins allowed to call the API |
+| `OFFLINE_CACHE_DIR` | backend | `$XDG_CACHE_HOME/overland/responses` | Persistent provider cache; an explicitly empty value disables persistence |
+| `OFFLINE_CACHE_MAX_BYTES` | backend | `1GiB` | Generic cache quota, including metadata |
+| `OFFLINE_CACHE_MAX_ENTRIES` | backend | `100000` | Generic cache entry/inode guard |
+| `OFFLINE_MODE` | backend | `auto` | `auto` or strict no-outbound `cache-only` |
+| `UPSTREAM_CONTACT` | backend | project URL | Contact included in the outbound User-Agent |
+| `TRUSTED_UI_ORIGIN` | backend | *(same origin)* | Exact separately hosted UI origin allowed to manage offline data |
+| `OFFLINE_ADMIN_TOKEN` | backend | *(empty)* | Bearer token for non-loopback management clients |
+| `VALHALLA_URL` / `OSRM_URL` | backend | public FOSSGIS services | Startup-only routing service overrides |
+| `OVERPASS_URL` / `FUEL_URL` | backend | public services | Startup-only data-service overrides |
+| `OPENFREEMAP_URL` | backend | OpenFreeMap Liberty style | OpenFreeMap-compatible source eligible for persistent proxying |
+| `OPENFREEMAP_ALLOW_BULK` | backend | `on` | Permit bounded trip-pack fetching from the configured source |
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
 | `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland/tiles` (`~/.cache/overland/tiles`) | Where tiles are kept, so elevation works offline |
+| `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `1GiB` | Separate legacy Terrarium cache quota |
 | `ELEVATION_HOST` | backend | *(empty)* | Self-hosted opentopodata-style DEM. Takes precedence over tiles |
 | `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
 | `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at a backend on another host |
@@ -243,6 +280,8 @@ make cross     # release binaries for linux/darwin/windows
 make packages  # .deb and .rpm (needs nfpm)
 make dist      # all of the above, archived with SHA256SUMS
 npm run dev    # frontend dev server with HMR (needs ./overland serve running)
+npx playwright install chromium  # once, for browser tests
+npm run test:e2e                 # desktop/mobile map and offline UI flows
 ```
 
 Pushing a `v*` tag builds and publishes a release; every push and pull request
@@ -271,19 +310,22 @@ is rendered on the map by Leaflet.
 | [Valhalla](https://valhalla1.openstreetmap.de) | Routing, with [OSRM](https://router.project-osrm.org) as fallback; serialized to the [FOSSGIS limit](https://www.fossgis.de/arbeitsgruppen/osm-server/nutzungsbedingungen/) of one request/second |
 | [Nominatim](https://nominatim.org) | Place search, throttled to one request/second and cached; switchable with `NOMINATIM_URL` |
 | [Overpass](https://overpass-api.de) | User-triggered fuel / water / campsite POIs |
-| [Spanish fuel-price feed](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas) | Official national snapshot, downloaded once per session |
+| [Spanish fuel-price feed](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas) | Official national snapshot, persistently cached with its publication time |
 | [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) | Elevation by default — mixed-source data with [source-specific attribution](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) |
 | [Open-Meteo](https://open-meteo.com/en/docs/elevation-api) | Elevation with `-elevation-tiles=false`; free endpoint is non-commercial and quota-limited |
 
 These are shared community resources. Routing and Nominatim requests are
 serialized to their one-request-per-second limits, and repeated place searches
-are cached. Basemap tiles use only browser-managed caches and are never prefetched.
+are cached. Public basemap tiles are never prefetched; OSM, OpenTopoMap and
+CyclOSM viewed tiles may use the bounded server cache for their
+provider-permitted lifetime.
 For high-traffic, commercial or automated workloads, use contracted or
 self-hosted services instead.
 
-The request queues are per browser, matching the intended personal-scale
-deployment. A shared public deployment must enforce application-wide limits in
-a proxy and publish the operator contact required by the FOSSGIS terms.
+Backend request queues are process-wide, so several tabs share provider limits;
+standalone direct-provider fallbacks retain their per-browser queues. A public
+deployment still needs authentication and must publish the operator contact
+required by provider terms.
 
 ---
 
@@ -291,8 +333,8 @@ a proxy and publish the operator contact required by the FOSSGIS terms.
 
 - **No surface breakdown yet** — "% unpaved", `tracktype` / `smoothness`
   colouring. The biggest remaining gap for offroad planning.
-- **No offline basemap caching.** Plan at home; the map is blank in the field.
-  Elevation is the exception — `-elevation-tile-cache` keeps working offline.
+- **No public raster basemap area downloads.** OpenFreeMap supports bounded
+  vector packs; OSM, OpenTopoMap and CyclOSM remain viewed-tile caches only.
 - **No access warnings** — `access=private`, gates and seasonal closures are
   not flagged.
 - **Desktop-shaped.** The creation screen assumes a wide window.

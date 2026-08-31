@@ -18,6 +18,8 @@ A route planner and track editor for offroad, overlanding and motorbike use.
   hypsometric ramp (valley green → sand → ochre → rock) scaled to the track's
   own range, so the route itself reads as topography.
 - Layer, relief and colour-mode choices persist across sessions.
+- Policy-permitted viewed OSM, OpenTopoMap and CyclOSM tiles can replay from the
+  server cache after a restart. Public map services are never bulk-prefetched.
 
 ## Track statistics
 
@@ -66,7 +68,8 @@ Applies to any loaded track, with undo:
   requests. Only past ~6000 points is it sampled and interpolated, and that
   is reported rather than silently written to file.
 - Place search via Nominatim, throttled to one request per second and cached for
-  the session. The provider is runtime-configurable with `NOMINATIM_URL`.
+  the session and persistently by the Go service. The provider is
+  runtime-configurable with `NOMINATIM_URL`.
 
 ## Surface
 
@@ -115,12 +118,28 @@ neutral rather than being ranked against a fuel they do not stock. Where
 there is nothing to compare — a single station, or all of them at the same
 price — the colouring stays neutral instead of inventing a bargain.
 
-The service allows cross-origin requests, so this runs from the browser with
-no proxy. It cannot filter by bounding box — only by province — so the
-national list (~11,500 stations, ~12 MB) comes down once per session, on
-first use of the fuel layer, and is filtered locally. Anywhere the official
-list has nothing to say, including outside Spain or if the service is down,
-the OSM fuel layer answers as before.
+The Go service stores the national snapshot with both its publication time and
+cache time, so it remains useful after a restart or in cache-only mode. A
+standalone frontend still downloads it directly once per browser session.
+Anywhere the official list has nothing to say, including outside Spain or if
+the service is down, the OSM fuel layer answers as before.
+
+## Offline preparation
+
+- Loading or selecting a GPX automatically estimates and prepares its bounded
+  route pack; edits do not restart the job. Recent packs remain available, with
+  the oldest completed automatic pack released at the manifest limit.
+- A compact readiness pill sits in the same map-control stack as Terrain. Its
+  detail panel reports vector maps, elevation, fuel, water and campsites with
+  independent progress, item counts and unavailable reasons.
+- Pack estimates report blocked public providers, reusable bytes and expected
+  quota use. Jobs remain explicitly incomplete after cancellation, failure or
+  an interrupted restart, while an individual provider failure does not stop
+  unrelated resources.
+- Pack jobs are bounded and cancellable. Shared cached objects are pinned by
+  reference rather than copied, and deleting a pack releases only its pins.
+- Exact route, surface and search replies can replay; arbitrary new offline
+  routing still requires a local routing engine.
 
 ## Interface
 
@@ -141,6 +160,9 @@ the OSM fuel layer answers as before.
   than interface. Escape brings the panels back.
 - **Collapsible terrain panel** — a pill in the map corner that expands to the
   layer/relief/colour controls, so it stops covering the terrain you're reading.
+- **Route readiness control** — appears only for a loaded GPX, directly below
+  Terrain, and makes dead-zone readiness visible without exposing cache
+  administration controls.
 - **Editing tools behind a Tools toggle**, grouped by what they do; the POI
   layers and undo stay on the always-visible strip.
 
@@ -178,6 +200,11 @@ the OSM fuel layer answers as before.
   visible map is fetched in the background with a progress readout; pan
   somewhere else and it follows. Areas too large to be worth caching are
   reported rather than downloaded.
+- A privacy-sensitive, quota-bound response cache persists fuel, places, POIs,
+  routes, surface, API elevation and approved map resources with hashed keys,
+  atomic files, restrictive permissions and scope-specific clearing.
+- `-offline-mode cache-only` blocks every Go outbound path before transport;
+  misses return immediately as `offline_cache_miss`.
 - Standard-library-only HTTP backend; the command interface uses `urfave/cli`.
 
 ---
@@ -188,7 +215,8 @@ the OSM fuel layer answers as before.
   imported GPX would need map-matching before it could be classified.
 - **`tracktype`/`smoothness`** — how rough the dirt is, not just that it is
   dirt. Valhalla's `surface` does not carry it; needs an Overpass tag join.
-- **Offline tile caching** along a route corridor.
+- **Arbitrary public raster basemap packs** — provider policies prohibit them;
+  bounded OpenFreeMap vector packs are the supported exception.
 - **Access warnings** — `access=private`, gates, seasonal closures.
 - **Mobile layout** — the creation screen is still desktop-shaped.
 - **Track joining in the UI** (`joinTracks` exists in `lib/edit.ts`).

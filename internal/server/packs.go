@@ -188,10 +188,11 @@ type packSummary struct {
 }
 
 type packManager struct {
-	server     *Server
-	mu         sync.Mutex
-	packs      map[string]*packManifest
-	jobTimeout time.Duration
+	server             *Server
+	mu                 sync.Mutex
+	packs              map[string]*packManifest
+	jobTimeout         time.Duration
+	replacementCleanup func(*packManifest) error
 }
 
 type packBudgetError struct{}
@@ -238,9 +239,6 @@ func newPackManager(server *Server) (*packManager, error) {
 		if json.Unmarshal(raw, &manifest) != nil || !validPackID(manifest.ID) {
 			continue
 		}
-		if !manifest.Input.Automatic && strings.HasPrefix(manifest.Name, "Route: ") && manifest.Input.Name == manifest.Name {
-			manifest.Input.Automatic = true
-		}
 		if manifest.State == "running" || manifest.State == "queued" {
 			manifest.State = "incomplete"
 			manifest.ErrorCode = "interrupted"
@@ -261,6 +259,18 @@ func newPackManager(server *Server) (*packManager, error) {
 		if err := m.persistLocked(&copyManifest); err != nil {
 			return nil, fmt.Errorf("persist recovered pack %s: %w", manifest.ID, err)
 		}
+	}
+	for len(m.packs) > maxStoredPackManifests {
+		pruneID := m.oldestAutomaticPackLocked()
+		if pruneID == "" {
+			break
+		}
+		pruned := m.packs[pruneID]
+		if err := m.cleanupPack(pruned); err != nil {
+			return nil, fmt.Errorf("repair interrupted automatic pack replacement: %w", err)
+		}
+		pruned.deleted = true
+		delete(m.packs, pruneID)
 	}
 	return m, nil
 }
@@ -1016,15 +1026,22 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 		return nil, estimate, err
 	}
 	if pruned != nil {
+		cleanup := m.cleanupPack
+		if m.replacementCleanup != nil {
+			cleanup = m.replacementCleanup
+		}
+		if err := cleanup(pruned); err != nil {
+			rollbackErr := m.restoreReplacedPackLocked(pruned, manifest)
+			m.mu.Unlock()
+			cancel()
+			return nil, estimate, errors.Join(fmt.Errorf("replace oldest automatic pack: %w", err), rollbackErr)
+		}
 		pruned.deleted = true
 		delete(m.packs, pruned.ID)
 	}
 	m.packs[id] = manifest
 	copyManifest := m.publicCopyLocked(manifest)
 	m.mu.Unlock()
-	if pruned != nil {
-		_ = m.cleanupPack(pruned)
-	}
 	m.server.wg.Add(1)
 	go m.run(ctx, cancel, manifest, estimate)
 	return &copyManifest, estimate, nil
@@ -1032,11 +1049,28 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 
 func (m *packManager) matchingPackLocked(input packInput) *packManifest {
 	for _, pack := range m.packs {
-		if (pack.State == "queued" || pack.State == "running" || pack.State == "complete") && reflect.DeepEqual(pack.Input, input) {
+		candidate := pack.Input
+		requested := input
+		if requested.Automatic && !candidate.Automatic {
+			// Reuse identical pre-marker packs without changing their retention
+			// semantics. Only explicitly automatic packs are evictable.
+			requested.Automatic = false
+		}
+		if (pack.State == "queued" || pack.State == "running" || pack.State == "complete") && reflect.DeepEqual(candidate, requested) {
 			return pack
 		}
 	}
 	return nil
+}
+
+func (m *packManager) restoreReplacedPackLocked(pruned, replacement *packManifest) error {
+	var restoreErr error
+	restoreErr = errors.Join(restoreErr, m.persistLocked(pruned))
+	for _, key := range pruned.CacheKeys {
+		restoreErr = errors.Join(restoreErr, m.server.cache.pin(key, pruned.ID, true))
+	}
+	restoreErr = errors.Join(restoreErr, m.cleanupPack(replacement))
+	return restoreErr
 }
 
 func (m *packManager) activeLocked() int {

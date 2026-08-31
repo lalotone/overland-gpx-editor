@@ -196,6 +196,7 @@ test('loading a GPX automatically prepares and reports route resources', async (
 
   expect(runtime.getPackRequest()).toMatchObject({
     name: 'Route: Browser trip',
+    automatic: true,
     layers: ['openfreemap'],
     scopes: ['elevation', 'pois', 'fuel'],
   })

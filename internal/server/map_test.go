@@ -185,6 +185,16 @@ func TestConfiguredOpenFreeMapStyleGraphIsStructuredAndOfflineCapable(t *testing
 	if err != nil || offlineEstimate.Counts["openfreemap-raster"] != 1 {
 		t.Fatalf("restarted raster estimate = %+v, %v", offlineEstimate.Counts, err)
 	}
+	offlinePackInput := packInput
+	offlinePackInput.Name = "map copy"
+	offlineManifest, _, err := offline.packs.start(offlinePackInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlineSummary := waitForPackState(t, offline.packs, offlineManifest.ID, "complete")
+	if progress := offlineSummary.Resources[packResourceVectorMap]; progress.Total == 0 || progress.Done != progress.Total || progress.Failed != 0 {
+		t.Fatalf("cache-only map progress = %+v", progress)
+	}
 	if rec := requestMap(offline, "/map/openfreemap/style.json"); rec.Code != 200 || rec.Header().Get("X-GPX-Cache") != "hit" {
 		t.Fatalf("offline style = %d %s", rec.Code, rec.Body)
 	}

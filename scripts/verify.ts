@@ -40,8 +40,39 @@ const {
 } = await import('../src/lib/fuel')
 const { createRateLimitedFetch } = await import('../src/lib/rateLimit')
 const { NOMINATIM_REQUEST_INTERVAL_MS } = await import('../src/lib/geocoding')
-const { FOSSGIS_REQUEST_INTERVAL_MS } = await import('../src/lib/routing')
-const { getThumbnailLayer, SERVICE_ATTRIBUTIONS } = await import('../src/lib/terrain')
+const { calculateRoute, FOSSGIS_REQUEST_INTERVAL_MS } = await import('../src/lib/routing')
+const {
+  getThumbnailLayer,
+  runtimeHillshadeLayer,
+  runtimeTerrainLayers,
+  SERVICE_ATTRIBUTIONS,
+} = await import('../src/lib/terrain')
+const {
+  elevationPointCacheKey,
+  fetchElevationProfile,
+  fetchGroundElevation,
+} = await import('../src/lib/elevation')
+const { clearedRouteDerivedState, routeSequenceIsCurrent } = await import('../src/lib/planner')
+const {
+  buildAutomaticPackRequest,
+  buildPackEstimateRequest,
+  decodePacks,
+  decodePackEstimate,
+  decodeOfflineStatus,
+  decodeRuntimeConfig,
+  fetchRuntimeService,
+  formatBytes,
+  formatCacheContext,
+  loadRuntimeConfig,
+  OfflineCacheMissError,
+  packRequestSignature,
+  parseCacheMetadata,
+  resolveApiUrl,
+  responseError,
+  selectRuntimeTransport,
+  syncPackLayers,
+  validPackArea,
+} = await import('../src/lib/offline')
 
 let failures = 0
 let checks = 0
@@ -555,6 +586,497 @@ console.log(`\nPublic-service policy checks\n${'='.repeat(78)}`)
       SERVICE_ATTRIBUTIONS.some(credit => credit.includes('open-meteo.com')))
   check('fuel prices use the ministry current host',
     FUEL_PRICE_ENDPOINT.startsWith('https://energia.serviciosmin.gob.es/'))
+}
+
+/* -- Runtime offline policy ------------------------------------------ */
+
+console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
+
+{
+  const cleared = clearedRouteDerivedState()
+  check('route reset removes geometry and route information',
+    cleared.coordinates.length === 0 && cleared.durationSeconds === null &&
+      cleared.engine === null && cleared.routeCache === undefined)
+  check('route reset removes surface results, cache, errors, and activity',
+    cleared.surfaceSegments === null && cleared.surfaceCache === undefined &&
+      cleared.surfaceError === null && !cleared.surfaceApproximate && !cleared.surfaceLoading)
+  check('route reset removes elevation provenance and prior error state',
+    !cleared.elevationInterpolated && !cleared.elevationApiError)
+  check('route reset removes request status and loading state',
+    cleared.routeStatus === '' && !cleared.routedLoading)
+  check('only the current non-aborted route sequence may update state',
+    routeSequenceIsCurrent(7, 7, false) &&
+      !routeSequenceIsCurrent(6, 7, false) &&
+      !routeSequenceIsCurrent(7, 7, true))
+}
+
+{
+  const runtime = decodeRuntimeConfig({
+    nominatimUrl: 'https://search.example.test',
+    offline: {
+      enabled: true,
+      mode: 'cache-only',
+      status: '/offline/status',
+      packs: '/offline/packs',
+    },
+    services: {
+      fuel: '/fuel',
+      places: '/places/search',
+      pois: 42,
+      valhallaRoute: '/routing/valhalla/route',
+    },
+    maps: {
+      raster: {
+        osm: '/map/raster/osm/{z}/{x}/{y}.png',
+        opentopo: '/map/raster/opentopo/{z}/{x}/{y}.png',
+        cyclosm: null,
+      },
+      openfreemap: { style: '/map/openfreemap/style.json' },
+    },
+  }, 'https://backend.example.test/api')
+
+  check('relative API routes are resolved against VITE_API_BASE',
+    resolveApiUrl('/places/search', 'https://backend.example.test/api/') ===
+      'https://backend.example.test/api/places/search')
+  check('absolute advertised routes stay absolute',
+    resolveApiUrl('https://tiles.example.test/style.json', 'https://backend.example.test/api') ===
+      'https://tiles.example.test/style.json')
+  check('config decoding keeps valid optional service routes',
+    runtime.services.fuel === 'https://backend.example.test/api/fuel' &&
+      runtime.services.places === 'https://backend.example.test/api/places/search' &&
+      runtime.services.pois === undefined)
+  check('config decoding keeps cache-only mode', runtime.offline?.mode === 'cache-only')
+  check('config decoding resolves management routes',
+    runtime.offline?.packs === 'https://backend.example.test/api/offline/packs')
+
+  const standalone = decodeRuntimeConfig(null, '')
+  const direct = selectRuntimeTransport(standalone, 'places', 'https://public.example.test/search')
+  check('missing backend preserves direct provider fallback',
+    direct.kind === 'direct' && direct.url === 'https://public.example.test/search')
+
+  const unreachable = await loadRuntimeConfig('/api', undefined, async () => {
+    throw new TypeError('backend down')
+  })
+  check('unreachable config decodes as standalone behavior',
+    unreachable.offline === undefined &&
+      selectRuntimeTransport(unreachable, 'places', 'https://public.example.test/search').kind === 'direct')
+
+  const backend = selectRuntimeTransport(runtime, 'fuel', 'https://public.example.test/fuel')
+  check('an advertised backend endpoint is selected first',
+    backend.kind === 'backend' && backend.url === 'https://backend.example.test/api/fuel')
+  check('cache-only refuses an unadvertised direct path',
+    selectRuntimeTransport(runtime, 'surface', 'https://public.example.test/surface').kind === 'unavailable')
+
+  const layers = runtimeTerrainLayers(runtime)
+  const vector = layers.find(layer => layer.id === 'openfreemap')
+  const topo = layers.find(layer => layer.id === 'topo')
+  const trails = layers.find(layer => layer.id === 'cyclosm')
+  check('runtime OpenFreeMap style uses the advertised backend URL',
+    vector?.kind === 'vector' && vector.styleUrl === 'https://backend.example.test/api/map/openfreemap/style.json')
+  check('runtime OSM thumbnail template is preserved and resolved',
+    vector?.kind === 'vector' &&
+      vector.fallback.url === 'https://backend.example.test/api/map/raster/osm/{z}/{x}/{y}.png')
+  check('cache-only omits unadvertised raster maps',
+    topo?.kind === 'raster' && topo.url.includes('backend.example.test/api/map/raster/opentopo/') &&
+      trails === undefined && !layers.some(layer => layer.id === 'satellite' || layer.id === 'relief'))
+  const selectedUrls = layers.flatMap(layer => layer.kind === 'vector'
+    ? [layer.styleUrl, layer.fallback.url]
+    : [layer.url])
+  check('cache-only terrain selects no direct public URL',
+    selectedUrls.every(url => url.startsWith('https://backend.example.test/api/') || url.startsWith('data:')),
+    selectedUrls.join(', '))
+  check('cache-only disables unadvertised hillshade', runtimeHillshadeLayer(runtime) === undefined)
+
+  const osmOnly = runtimeTerrainLayers(decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'cache-only' },
+    maps: { raster: { osm: '/map/osm/{z}/{x}/{y}.png' } },
+  }, 'https://backend.example.test'))
+  check('cache-only uses advertised OSM when OpenFreeMap is absent',
+    osmOnly[0]?.id === 'openfreemap' && osmOnly[0].kind === 'raster' &&
+      osmOnly[0].url.startsWith('https://backend.example.test/'))
+
+  const noMaps = runtimeTerrainLayers(decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'cache-only' },
+  }))
+  check('cache-only with no advertised maps exposes no network layer', noMaps.length === 0)
+  check('an empty cache-only layer set has a non-network thumbnail fallback',
+    getThumbnailLayer('openfreemap', noMaps).url.startsWith('data:'))
+}
+
+{
+  const runtime = decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'cache-only' },
+    services: {
+      valhallaRoute: '/routing/valhalla',
+      osrmRoute: '/routing/osrm',
+    },
+  }, 'https://backend.example.test')
+  const waypoints = [{ lat: 41.6, lon: -0.9 }, { lat: 41.7, lon: -0.8 }]
+  const cacheMiss = () => new Response(JSON.stringify({
+    code: 'offline_cache_miss',
+    detail: 'route is not cached',
+    scope: 'routing',
+  }), { status: 504, headers: { 'Content-Type': 'application/json' } })
+  const valhallaSuccess = () => new Response(JSON.stringify({
+    trip: { legs: [{ shape: '??AA' }], summary: { time: 60, length: 1 } },
+  }), {
+    headers: { 'Content-Type': 'application/json', 'X-GPX-Cache': 'hit' },
+  })
+
+  const valhallaCalls: { url: string; costing?: string }[] = []
+  const cachedFallbackFetch: typeof fetch = async (input, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { costing?: string }
+    valhallaCalls.push({ url: String(input), costing: body.costing })
+    return valhallaCalls.length === 1 ? cacheMiss() : valhallaSuccess()
+  }
+  const fallbackRoute = await calculateRoute(waypoints, 'mixed', undefined, {
+    runtime,
+    fetcher: cachedFallbackFetch,
+  })
+  check('a primary route cache miss replays the advertised Valhalla fallback',
+    valhallaCalls.length === 2 && valhallaCalls[0].costing === 'motorcycle' &&
+      valhallaCalls[1].costing === 'auto' && fallbackRoute.engine === 'Valhalla auto')
+  check('cache-only Valhalla replay never calls a direct router',
+    valhallaCalls.every(call => call.url === 'https://backend.example.test/routing/valhalla'))
+  check('cached Valhalla fallback metadata reaches the route result',
+    fallbackRoute.cache?.state === 'hit')
+
+  const roadCalls: string[] = []
+  const cachedOsrmFetch: typeof fetch = async input => {
+    roadCalls.push(String(input))
+    if (roadCalls.length < 3) return cacheMiss()
+    return new Response(JSON.stringify({
+      routes: [{ geometry: { coordinates: [[-0.9, 41.6], [-0.8, 41.7]] }, duration: 70, distance: 1200 }],
+    }), {
+      headers: { 'Content-Type': 'application/json', 'X-GPX-Cache': 'hit' },
+    })
+  }
+  const osrmRoute = await calculateRoute(waypoints, 'road', undefined, {
+    runtime,
+    fetcher: cachedOsrmFetch,
+  })
+  check('road cache replay reaches the advertised cached OSRM fallback',
+    roadCalls.length === 3 && roadCalls[2] === 'https://backend.example.test/routing/osrm' &&
+      osrmRoute.engine === 'OSRM driving')
+  check('route fallback requests stay on advertised backend URLs',
+    roadCalls.every(url => url.startsWith('https://backend.example.test/routing/')))
+
+  let finalMiss: unknown
+  let missCalls = 0
+  try {
+    await calculateRoute(waypoints, 'road', undefined, {
+      runtime,
+      fetcher: async () => { missCalls++; return cacheMiss() },
+    })
+  } catch (error) {
+    finalMiss = error
+  }
+  check('all route cache misses retain a typed offline result',
+    missCalls === 3 && finalMiss instanceof OfflineCacheMissError && finalMiss.scope === 'routing')
+
+  let hardFailure: unknown
+  let hardFailureCalls = 0
+  try {
+    await calculateRoute(waypoints, 'mixed', undefined, {
+      runtime,
+      fetcher: async () => {
+        hardFailureCalls++
+        return new Response(JSON.stringify({ detail: 'backend failed' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      },
+    })
+  } catch (error) {
+    hardFailure = error
+  }
+  check('arbitrary route backend failures do not trigger fallback replay',
+    hardFailureCalls === 1 && (hardFailure as Error)?.message === 'backend failed')
+}
+
+{
+  const runtime = decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'auto' },
+  }, 'https://backend.example.test')
+  const requests: string[] = []
+  let failure: unknown
+  try {
+    await fetchElevationProfile(
+      [{ lat: 41.6, lon: -0.9 }],
+      runtime.apiBase,
+      'https://direct-dem.example.test',
+      {
+        runtime,
+        fetcher: async input => {
+          requests.push(String(input))
+          return new Response(JSON.stringify({ detail: 'DEM backend failed' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        },
+      },
+    )
+  } catch (error) {
+    failure = error
+  }
+  check('advertised elevation backend 5xx never bypasses to a direct DEM',
+    requests.length === 1 && requests[0] === 'https://backend.example.test/elevation/batch')
+  check('advertised elevation backend errors reach the caller',
+    (failure as Error)?.message === 'DEM backend failed')
+
+  const standalone = decodeRuntimeConfig(null, 'https://backend.example.test')
+  const cacheOnly = decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'cache-only' },
+  }, 'https://backend.example.test')
+  const key = elevationPointCacheKey(
+    41.6,
+    -0.9,
+    runtime.apiBase,
+    'https://direct-dem.example.test/',
+    'srtm30m',
+    { runtime },
+  )
+  check('elevation point keys change with runtime mode and pre-config standalone identity',
+    key !== elevationPointCacheKey(
+      41.6, -0.9, standalone.apiBase, 'https://direct-dem.example.test/', 'srtm30m', { runtime: standalone },
+    ) && key !== elevationPointCacheKey(
+      41.6, -0.9, cacheOnly.apiBase, 'https://direct-dem.example.test/', 'srtm30m', { runtime: cacheOnly },
+    ))
+  check('elevation point keys change with backend, direct provider, and dataset',
+    key !== elevationPointCacheKey(
+      41.6, -0.9, 'https://other-backend.example.test', 'https://direct-dem.example.test/', 'srtm30m', { runtime },
+    ) && key !== elevationPointCacheKey(
+      41.6, -0.9, runtime.apiBase, 'https://other-dem.example.test/', 'srtm30m', { runtime },
+    ) && key !== elevationPointCacheKey(
+      41.6, -0.9, runtime.apiBase, 'https://direct-dem.example.test/', 'copernicus90m', { runtime },
+    ))
+  check('equivalent elevation source identities produce stable point keys',
+    key === elevationPointCacheKey(
+      41.6, -0.9, runtime.apiBase, 'https://direct-dem.example.test', 'srtm30m', { runtime },
+    ))
+
+  let memoRequests = 0
+  const memoFetch: typeof fetch = async () => {
+    memoRequests++
+    return new Response(JSON.stringify({ results: [{ elevation: memoRequests === 1 ? 111 : 222 }] }), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  const standaloneElevation = await fetchGroundElevation(
+    12.3456,
+    -6.789,
+    standalone.apiBase,
+    'https://direct-dem.example.test',
+    'memo-source-test',
+    undefined,
+    { runtime: standalone, fetcher: memoFetch },
+  )
+  const managedElevation = await fetchGroundElevation(
+    12.3456,
+    -6.789,
+    runtime.apiBase,
+    'https://direct-dem.example.test',
+    'memo-source-test',
+    undefined,
+    { runtime, fetcher: memoFetch },
+  )
+  check('pre-config elevation memo values cannot bypass the managed runtime transport',
+    memoRequests === 2 && standaloneElevation === 111 && managedElevation === 222)
+}
+
+{
+  const metadata = parseCacheMetadata(new Headers({
+    'X-GPX-Cache': 'stale',
+    'X-GPX-Cached-At': 'Wed, 26 Aug 2026 10:00:00 GMT',
+    Age: '7200',
+  }))
+  check('cache response metadata is parsed',
+    metadata?.state === 'stale' && metadata.stale && metadata.ageSeconds === 7200)
+  check('cache timestamps are preserved in a stable form',
+    metadata?.cachedAt === '2026-08-26T10:00:00.000Z', metadata?.cachedAt)
+
+  const compactLabels = [
+    formatCacheContext({ state: 'hit', stale: false }, true),
+    formatCacheContext({ state: 'stale', stale: true }, true),
+    formatCacheContext({ state: 'miss', stale: false }, true),
+    formatCacheContext({ state: 'revalidated', stale: false }, true),
+    formatCacheContext({ state: 'bypass', stale: false }, true),
+  ]
+  check('compact cache labels distinguish every backend cache state',
+    new Set(compactLabels).size === compactLabels.length, compactLabels.join(', '))
+  check('a cache miss is labelled fresh rather than cached',
+    compactLabels[2] === 'fresh' && compactLabels[2] !== compactLabels[0])
+  check('compact cache labels identify hit, stale, revalidated, and bypass responses',
+    compactLabels.join(',') === 'cached,stale,fresh,refreshed,live')
+
+  const runtime = decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'auto' },
+    services: { fuel: '/fuel' },
+  }, 'https://backend.example.test')
+  let requests = 0
+  let callbackMetadata = metadata
+  const fakeFetch: typeof fetch = async input => {
+    requests++
+    check('advertised fetch calls only the backend URL', String(input) === 'https://backend.example.test/fuel')
+    return new Response(JSON.stringify({ value: 17 }), {
+      status: 503,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GPX-Cache': 'stale',
+        'X-GPX-Cached-At': 'Wed, 26 Aug 2026 10:00:00 GMT',
+      },
+    })
+  }
+  const result = await fetchRuntimeService({
+    runtime,
+    service: 'fuel',
+    directUrl: 'https://public.example.test/fuel',
+    fetcher: fakeFetch,
+    onCacheMetadata: value => { callbackMetadata = value },
+  })
+  check('an arbitrary backend 5xx never retries the direct provider',
+    requests === 1 && result.response.status === 503)
+  check('stale metadata reaches the callback and normalized result',
+    callbackMetadata?.stale === true && result.cache?.cachedAt === '2026-08-26T10:00:00.000Z')
+  check('cache metadata does not alter the provider body',
+    (await result.response.json() as { value: number }).value === 17)
+
+  const miss = await responseError(new Response(JSON.stringify({
+    detail: 'not cached',
+    code: 'offline_cache_miss',
+    scope: 'fuel',
+  }), { status: 504, headers: { 'Content-Type': 'application/json' } }), 'fallback')
+  check('offline cache misses retain their typed scope',
+    miss instanceof OfflineCacheMissError && miss.scope === 'fuel' && miss.message === 'not cached')
+
+  let abortRequests = 0
+  const abortFetch: typeof fetch = async () => {
+    abortRequests++
+    throw new DOMException('Aborted', 'AbortError')
+  }
+  let abortName = ''
+  try {
+    await fetchRuntimeService({
+      runtime,
+      service: 'fuel',
+      directUrl: 'https://public.example.test/fuel',
+      fetcher: abortFetch,
+    })
+  } catch (error) {
+    abortName = (error as Error).name
+  }
+  check('an aborted backend request never falls back', abortName === 'AbortError' && abortRequests === 1)
+}
+
+{
+  const status = decodeOfflineStatus({
+    mode: 'cache-only',
+    writable: false,
+    bytes: 1536,
+    maxBytes: 1_048_576,
+    entries: 12,
+    scopes: {
+      routing: { bytes: 512, entries: 2, durableBytes: 256 },
+      malformed: 'nope',
+    },
+    elevationTiles: { bytes: 2048, entries: 4 },
+    providers: {
+      valhalla: { healthy: false, state: 'offline', lastError: 'network down' },
+    },
+    jobs: [
+      { id: 'pack-1', name: 'Pyrenees', status: 'running', done: 4, total: 10 },
+      { status: 'missing id' },
+    ],
+  })
+  check('offline status decoding keeps mode and writable state',
+    status.mode === 'cache-only' && status.writable === false)
+  check('offline status decoding keeps valid scope and legacy elevation values',
+    status.scopes.routing?.bytes === 512 && status.elevationTiles?.entries === 4 &&
+      status.scopes.malformed === undefined)
+  check('offline status decoding tolerates malformed jobs',
+    status.jobs.length === 1 && status.jobs[0].done === 4)
+  check('offline status decoding preserves provider health',
+    status.providers.valhalla?.healthy === false && status.providers.valhalla?.state === 'offline')
+  check('storage byte formatting is compact and binary',
+    formatBytes(1536) === '1.50 KiB' && formatBytes(undefined) === 'Unknown')
+}
+
+{
+  check('pack area follows delayed route availability until the user chooses',
+    validPackArea(null, false) === 'bbox' && validPackArea(null, true) === 'route')
+  check('pack area remains valid when a preferred route disappears',
+    validPackArea('route', false) === 'bbox' && validPackArea('route', true) === 'route')
+  check('an explicit map-area preference survives route availability',
+    validPackArea('bbox', true) === 'bbox')
+  check('unedited pack layers follow the active terrain layer',
+    syncPackLayers(['openfreemap'], 'topo', false)[0] === 'opentopo')
+  check('user-edited pack layers do not follow later terrain changes',
+    syncPackLayers(['osm', 'cyclosm'], 'topo', true).join(',') === 'osm,cyclosm')
+
+  const routeRequest = buildPackEstimateRequest({
+    name: '  Pyrenees  ',
+    area: 'route',
+    route: [{ lat: 42.1, lon: -0.4 }, { lat: 42.2, lon: -0.5 }],
+    bbox: null,
+    paddingKm: 5,
+    minZoom: 14,
+    maxZoom: 8,
+    layers: ['opentopo'],
+    scopes: ['routing', 'elevation'],
+  })
+  const bboxRequest = buildPackEstimateRequest({
+    name: 'Pyrenees',
+    area: 'bbox',
+    route: [],
+    bbox: { south: 41, west: -1, north: 42, east: 0 },
+    paddingKm: 5,
+    minZoom: 8,
+    maxZoom: 14,
+    layers: ['opentopo'],
+    scopes: ['routing', 'elevation'],
+  })
+  check('pack request building trims names and normalizes zoom order',
+    routeRequest?.name === 'Pyrenees' && routeRequest.minZoom === 8 && routeRequest.maxZoom === 14)
+  check('pack request building captures the selected area only',
+    routeRequest?.route?.length === 2 && routeRequest.bbox === undefined &&
+      bboxRequest?.bbox?.join(',') === '41,-1,42,0' && bboxRequest.route === undefined)
+  check('pack signatures invalidate estimates when the full area changes',
+    packRequestSignature(routeRequest) !== packRequestSignature(bboxRequest))
+  check('pack signatures treat layer and scope order as equivalent',
+    packRequestSignature(routeRequest) === packRequestSignature(routeRequest ? {
+      ...routeRequest,
+      layers: [...routeRequest.layers].reverse(),
+      scopes: [...routeRequest.scopes].reverse(),
+    } : null))
+
+  const automaticRequest = buildAutomaticPackRequest(' Trans-Pyrenees ', Array.from(
+    { length: 6000 },
+    (_, index) => ({ lat: 42 + index / 1_000_000, lon: -1 + Math.sin(index / 20) / 100 }),
+  ))
+  check('automatic packs use bounded route-safe defaults',
+    automaticRequest?.name === 'Route: Trans-Pyrenees' && automaticRequest.route !== undefined &&
+      automaticRequest.automatic === true && automaticRequest.route.length <= 5000 && automaticRequest.layers[0] === 'openfreemap' &&
+      automaticRequest.scopes.join(',') === 'elevation,pois,fuel')
+
+  const estimate = decodePackEstimate({
+    estimatedBytes: 2048,
+    remainingQuota: 4096,
+    counts: { elevation: 12 },
+    blocked: [{ layer: 'satellite', resource: 'vector-map', reason: 'provider unavailable' }],
+  })
+  check('pack estimate decoder accepts backend byte and quota field names',
+    estimate.bytes === 2048 && estimate.quotaRemaining === 4096)
+  check('pack estimate decoder preserves blocked-provider details',
+    estimate.blocked[0]?.layer === 'satellite' && estimate.blocked[0]?.resource === 'vector-map' &&
+      estimate.blocked[0]?.reason === 'provider unavailable' && estimate.counts.elevation === 12)
+
+  const packs = decodePacks([{
+    id: 'pack-1', state: 'complete', done: 1, total: 1,
+    resources: { water: { done: 1, total: 1, failed: 0, bytes: 42, items: 3 } },
+  }])
+  check('pack summaries preserve per-resource progress and item counts',
+    packs[0]?.resources.water?.done === 1 && packs[0]?.resources.water?.bytes === 42 &&
+      packs[0]?.resources.water?.items === 3)
 }
 
 /* -- Surface classification and chunking ---------------------------- */

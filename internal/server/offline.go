@@ -1,0 +1,226 @@
+package server
+
+import (
+	"crypto/subtle"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+func remoteIsLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s *Server) validAdminToken(r *http.Request) bool {
+	if s.adminToken == "" {
+		return false
+	}
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	token, ok := strings.CutPrefix(value, "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) == 1
+}
+
+func (s *Server) isTrustedResourceOrigin(origin string, r *http.Request) bool {
+	normalized, err := normalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+	if normalized == s.trustedUIOrigin {
+		return true
+	}
+	u, _ := url.Parse(normalized)
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	_, allowed := s.allowedOrigins[normalized]
+	return allowed
+}
+
+func (s *Server) isTrustedManagementOrigin(origin string, r *http.Request) bool {
+	normalized, err := normalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+	if s.trustedUIOrigin != "" {
+		return normalized == s.trustedUIOrigin
+	}
+	u, _ := url.Parse(normalized)
+	return strings.EqualFold(u.Host, r.Host)
+}
+
+func (s *Server) authorizedOfflineControl(r *http.Request, requireHeader bool) bool {
+	if s.validAdminToken(r) {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return remoteIsLoopback(r.RemoteAddr)
+	}
+	if requireHeader && r.Header.Get("X-GPX-Editor") == "" {
+		return false
+	}
+	return s.isTrustedManagementOrigin(origin, r)
+}
+
+func (s *Server) requireOfflineControl(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorizedOfflineControl(r, true) {
+			writeError(w, http.StatusForbidden, "Offline management request refused")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) requireOfflineRead(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorizedOfflineControl(r, false) {
+			writeError(w, http.StatusForbidden, "Offline management request refused")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) handleOfflineOptions(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	requested := strings.ToLower(r.Header.Get("Access-Control-Request-Headers"))
+	if origin == "" || !s.isTrustedManagementOrigin(origin, r) || !strings.Contains(requested, "x-gpx-editor") {
+		writeError(w, http.StatusForbidden, "Offline management preflight refused")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func noStoreJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
+	legacyBytes, legacyMaxBytes, legacyEntries := int64(0), int64(0), 0
+	if s.elevation.tiles != nil {
+		legacyBytes, legacyEntries = s.elevation.tiles.diskStats()
+		legacyMaxBytes = s.elevation.tiles.diskQuota()
+	}
+	type jobAggregate struct {
+		ID       string `json:"id"`
+		State    string `json:"state"`
+		Done     int    `json:"done"`
+		Total    int    `json:"total"`
+		Failures int    `json:"failed"`
+		Bytes    int64  `json:"bytes"`
+		Active   int    `json:"active"`
+	}
+	active := jobAggregate{ID: "active", State: "queued"}
+	if s.packs != nil {
+		for _, job := range s.packs.summaries() {
+			if job.State == "queued" || job.State == "running" {
+				active.Active++
+				active.Done += job.Done
+				active.Total += job.Total
+				active.Failures += job.Failures
+				active.Bytes += job.Bytes
+				if job.State == "running" {
+					active.State = "running"
+				}
+			}
+		}
+	}
+	jobs := []jobAggregate{}
+	if active.Active > 0 {
+		jobs = append(jobs, active)
+	}
+	cache := s.cache.stats()
+	noStoreJSON(w, http.StatusOK, struct {
+		Enabled    bool                      `json:"enabled"`
+		Mode       offlineMode               `json:"mode"`
+		Writable   bool                      `json:"writable"`
+		Bytes      int64                     `json:"bytes"`
+		MaxBytes   int64                     `json:"maxBytes"`
+		Entries    int                       `json:"entries"`
+		MaxEntries int                       `json:"maxEntries"`
+		Scopes     map[string]cacheScopeStat `json:"scopes"`
+		Cache      cacheStats                `json:"cache"`
+		Elevation  struct {
+			Bytes    int64 `json:"bytes"`
+			MaxBytes int64 `json:"maxBytes"`
+			Entries  int   `json:"entries"`
+		} `json:"elevationTiles"`
+		Providers  map[string]providerHealth `json:"providers"`
+		Jobs       []jobAggregate            `json:"jobs"`
+		ActiveJobs int                       `json:"activeJobs"`
+	}{
+		Enabled: true, Mode: s.mode, Writable: cache.Writable, Bytes: cache.Bytes,
+		MaxBytes: cache.Quota, Entries: cache.Entries, MaxEntries: s.cache.maxEntries,
+		Scopes: cache.Scopes, Cache: cache,
+		Elevation: struct {
+			Bytes    int64 `json:"bytes"`
+			MaxBytes int64 `json:"maxBytes"`
+			Entries  int   `json:"entries"`
+		}{legacyBytes, legacyMaxBytes, legacyEntries},
+		Providers: s.outbound.healthSnapshot(), Jobs: jobs, ActiveJobs: active.Active,
+	})
+}
+
+func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope != "" && !validScope(scope) {
+		writeError(w, http.StatusBadRequest, "invalid cache scope")
+		return
+	}
+	removed, err := s.cache.clear(scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Cache deletion failed")
+		return
+	}
+	noStoreJSON(w, http.StatusOK, map[string]int{"removed": removed})
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
+	type openFreeMapCapability struct {
+		Style     string `json:"style"`
+		AllowBulk bool   `json:"allowBulk"`
+	}
+	type configResponse struct {
+		NominatimURL string `json:"nominatimUrl"`
+		Offline      struct {
+			Enabled bool        `json:"enabled"`
+			Mode    offlineMode `json:"mode"`
+			Status  string      `json:"status"`
+			Packs   string      `json:"packs"`
+		} `json:"offline"`
+		Services map[string]string `json:"services"`
+		Maps     struct {
+			Raster      map[string]string      `json:"raster"`
+			OpenFreeMap *openFreeMapCapability `json:"openfreemap,omitempty"`
+		} `json:"maps"`
+	}
+	var response configResponse
+	response.NominatimURL = s.nominatimURL
+	response.Offline.Enabled = true
+	response.Offline.Mode = s.mode
+	response.Offline.Status = "/offline/status"
+	response.Offline.Packs = "/offline/packs"
+	response.Services = map[string]string{
+		"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search",
+		"valhallaRoute": "/routing/valhalla/route", "osrmRoute": "/routing/osrm/route",
+		"surface": "/routing/valhalla/surface",
+	}
+	response.Maps.Raster = map[string]string{
+		"osm":      "/map/raster/osm/{z}/{x}/{y}.png",
+		"opentopo": "/map/raster/opentopo/{z}/{x}/{y}.png",
+		"cyclosm":  "/map/raster/cyclosm/{z}/{x}/{y}.png",
+	}
+	if s.openFreeMap != nil && s.openFreeMap.isActive() {
+		response.Maps.OpenFreeMap = &openFreeMapCapability{Style: "/map/openfreemap/style.json", AllowBulk: s.openFreeMap.allowBulk}
+	}
+	writeJSON(w, http.StatusOK, response)
+}

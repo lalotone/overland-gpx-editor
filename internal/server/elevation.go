@@ -1,15 +1,19 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 /*
@@ -23,6 +27,11 @@ import (
 
 // Both upstreams cap a single request at 100 coordinates.
 const maxLocationsPerRequest = 100
+
+const (
+	maxElevationLocations       = 6000
+	maxElevationRequestDuration = 2 * time.Minute
+)
 
 // The frontend's ceiling is 6000 points (MAX_ELEVATION_LOOKUPS), each encoding
 // to well under 200 bytes.
@@ -68,6 +77,21 @@ type elevationProxy struct {
 	host           string
 	defaultDataset string
 	client         *http.Client
+	outbound       *outboundClient
+	policy         *providerPolicy
+}
+
+type elevationCacheObservationKey struct{}
+
+type elevationCacheObservation struct {
+	response cachedResponse
+}
+
+func (o *elevationCacheObservation) record(response cachedResponse) {
+	priority := map[string]int{"hit": 1, "miss": 2, "revalidated": 3, "stale": 4, "bypass": 5}
+	if o.response.State == "" || priority[response.State] > priority[o.response.State] {
+		o.response = response
+	}
 }
 
 func (e *elevationProxy) usesOpenMeteo() bool { return e.tiles == nil && e.host == "" }
@@ -99,27 +123,88 @@ func (e *elevationProxy) lookup(ctx context.Context, points []point, dataset str
 }
 
 func (e *elevationProxy) get(ctx context.Context, endpoint string) ([]byte, error) {
+	if e.outbound != nil && e.policy != nil {
+		response, err := e.outbound.do(ctx, cachedRequest{
+			policy: e.policy, method: http.MethodGet, url: endpoint,
+			params: endpoint, cacheable: true,
+			validate: e.validateResponse,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if observation, ok := ctx.Value(elevationCacheObservationKey{}).(*elevationCacheObservation); ok {
+			observation.record(response)
+		}
+		return response.Body, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := e.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return nil, fmt.Errorf("elevation response content encoding %q is not accepted", encoding)
+	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxElevationBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxElevationBodyBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxElevationBodyBytes {
+		return nil, errors.New("elevation response exceeds provider limit")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("elevation service returned %d: %s",
 			resp.StatusCode, strings.TrimSpace(truncate(string(body), 200)))
 	}
+	if err := e.validateResponse(body); err != nil {
+		return nil, err
+	}
 	return body, nil
+}
+
+func (e *elevationProxy) validateResponse(body []byte) error {
+	if e.usesOpenMeteo() {
+		var payload struct {
+			Elevation json.RawMessage `json:"elevation"`
+			Error     bool            `json:"error"`
+			Reason    string          `json:"reason"`
+		}
+		if json.Unmarshal(body, &payload) != nil {
+			return errors.New("malformed Open-Meteo elevation response")
+		}
+		if payload.Error {
+			if payload.Reason != "" {
+				return errors.New(payload.Reason)
+			}
+			return errors.New("Open-Meteo rejected the elevation request")
+		}
+		var elevations []*float64
+		if len(payload.Elevation) == 0 || json.Unmarshal(payload.Elevation, &elevations) != nil {
+			return errors.New("Open-Meteo returned an invalid elevation list")
+		}
+		return nil
+	}
+	var payload struct {
+		Results json.RawMessage `json:"results"`
+	}
+	if json.Unmarshal(body, &payload) != nil || len(payload.Results) == 0 {
+		return errors.New("opentopodata returned an invalid elevation response")
+	}
+	var results []struct {
+		Elevation *float64 `json:"elevation"`
+	}
+	if json.Unmarshal(payload.Results, &results) != nil {
+		return errors.New("opentopodata returned an invalid elevation result list")
+	}
+	return nil
 }
 
 // lookupOpenTopoData talks to an opentopodata-style API:
@@ -237,10 +322,15 @@ func (s *Server) handleElevation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dataset := s.elevation.dataset(q.Get("dataset"))
-	values, err := s.elevation.lookup(r.Context(), []point{p}, dataset)
+	observation := &elevationCacheObservation{}
+	ctx := context.WithValue(r.Context(), elevationCacheObservationKey{}, observation)
+	values, err := s.elevation.lookup(ctx, []point{p}, dataset)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeOutboundError(w, err, "elevation")
 		return
+	}
+	if observation.response.State != "" {
+		setCacheHeaders(w, observation.response)
 	}
 	writeJSON(w, http.StatusOK, elevationResponse{Results: toResults(values), Dataset: dataset})
 }
@@ -258,9 +348,18 @@ type batchRequest struct {
 // upstream-sized chunks and stitch the results back together in order, so the
 // frontend never has to make one HTTP round trip per track point.
 func (s *Server) handleElevationBatch(w http.ResponseWriter, r *http.Request) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
 	var payload batchRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxElevationBodyBytes)).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "Malformed JSON body")
+	if err := decodeJSONBody(w, r, maxElevationBodyBytes, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(payload.Dataset) > 64 {
+		writeError(w, http.StatusBadRequest, "dataset is too long")
 		return
 	}
 
@@ -272,17 +371,24 @@ func (s *Server) handleElevationBatch(w http.ResponseWriter, r *http.Request) {
 
 	dataset := s.elevation.dataset(payload.Dataset)
 	results := make([]elevationResult, 0, len(points))
+	observation := &elevationCacheObservation{}
+	requestCtx, cancel := context.WithTimeout(r.Context(), maxElevationRequestDuration)
+	defer cancel()
+	ctx := context.WithValue(requestCtx, elevationCacheObservationKey{}, observation)
 
 	for start := 0; start < len(points); start += maxLocationsPerRequest {
 		end := min(start+maxLocationsPerRequest, len(points))
-		values, err := s.elevation.lookup(r.Context(), points[start:end], dataset)
+		values, err := s.elevation.lookup(ctx, points[start:end], dataset)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeOutboundError(w, err, "elevation")
 			return
 		}
 		results = append(results, toResults(values)...)
 	}
 
+	if observation.response.State != "" {
+		setCacheHeaders(w, observation.response)
+	}
 	writeJSON(w, http.StatusOK, elevationResponse{Results: results, Dataset: dataset})
 }
 
@@ -294,7 +400,7 @@ func parsePoint(lat, lon string) (point, error) {
 	if errLat != nil || errLon != nil {
 		return point{}, errors.New("lat and lon must be numbers")
 	}
-	if latF < -90 || latF > 90 || lonF < -180 || lonF > 180 {
+	if math.IsNaN(latF) || math.IsInf(latF, 0) || math.IsNaN(lonF) || math.IsInf(lonF, 0) || latF < -90 || latF > 90 || lonF < -180 || lonF > 180 {
 		return point{}, errors.New("lat and lon are out of range")
 	}
 	return point{lat: latF, lon: lonF}, nil
@@ -308,36 +414,53 @@ func parseLocations(raw json.RawMessage) ([]point, error) {
 	}
 
 	var encoded string
-	if err := json.Unmarshal(raw, &encoded); err != nil {
-		var items []json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil {
-			return nil, errors.New("'locations' must be a string or an array")
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		if strings.Count(encoded, "|")+1 > maxElevationLocations {
+			return nil, fmt.Errorf("locations must not exceed %d points", maxElevationLocations)
 		}
-		parts := make([]string, 0, len(items))
-		for _, item := range items {
-			part, err := parseLocationItem(item)
+		points := make([]point, 0, strings.Count(encoded, "|")+1)
+		for _, chunk := range strings.Split(encoded, "|") {
+			if strings.TrimSpace(chunk) == "" {
+				continue
+			}
+			lat, lon, ok := strings.Cut(chunk, ",")
+			if !ok {
+				return nil, errors.New("each location must be \"lat,lon\"")
+			}
+			p, err := parsePoint(lat, lon)
 			if err != nil {
 				return nil, err
 			}
-			parts = append(parts, part)
+			points = append(points, p)
 		}
-		encoded = strings.Join(parts, "|")
+		if len(points) == 0 {
+			return nil, errors.New("no locations supplied")
+		}
+		return points, nil
 	}
 
-	points := make([]point, 0, strings.Count(encoded, "|")+1)
-	for _, chunk := range strings.Split(encoded, "|") {
-		if strings.TrimSpace(chunk) == "" {
-			continue
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return nil, errors.New("'locations' must be a string or an array")
+	}
+	points := make([]point, 0, min(maxElevationLocations, 256))
+	for decoder.More() {
+		if len(points) >= maxElevationLocations {
+			return nil, fmt.Errorf("locations must not exceed %d points", maxElevationLocations)
 		}
-		lat, lon, ok := strings.Cut(chunk, ",")
-		if !ok {
-			return nil, errors.New("each location must be \"lat,lon\"")
+		var item json.RawMessage
+		if decoder.Decode(&item) != nil {
+			return nil, errors.New("invalid location array")
 		}
-		p, err := parsePoint(lat, lon)
+		point, err := parseLocationItem(item)
 		if err != nil {
 			return nil, err
 		}
-		points = append(points, p)
+		points = append(points, point)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, errors.New("invalid location array")
 	}
 	if len(points) == 0 {
 		return nil, errors.New("no locations supplied")
@@ -345,16 +468,20 @@ func parseLocations(raw json.RawMessage) ([]point, error) {
 	return points, nil
 }
 
-func parseLocationItem(item json.RawMessage) (string, error) {
+func parseLocationItem(item json.RawMessage) (point, error) {
 	var s string
 	if err := json.Unmarshal(item, &s); err == nil {
-		return strings.TrimSpace(s), nil
+		lat, lon, ok := strings.Cut(strings.TrimSpace(s), ",")
+		if !ok {
+			return point{}, errors.New("each location must be \"lat,lon\"")
+		}
+		return parsePoint(lat, lon)
 	}
 	var pair []float64
 	if err := json.Unmarshal(item, &pair); err == nil && len(pair) == 2 {
-		return point{lat: pair[0], lon: pair[1]}.String(), nil
+		return parsePoint(strconv.FormatFloat(pair[0], 'g', -1, 64), strconv.FormatFloat(pair[1], 'g', -1, 64))
 	}
-	return "", errors.New("each location must be \"lat,lon\" or [lat, lon]")
+	return point{}, errors.New("each location must be \"lat,lon\" or [lat, lon]")
 }
 
 /* -- Tile prefetch ---------------------------------------------------- */

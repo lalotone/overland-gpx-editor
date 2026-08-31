@@ -10,6 +10,12 @@
 
 import type { Coordinate } from './types'
 import { createRateLimitedFetch } from './rateLimit'
+import {
+  fetchRuntimeService,
+  OfflineCacheMissError,
+  responseError,
+} from './offline'
+import type { CacheMetadata, RuntimeRequestContext } from './offline'
 
 export const VALHALLA_API = 'https://valhalla1.openstreetmap.de'
 const OSRM_API = 'https://router.project-osrm.org'
@@ -41,6 +47,7 @@ export interface RouteResult {
   engine: string
   /** Set when we had to fall back from the preferred costing model. */
   warning?: string
+  cache?: CacheMetadata
 }
 
 export class RoutingError extends Error {
@@ -117,24 +124,43 @@ function shapeToCoordinates(legs: { shape: string }[]): Coordinate[] {
 async function valhallaRoute(
   waypoints: Coordinate[],
   costing: ValhallaCosting,
+  profile: RoutingProfile,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<RouteResult | null> {
-  const res = await fetchFossgis(`${VALHALLA_API}/route`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      locations: waypoints.map(w => ({ lat: w.lat, lon: w.lon })),
-      directions_options: { units: 'kilometers' },
-      ...costing,
-    }),
+  const directBody = JSON.stringify({
+    locations: waypoints.map(w => ({ lat: w.lat, lon: w.lon })),
+    directions_options: { units: 'kilometers' },
+    ...costing,
+  })
+  const backendBody = JSON.stringify({
+    waypoints: waypoints.map(w => ({ lat: w.lat, lon: w.lon })),
+    costing: costing.costing,
+    profile,
+  })
+  const { response: res, cache } = await fetchRuntimeService({
+    ...context,
+    service: 'valhallaRoute',
+    directUrl: `${VALHALLA_API}/route`,
+    backendInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: backendBody,
+    },
+    directInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: directBody,
+    },
     signal,
+    fetcher: context.fetcher ?? (context.runtime?.services.valhallaRoute ? fetch : fetchFossgis),
   })
 
   if (!res.ok) {
     // 400 usually means "costing model not supported by this instance",
     // which the caller can retry around. Anything else is a hard failure.
     if (res.status === 400) return null
-    throw new RoutingError(`Routing service returned ${res.status}`)
+    throw await responseError(res, `Routing service returned ${res.status}`)
   }
 
   const data = await res.json()
@@ -146,16 +172,33 @@ async function valhallaRoute(
     durationSeconds: data.trip?.summary?.time ?? null,
     distanceKm: data.trip?.summary?.length ?? null,
     engine: `Valhalla ${costing.costing}`,
+    cache,
   }
 }
 
-async function osrmRoute(waypoints: Coordinate[], signal?: AbortSignal): Promise<RouteResult | null> {
+async function osrmRoute(
+  waypoints: Coordinate[],
+  signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
+): Promise<RouteResult | null> {
   const path = waypoints.map(w => `${w.lon.toFixed(6)},${w.lat.toFixed(6)}`).join(';')
-  const res = await fetchFossgis(
-    `${OSRM_API}/route/v1/driving/${path}?overview=full&geometries=geojson`,
-    { signal },
-  )
-  if (!res.ok) return null
+  const { response: res, cache } = await fetchRuntimeService({
+    ...context,
+    service: 'osrmRoute',
+    directUrl: `${OSRM_API}/route/v1/driving/${path}?overview=full&geometries=geojson`,
+    backendInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lon: w.lon })) }),
+    },
+    directInit: {},
+    signal,
+    fetcher: context.fetcher ?? (context.runtime?.services.osrmRoute ? fetch : fetchFossgis),
+  })
+  if (!res.ok) {
+    if (res.status === 400 || res.status === 404) return null
+    throw await responseError(res, `OSRM routing returned ${res.status}`)
+  }
   const data = await res.json()
   const route = data.routes?.[0]
   if (!route) return null
@@ -164,6 +207,7 @@ async function osrmRoute(waypoints: Coordinate[], signal?: AbortSignal): Promise
     durationSeconds: route.duration ?? null,
     distanceKm: route.distance != null ? route.distance / 1000 : null,
     engine: 'OSRM driving',
+    cache,
   }
 }
 
@@ -179,14 +223,33 @@ export async function calculateRoute(
   waypoints: Coordinate[],
   profile: RoutingProfile,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<RouteResult> {
   if (waypoints.length < 2) throw new RoutingError('Need at least two waypoints')
 
-  const primary = await valhallaRoute(waypoints, motorcycleCosting(profile), signal)
+  let cacheMiss: OfflineCacheMissError | undefined
+  const attempt = async (run: () => Promise<RouteResult | null>): Promise<RouteResult | null> => {
+    try {
+      return await run()
+    } catch (error) {
+      if (
+        context.runtime?.offline?.mode === 'cache-only' &&
+        error instanceof OfflineCacheMissError
+      ) {
+        cacheMiss = error
+        return null
+      }
+      throw error
+    }
+  }
+
+  const primary = await attempt(
+    () => valhallaRoute(waypoints, motorcycleCosting(profile), profile, signal, context),
+  )
   if (primary) return primary
 
   const alt = fallbackCosting(profile)
-  const secondary = await valhallaRoute(waypoints, alt, signal)
+  const secondary = await attempt(() => valhallaRoute(waypoints, alt, profile, signal, context))
   if (secondary) {
     return {
       ...secondary,
@@ -197,12 +260,13 @@ export async function calculateRoute(
   }
 
   if (profile === 'road') {
-    const osrm = await osrmRoute(waypoints, signal)
+    const osrm = await attempt(() => osrmRoute(waypoints, signal, context))
     if (osrm) {
       return { ...osrm, warning: 'Fell back to OSRM car routing.' }
     }
   }
 
+  if (cacheMiss) throw cacheMiss
   throw new RoutingError('No route found between these points')
 }
 

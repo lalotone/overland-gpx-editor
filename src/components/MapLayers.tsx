@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { maplibreGL } from '@maplibre/maplibre-gl-leaflet'
+import type { StyleSpecification } from 'maplibre-gl'
 import { Pane, TileLayer, useMap } from 'react-leaflet'
-import { BASE_LAYERS, HILLSHADE_LAYER, SERVICE_ATTRIBUTIONS, getBaseLayer } from '../lib/terrain'
-import type { ColorMode, ThumbnailLayerDefinition } from '../lib/terrain'
+import { SERVICE_ATTRIBUTIONS, getBaseLayerFrom } from '../lib/terrain'
+import type { BaseLayerDefinition, ColorMode, ThumbnailLayerDefinition } from '../lib/terrain'
 
 let webGL2Available: boolean | undefined
 
@@ -39,36 +40,77 @@ function VectorBaseLayer({
   styleUrl,
   attribution,
   fallback,
-  onFallback,
+  onStatus,
 }: {
   styleUrl: string
   attribution: string
   fallback: ThumbnailLayerDefinition
-  onFallback?: () => void
+  onStatus?: (reason: 'webgl' | 'style' | null) => void
 }) {
   const map = useMap()
   const webGL2 = hasWebGL2()
+  const [style, setStyle] = useState<StyleSpecification | null>(null)
+  const [styleFailed, setStyleFailed] = useState(false)
 
   useEffect(() => {
-    if (!webGL2) return
+    const controller = new AbortController()
+    setStyle(null)
+    setStyleFailed(false)
+    if (!webGL2) return () => controller.abort()
+    void fetch(styleUrl, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(`map style returned ${response.status}`)
+        const value = await response.json() as StyleSpecification
+        if (value.version !== 8 || !value.sources || !Array.isArray(value.layers)) {
+          throw new Error('map style is invalid')
+        }
+        setStyle(value)
+      })
+      .catch(reason => {
+        if ((reason as Error).name === 'AbortError') return
+        setStyleFailed(true)
+        onStatus?.('style')
+      })
+    return () => controller.abort()
+  }, [onStatus, styleUrl, webGL2])
 
-    const layer = maplibreGL({
-      style: styleUrl,
-      attributionControl: false,
-    }).addTo(map)
+  useEffect(() => {
+    if (!webGL2 || !style || styleFailed) return
+
+    let layer
+    try {
+      layer = maplibreGL({ style, attributionControl: false }).addTo(map)
+    } catch {
+      setStyleFailed(true)
+      onStatus?.('style')
+      return
+    }
+    const libreMap = layer.getMaplibreMap()
+    const markReady = () => onStatus?.(null)
+    const failCriticalResource = (event: unknown) => {
+      // A single unavailable tile should leave the vector map in place: other
+      // tiles still render. Style graph/source failures cannot render a map.
+      if (typeof event === 'object' && event !== null && 'tile' in event && event.tile) return
+      setStyleFailed(true)
+      onStatus?.('style')
+    }
+    libreMap.once('style.load', markReady)
+    libreMap.on('error', failCriticalResource)
     map.attributionControl.addAttribution(attribution)
 
     return () => {
+      libreMap.off('style.load', markReady)
+      libreMap.off('error', failCriticalResource)
       map.attributionControl.removeAttribution(attribution)
       if (map.hasLayer(layer)) map.removeLayer(layer)
     }
-  }, [attribution, map, styleUrl, webGL2])
+  }, [attribution, map, onStatus, style, styleFailed, webGL2])
 
   useEffect(() => {
-    if (!webGL2) onFallback?.()
-  }, [onFallback, webGL2])
+    if (!webGL2) onStatus?.('webgl')
+  }, [onStatus, webGL2])
 
-  if (webGL2) return null
+  if (webGL2 && !styleFailed) return null
 
   return (
     <TileLayer
@@ -92,13 +134,17 @@ export function MapTiles({
   hillshade,
   hillshadeOpacity,
   onVectorFallback,
+  layers,
+  hillshadeLayer,
 }: {
   baseLayerId: string
   hillshade: boolean
   hillshadeOpacity: number
-  onVectorFallback?: () => void
+  onVectorFallback?: (reason: 'webgl' | 'style' | null) => void
+  layers: BaseLayerDefinition[]
+  hillshadeLayer?: ThumbnailLayerDefinition
 }) {
-  const base = getBaseLayer(baseLayerId)
+  const base = getBaseLayerFrom(layers, baseLayerId)
 
   return (
     <>
@@ -109,7 +155,7 @@ export function MapTiles({
           styleUrl={base.styleUrl}
           attribution={base.attribution}
           fallback={base.fallback}
-          onFallback={onVectorFallback}
+          onStatus={onVectorFallback}
         />
       ) : (
         <TileLayer
@@ -120,13 +166,13 @@ export function MapTiles({
           maxNativeZoom={base.maxZoom}
         />
       )}
-      {hillshade && (
+      {hillshade && hillshadeLayer && (
         <Pane name="hillshade-pane" style={{ zIndex: 250 }}>
           <TileLayer
-            url={HILLSHADE_LAYER.url}
-            attribution={HILLSHADE_LAYER.attribution}
+            url={hillshadeLayer.url}
+            attribution={hillshadeLayer.attribution}
             maxZoom={19}
-            maxNativeZoom={HILLSHADE_LAYER.maxZoom}
+            maxNativeZoom={hillshadeLayer.maxZoom}
             opacity={hillshadeOpacity}
           />
         </Pane>
@@ -146,6 +192,9 @@ export function TerrainControls({
   colorMode,
   onColorMode,
   surfaceAvailable = false,
+  layers,
+  hillshadeAvailable = true,
+  vectorFallbackReason = null,
 }: {
   baseLayerId: string
   onBaseLayer: (id: string) => void
@@ -157,10 +206,13 @@ export function TerrainControls({
   onColorMode?: (mode: ColorMode) => void
   /** Surface data has been read for this track, so the mode is offerable. */
   surfaceAvailable?: boolean
+  layers: BaseLayerDefinition[]
+  hillshadeAvailable?: boolean
+  vectorFallbackReason?: 'webgl' | 'style' | null
 }) {
   const [open, setOpen] = useState(false)
-  const base = getBaseLayer(baseLayerId)
-  const vectorFallback = base.kind === 'vector' && !hasWebGL2()
+  const base = getBaseLayerFrom(layers, baseLayerId)
+  const vectorFallback = base.kind === 'vector' && (vectorFallbackReason ?? (!hasWebGL2() ? 'webgl' : null))
 
   // Collapsed by default: the expanded panel is useful but covers a corner of
   // the map, which matters when you are reading terrain under it.
@@ -176,7 +228,7 @@ export function TerrainControls({
           <path d="M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z" />
         </svg>
         <span className="terrain-fab-label">{vectorFallback ? 'OSM' : base.label}</span>
-        {hillshade && <span className="terrain-fab-dot" title="Relief on" />}
+        {hillshade && hillshadeAvailable && <span className="terrain-fab-dot" title="Relief on" />}
       </button>
     )
   }
@@ -196,7 +248,7 @@ export function TerrainControls({
       </div>
 
       <div className="terrain-row terrain-row--layers">
-        {BASE_LAYERS.map(layer => (
+        {layers.map(layer => (
           <button
             key={layer.id}
             className={`tile-btn${baseLayerId === layer.id ? ' active' : ''}`}
@@ -213,7 +265,12 @@ export function TerrainControls({
           className="terrain-toggle"
           title="Shaded relief overlay — reveals ridges and gullies, especially over satellite imagery"
         >
-          <input type="checkbox" checked={hillshade} onChange={e => onHillshade(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={hillshade && hillshadeAvailable}
+            disabled={!hillshadeAvailable}
+            onChange={e => onHillshade(e.target.checked)}
+          />
           <span>Relief</span>
         </label>
         <input
@@ -223,17 +280,23 @@ export function TerrainControls({
           max={1}
           step={0.05}
           value={hillshadeOpacity}
-          disabled={!hillshade}
+          disabled={!hillshade || !hillshadeAvailable}
           onChange={e => onHillshadeOpacity(parseFloat(e.target.value))}
           title="Relief strength"
           aria-label="Relief strength"
         />
       </div>
 
+      {!hillshadeAvailable && <div className="terrain-row terrain-note">Relief is not cached</div>}
+
       {base.hasContours && <div className="terrain-row terrain-note">Contour lines included</div>}
       {base.kind === 'vector' && (
         <div className="terrain-row terrain-note">
-          {vectorFallback ? 'OSM raster fallback — WebGL2 unavailable' : 'OpenFreeMap vector'}
+          {vectorFallback === 'style'
+            ? 'OSM raster fallback — vector style unavailable'
+            : vectorFallback === 'webgl'
+              ? 'OSM raster fallback — WebGL2 unavailable'
+              : 'OpenFreeMap vector'}
         </div>
       )}
 

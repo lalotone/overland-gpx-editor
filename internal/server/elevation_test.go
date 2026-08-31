@@ -110,6 +110,7 @@ func newOpenMeteoServer(t *testing.T, dem *fakeDEM) *Server {
 func postBatch(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/elevation/batch", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:1"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
@@ -294,6 +295,41 @@ func TestBatchRejectsBadLocations(t *testing.T) {
 	}
 }
 
+func TestBatchRequiresStrictJSONAndCapsLocations(t *testing.T) {
+	dem := newFakeDEM(t, false)
+	s := newElevationServer(t, dem)
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		want        int
+	}{
+		{name: "missing content type", body: `{"locations":"1,2"}`, want: http.StatusUnsupportedMediaType},
+		{name: "wrong content type", contentType: "text/plain", body: `{"locations":"1,2"}`, want: http.StatusUnsupportedMediaType},
+		{name: "unknown field", contentType: "application/json", body: `{"locations":"1,2","extra":true}`, want: http.StatusBadRequest},
+		{name: "trailing value", contentType: "application/json", body: `{"locations":"1,2"}{}`, want: http.StatusBadRequest},
+		{name: "string over limit", contentType: "application/json", body: `{"locations":"` + strings.Repeat("1,2|", maxElevationLocations) + `1,2"}`, want: http.StatusBadRequest},
+		{name: "array over limit", contentType: "application/json", body: `{"locations":[` + strings.Repeat(`[1,2],`, maxElevationLocations) + `[1,2]]}`, want: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/elevation/batch", strings.NewReader(tt.body))
+			req.RemoteAddr = "127.0.0.1:1"
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tt.want, rec.Body)
+			}
+		})
+	}
+	if len(dem.requests) != 0 {
+		t.Fatalf("invalid batches made %d upstream requests", len(dem.requests))
+	}
+}
+
 // An unknown dataset must fall back to the configured default rather than be
 // forwarded — it lands in the upstream URL path.
 func TestUnknownDatasetFallsBackToDefault(t *testing.T) {
@@ -324,6 +360,7 @@ func TestUpstreamFailureIsBadGateway(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/elevation?lat=42.5&lon=-0.4", nil)
+	req.RemoteAddr = "127.0.0.1:1"
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadGateway {
@@ -363,6 +400,7 @@ func TestSinglePointLookup(t *testing.T) {
 	s := newElevationServer(t, dem)
 
 	req := httptest.NewRequest(http.MethodGet, "/elevation?lat=42.5&lon=-0.4&dataset=srtm90m", nil)
+	req.RemoteAddr = "127.0.0.1:1"
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 
@@ -393,6 +431,7 @@ func TestSinglePointRejectsBadCoordinates(t *testing.T) {
 		"/elevation?lat=95&lon=0",
 	} {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "127.0.0.1:1"
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {

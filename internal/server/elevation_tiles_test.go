@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -100,6 +101,40 @@ func TestTerrariumDecode(t *testing.T) {
 		if got := grid.at(10, 10); got < want-0.01 || got > want+0.01 {
 			t.Errorf("decoded %.3f, want %.3f", got, want)
 		}
+	}
+}
+
+func TestTerrariumDecodeRequiresExactPNGDimensions(t *testing.T) {
+	encode := func(format string, width, height int) []byte {
+		t.Helper()
+		img := image.NewNRGBA(image.Rect(0, 0, width, height))
+		var raw bytes.Buffer
+		var err error
+		if format == "png" {
+			err = png.Encode(&raw, img)
+		} else {
+			err = jpeg.Encode(&raw, img, nil)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw.Bytes()
+	}
+	for _, tt := range []struct {
+		name   string
+		format string
+		width  int
+		height int
+	}{
+		{name: "wrong format", format: "jpeg", width: tileSize, height: tileSize},
+		{name: "wrong width", format: "png", width: tileSize + 1, height: tileSize},
+		{name: "wrong height", format: "png", width: tileSize, height: tileSize + 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeTerrarium(encode(tt.format, tt.width, tt.height)); err == nil {
+				t.Fatal("invalid terrain image was accepted")
+			}
+		})
 	}
 }
 
@@ -257,6 +292,122 @@ func TestDiskCacheSurvivesRestart(t *testing.T) {
 	}
 	if ts.requests.Load() != fetched {
 		t.Error("offline store hit the network")
+	}
+}
+
+func TestTerrariumDiskQuotaEvictsLRUAndPreservesHits(t *testing.T) {
+	ts := newTileServer(t)
+	raw := encodeTerrarium(t, func(_, _ int) float64 { return 500 })
+	store := newTileStoreWithQuota(ts.url(), defaultTileZoom, t.TempDir(), int64(len(raw)*2), ts.Client())
+	if store.cacheErr != nil {
+		t.Fatal(store.cacheErr)
+	}
+	t.Cleanup(func() { _ = store.closeCache() })
+	keys := []tileKey{
+		{z: defaultTileZoom, x: 1, y: 1},
+		{z: defaultTileZoom, x: 1, y: 2},
+		{z: defaultTileZoom, x: 1, y: 3},
+	}
+	for _, key := range keys[:2] {
+		if _, err := store.grid(context.Background(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.grid(context.Background(), keys[0]); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := store.grid(context.Background(), keys[2]); err != nil {
+		t.Fatal(err)
+	}
+	bytes, entries := store.diskStats()
+	if bytes > int64(len(raw)*2) || entries != 2 {
+		t.Fatalf("quota stats = %d bytes, %d entries", bytes, entries)
+	}
+	if _, ok := store.diskFileSize(keys[0]); !ok {
+		t.Fatal("recent cache hit was evicted")
+	}
+	if _, ok := store.diskFileSize(keys[1]); ok {
+		t.Fatal("oldest tile was not evicted")
+	}
+	if _, ok := store.diskFileSize(keys[2]); !ok {
+		t.Fatal("new tile was not persisted")
+	}
+}
+
+func TestTerrariumDiskQuotaRefusesOversizedTileAndDoesNotDoubleCount(t *testing.T) {
+	ts := newTileServer(t)
+	raw := encodeTerrarium(t, func(_, _ int) float64 { return 500 })
+	key := tileKey{z: defaultTileZoom, x: 1, y: 1}
+	store := newTileStoreWithQuota(ts.url(), defaultTileZoom, t.TempDir(), int64(len(raw)-1), ts.Client())
+	if store.cacheErr != nil {
+		t.Fatal(store.cacheErr)
+	}
+	t.Cleanup(func() { _ = store.closeCache() })
+	if _, err := store.grid(context.Background(), key); err == nil || !strings.Contains(err.Error(), "quota") {
+		t.Fatalf("oversized tile error = %v", err)
+	}
+	if bytes, entries := store.diskStats(); bytes != 0 || entries != 0 {
+		t.Fatalf("refused tile stats = %d bytes, %d entries", bytes, entries)
+	}
+
+	store.maxDiskBytes = int64(len(raw) * 2)
+	if err := store.writeDisk(key, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.writeDisk(key, raw); err != nil {
+		t.Fatal(err)
+	}
+	if bytes, entries := store.diskStats(); bytes != int64(len(raw)) || entries != 1 {
+		t.Fatalf("replacement stats = %d bytes, %d entries", bytes, entries)
+	}
+}
+
+func TestOfflineStatusReportsTerrariumQuota(t *testing.T) {
+	s, err := New(Config{
+		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(),
+		ElevationTileCacheMaxBytes: 123456,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	rec := do(t, s, http.MethodGet, "/offline/status", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"elevationTiles":{"bytes":0,"maxBytes":123456,"entries":0}`) {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestTileCacheIntermediateSymlinkCannotEscapeRoot(t *testing.T) {
+	cacheDir := t.TempDir()
+	outside := t.TempDir()
+	store := newTileStore("https://tiles.invalid/{z}/{x}/{y}.png", defaultTileZoom, cacheDir, http.DefaultClient)
+	if store.cacheErr != nil {
+		t.Fatal(store.cacheErr)
+	}
+	t.Cleanup(func() { _ = store.closeCache() })
+	outsideColumn := filepath.Join(outside, "1")
+	if err := os.MkdirAll(outsideColumn, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideTile := filepath.Join(outsideColumn, "2.png")
+	if err := os.WriteFile(outsideTile, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cacheDir, fmt.Sprint(defaultTileZoom))); err != nil {
+		t.Fatal(err)
+	}
+	key := tileKey{z: defaultTileZoom, x: 1, y: 2}
+	if _, ok := store.readDisk(key); ok {
+		t.Fatal("tile cache read followed an escaping intermediate symlink")
+	}
+	store.writeDisk(key, encodeTerrarium(t, func(_, _ int) float64 { return 100 }))
+	raw, err := os.ReadFile(outsideTile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "outside" {
+		t.Fatal("tile cache write escaped its root")
 	}
 }
 

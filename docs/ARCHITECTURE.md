@@ -62,7 +62,13 @@ internal/server/
 ├── server.go                   Chi routes, middleware, embedded-frontend handler
 ├── files.go                    Track library: list/read/write/upload/delete
 ├── elevation.go                DEM proxy with upstream-sized chunking
-└── elevation_tiles.go          Terrain-RGB tile reader, cache, interpolation
+├── elevation_tiles.go          Terrain-RGB tile reader, cache, interpolation
+├── cache_store.go              Hashed response bodies, metadata, quota and LRU
+├── provider.go                 Read-through policy, revalidation and rate groups
+├── data_endpoints.go           Narrow fuel/place/POI/routing adapters
+├── maps.go                     Approved raster and compatible-style adapters
+├── packs.go                    Trip-pack estimates, manifests and workers
+└── offline.go                  Capabilities, status and management security
 web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
 
@@ -124,6 +130,20 @@ whole-province zoom where the view is thousands of tiles — so a request over
 `maxPrefetchTiles` caches the middle of the view and reports that it did.
 On-demand lookup still covers whatever the route actually touches.
 
+**The generic offline cache** is separate from the legacy Terrarium tree. Its
+keys are SHA-256 values over provider identity, source fingerprint, method and
+canonical operation data; raw searches and coordinates never become paths or
+routine logs. Bodies and JSON sidecars are written atomically with private
+permissions, indexed on startup and bounded by byte and entry quotas. Provider
+descriptors decide freshness, stale replay, retention, body/content limits,
+pack eligibility and shared request queues. `cache-only` resolves disk/memory
+first and returns a typed miss before any outbound transport can run.
+
+Trip packs are manifests of references to shared cache objects plus explicitly
+eligible work such as Terrarium corridor tiles. Public map adapters cannot be
+made pack-eligible by a browser request. Interrupted jobs restart as incomplete
+and require an explicit new action.
+
 Coordinates are parsed and range-checked before they reach an upstream URL, and
 requests are chunked to the 100-point limit both services impose, then stitched
 back in order. A point the service has no value for comes back `null`, never
@@ -145,10 +165,22 @@ back in order. A point the service has no value for comes back `null`, never
 | `POST /elevation/prefetch` | `{bbox: [s,w,n,e]}` — warm the tile cache for an area, in the background |
 | `GET /elevation/prefetch` | Progress of the running prefetch, polled by the UI |
 | `GET /config` | Runtime public-service configuration, currently the Nominatim-compatible search URL |
+| `GET /fuel` | Persisted Spanish national fuel snapshot |
+| `GET /places/search` | Validated, server-rate-limited Nominatim search |
+| `POST /pois/search` | Allowlisted POI kind and bounded bbox |
+| `POST /routing/valhalla/route` | Validated exact Valhalla operation |
+| `POST /routing/osrm/route` | Validated exact OSRM fallback operation |
+| `POST /routing/valhalla/surface` | Validated trace-attributes chunk |
+| `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
+| `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
+| `GET /offline/status` | Aggregate cache, provider and job state |
+| `/offline/packs` | Estimate, create, inspect, cancel and delete trip packs |
+| `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope |
 | `GET /healthz` | Lightweight liveness check; returns 204 |
 | `GET /*` | The React app; unknown paths fall through to it |
 
 Application errors come back as `{"detail": "…"}` with a matching status.
+An unavailable cached resource adds `code: "offline_cache_miss"` and `scope`.
 Cross-origin access is disabled unless exact origins are configured. There is
 no built-in authentication.
 

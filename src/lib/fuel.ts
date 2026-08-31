@@ -24,6 +24,13 @@
 
 import { haversineDistance } from './geo'
 import type { BoundingBox, Poi, PoiDetail } from './poi'
+import {
+  fetchRuntimeService,
+  formatCacheDate,
+  responseError,
+  selectRuntimeTransport,
+} from './offline'
+import type { CacheMetadata, RuntimeRequestContext } from './offline'
 
 export const FUEL_PRICE_ENDPOINT =
   'https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/'
@@ -205,14 +212,24 @@ export interface FuelDataset {
   stations: FuelStation[]
   /** Publication timestamp as the ministry states it, e.g. "02/08/2026 23:15". */
   published: string
+  cache?: CacheMetadata
 }
 
-let cached: FuelDataset | null = null
-let inflight: Promise<FuelDataset> | null = null
+export interface FuelServiceOptions extends RuntimeRequestContext {
+  fetcher?: typeof fetch
+}
 
-async function download(): Promise<FuelDataset> {
-  const res = await fetch(FUEL_PRICE_ENDPOINT)
-  if (!res.ok) throw new Error(`Fuel price service returned ${res.status}`)
+const cached = new Map<string, FuelDataset>()
+const inflight = new Map<string, Promise<FuelDataset>>()
+
+async function download(options: FuelServiceOptions): Promise<FuelDataset> {
+  const { response: res, cache } = await fetchRuntimeService({
+    ...options,
+    service: 'fuel',
+    directUrl: FUEL_PRICE_ENDPOINT,
+    fetcher: options.fetcher,
+  })
+  if (!res.ok) throw await responseError(res, `Fuel price service returned ${res.status}`)
 
   const data = (await res.json()) as {
     ListaEESSPrecio?: RawStation[]
@@ -222,7 +239,7 @@ async function download(): Promise<FuelDataset> {
   const list = data.ListaEESSPrecio
   if (!Array.isArray(list)) throw new Error('Fuel price service returned an unexpected format')
 
-  return { stations: parseFuelStations(list), published: (data.Fecha ?? '').trim() }
+  return { stations: parseFuelStations(list), published: (data.Fecha ?? '').trim(), cache }
 }
 
 /**
@@ -232,26 +249,39 @@ async function download(): Promise<FuelDataset> {
  * view being abandoned should not throw away a 12 MB fetch that every later
  * view will want. It is honoured for the caller's own result instead.
  */
-export async function loadFuelDataset(signal?: AbortSignal): Promise<FuelDataset> {
-  if (!cached) {
-    if (!inflight) {
-      inflight = download().finally(() => { inflight = null })
+export async function loadFuelDataset(
+  signal?: AbortSignal,
+  options: FuelServiceOptions = {},
+): Promise<FuelDataset> {
+  const selected = selectRuntimeTransport(options.runtime, 'fuel', FUEL_PRICE_ENDPOINT)
+  const key = selected.url ?? 'unavailable'
+  let dataset = cached.get(key)
+  let emitStoredMetadata = dataset !== undefined
+  if (!dataset) {
+    let pending = inflight.get(key)
+    emitStoredMetadata = pending !== undefined
+    if (!pending) {
+      pending = download(options).finally(() => { inflight.delete(key) })
+      inflight.set(key, pending)
     }
-    cached = await inflight
+    dataset = await pending
+    cached.set(key, dataset)
   }
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-  return cached
+  if (emitStoredMetadata && dataset.cache) options.onCacheMetadata?.(dataset.cache)
+  return dataset
 }
 
-function detailFor(station: FuelStation, published: string): PoiDetail {
+function detailFor(station: FuelStation, published: string, cache?: CacheMetadata): PoiDetail {
   return {
     lines: station.prices.map(p => ({ label: p.label, value: `${p.price.toFixed(3)} €/L` })),
     note: [station.address, station.hours && `Horario: ${station.hours}`]
       .filter(Boolean)
       .join(' · '),
-    source: published
-      ? `Ministerio de Industria · ${published}`
-      : 'Ministerio de Industria',
+    source: [
+      published ? `Ministerio de Industria · ${published}` : 'Ministerio de Industria',
+      cache?.cachedAt ? `cache ${formatCacheDate(cache.cachedAt)}` : '',
+    ].filter(Boolean).join(' · '),
   }
 }
 
@@ -266,8 +296,9 @@ export async function fetchSpanishFuelPois(
   bbox: BoundingBox,
   limit: number,
   signal?: AbortSignal,
-): Promise<{ pois: Poi[]; published: string; truncated: boolean }> {
-  const { stations, published } = await loadFuelDataset(signal)
+  options: FuelServiceOptions = {},
+): Promise<{ pois: Poi[]; published: string; truncated: boolean; cache?: CacheMetadata }> {
+  const { stations, published, cache } = await loadFuelDataset(signal, options)
 
   const inside = stations.filter(
     s => s.lat >= bbox.south && s.lat <= bbox.north && s.lon >= bbox.west && s.lon <= bbox.east,
@@ -287,9 +318,9 @@ export async function fetchSpanishFuelPois(
     lat: station.lat,
     lon: station.lon,
     name: [station.brand, station.town].filter(Boolean).join(' — ') || undefined,
-    detail: detailFor(station, published),
+    detail: detailFor(station, published, cache),
     prices: Object.fromEntries(station.prices.map(p => [p.label, p.price])),
   }))
 
-  return { pois, published, truncated }
+  return { pois, published, truncated, cache }
 }

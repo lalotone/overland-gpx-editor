@@ -17,6 +17,9 @@ func TestDefaultDirsUseXDG(t *testing.T) {
 	if got, want := DefaultTileCacheDir(), filepath.Join(cacheHome, "overland", "tiles"); got != want {
 		t.Errorf("DefaultTileCacheDir() = %q, want %q", got, want)
 	}
+	if got, want := DefaultOfflineCacheDir(), filepath.Join(cacheHome, "overland", "responses"); got != want {
+		t.Errorf("DefaultOfflineCacheDir() = %q, want %q", got, want)
+	}
 }
 
 func TestDefaultDirsFallBackToHome(t *testing.T) {
@@ -30,6 +33,9 @@ func TestDefaultDirsFallBackToHome(t *testing.T) {
 	}
 	if got, want := DefaultTileCacheDir(), filepath.Join(home, ".cache", "overland", "tiles"); got != want {
 		t.Errorf("DefaultTileCacheDir() = %q, want %q", got, want)
+	}
+	if got, want := DefaultOfflineCacheDir(), filepath.Join(home, ".cache", "overland", "responses"); got != want {
+		t.Errorf("DefaultOfflineCacheDir() = %q, want %q", got, want)
 	}
 }
 
@@ -58,6 +64,15 @@ func TestNonEmptyEnv(t *testing.T) {
 	source = NonEmptyEnv("OVERLAND_TEST_STRING")
 	if value, ok := source.Lookup(); !ok || value != "value" {
 		t.Fatalf("environment lookup = %q, %v; want value, true", value, ok)
+	}
+}
+
+func TestStringEnvPreservesExplicitEmpty(t *testing.T) {
+	t.Setenv("OVERLAND_TEST_STRING", "")
+	source := StringEnv("OVERLAND_TEST_STRING")
+	value, ok := source.Lookup()
+	if !ok || value != "" {
+		t.Fatalf("empty lookup = %q, %v; want empty, true", value, ok)
 	}
 }
 

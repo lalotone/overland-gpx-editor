@@ -9,6 +9,7 @@
     "clean": "node -e \"require('fs').rmSync('web/dist/assets',{recursive:true,force:true})\"",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
+    "test:e2e": "playwright test",
     "verify": "esbuild scripts/verify.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/verify.mjs && node node_modules/.cache/verify.mjs"
   },
   "dependencies": {
@@ -20,6 +21,7 @@
     "react-leaflet": "^4.2.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/leaflet": "^1.9.8",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",

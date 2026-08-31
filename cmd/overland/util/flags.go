@@ -27,6 +27,13 @@ func NonEmptyEnv(key string) cli.ValueSourceChain {
 	})
 }
 
+// StringEnv preserves an explicitly empty environment value. It is used for
+// opt-out settings where empty has meaning rather than falling back to a
+// default, notably OFFLINE_CACHE_DIR.
+func StringEnv(key string) cli.ValueSourceChain {
+	return envSource(key, func(value string) (string, bool) { return value, true })
+}
+
 func BoolEnv(key string) cli.ValueSourceChain {
 	return envSource(key, func(value string) (string, bool) {
 		switch strings.ToLower(strings.TrimSpace(value)) {
@@ -93,4 +100,15 @@ func DefaultTileCacheDir() string {
 		return "tiles"
 	}
 	return filepath.Join(home, ".cache", "overland", "tiles")
+}
+
+func DefaultOfflineCacheDir() string {
+	if base := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(base) {
+		return filepath.Join(base, "overland", "responses")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "responses"
+	}
+	return filepath.Join(home, ".cache", "overland", "responses")
 }

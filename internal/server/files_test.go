@@ -43,6 +43,7 @@ func cleanupTestServer(t *testing.T, s *Server) {
 func do(t *testing.T, s *Server, method, target string, body io.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, body)
+	req.RemoteAddr = "127.0.0.1:1"
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	return rec

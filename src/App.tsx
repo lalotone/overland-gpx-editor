@@ -6,6 +6,7 @@ import { ColoredTrack } from './components/ColoredTrack'
 import { ElevationProfile } from './components/ElevationProfile'
 import type { ProfileBar, TrimSelection } from './components/ElevationProfile'
 import { MapTiles, TerrainControls } from './components/MapLayers'
+import { OfflineStoragePanel } from './components/OfflineStoragePanel'
 import { SplashScreen } from './components/SplashScreen'
 import { TrackCard } from './components/TrackCard'
 import type { TrackPreview } from './components/TrackCard'
@@ -50,9 +51,23 @@ import type { RoutingProfile } from './lib/routing'
 import { availableFuels, DEFAULT_FUEL_REFERENCE, fuelBandColors, FUEL_PRICE_BANDS } from './lib/fuel'
 import { fetchRouteSurface, summarizeSurface, surfaceDefinition } from './lib/surface'
 import type { SurfaceClass } from './lib/surface'
-import { altitudeColor, getSegmentColor, getThumbnailLayer } from './lib/terrain'
+import { clearedRouteDerivedState, routeSequenceIsCurrent } from './lib/planner'
+import {
+  altitudeColor,
+  getSegmentColor,
+  getThumbnailLayer,
+  runtimeHillshadeLayer,
+  runtimeTerrainLayers,
+} from './lib/terrain'
 import type { ColorMode } from './lib/terrain'
 import type { Coordinate, GpxWaypoint, Track } from './lib/types'
+import {
+  decodeRuntimeConfig,
+  formatCacheContext,
+  formatCacheDate,
+  loadRuntimeConfig,
+} from './lib/offline'
+import type { CacheMetadata } from './lib/offline'
 
 import './App.css'
 
@@ -64,9 +79,8 @@ import './App.css'
 // together. In `npm run dev` the Vite proxy forwards those paths to the
 // backend on :8000. Set VITE_API_BASE to point at a backend somewhere else.
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
-// Optional direct-to-DEM address, used only if the backend proxy fails. Empty
-// by default: the backend serves this page, so if it cannot be reached there
-// is nothing left to fall back from.
+// Optional direct-to-DEM address for standalone frontend deployments. Once a
+// runtime backend is advertised it remains authoritative, including failures.
 const ELEVATION_API = import.meta.env.VITE_ELEVATION_API ?? ''
 const ELEVATION_DATASET = import.meta.env.VITE_ELEVATION_DATASET ?? 'srtm30m'
 
@@ -95,6 +109,24 @@ interface Waypoint {
   lat: number
   lon: number
   elevation?: number
+}
+
+function CacheContext({
+  metadata,
+  compact = false,
+}: {
+  metadata?: CacheMetadata
+  compact?: boolean
+}) {
+  if (!metadata) return null
+  return (
+    <span
+      className={`cache-context${metadata.stale ? ' cache-context--stale' : ''}`}
+      title={formatCacheContext(metadata)}
+    >
+      {formatCacheContext(metadata, compact)}
+    </span>
+  )
 }
 
 /** Points kept for a card thumbnail — plenty of shape, negligible cost. */
@@ -412,8 +444,15 @@ function App() {
   const [selectedTrackIndex, setSelectedTrackIndex] = useState(0)
   const [editHistory, setEditHistory] = useState<Track[][]>([])
   const [dirty, setDirty] = useState(false)
+  const [offlineRoute, setOfflineRoute] = useState<{
+    key: number
+    name: string
+    coordinates: Coordinate[]
+  } | null>(null)
 
   /* -- Terrain / map presentation ----------------------------------- */
+
+  const [runtime, setRuntime] = useState(() => decodeRuntimeConfig(null, API_BASE))
 
   const [baseLayer, setBaseLayer] = useState(() => {
     const stored = localStorage.getItem('gpx-base-layer')
@@ -426,14 +465,25 @@ function App() {
   const [colorMode, setColorMode] = useState<ColorMode>(
     () => (localStorage.getItem('gpx-color-mode') as ColorMode) ?? 'slope',
   )
+  const [vectorFallbackReason, setVectorFallbackReason] = useState<'webgl' | 'style' | null>(null)
 
+  const terrainLayers = useMemo(() => runtimeTerrainLayers(runtime), [runtime])
+  const hillshadeLayer = useMemo(() => runtimeHillshadeLayer(runtime), [runtime])
   /** Vector maps use an image-tile fallback so each card stays lightweight. */
-  const thumbnailLayer = useMemo(() => getThumbnailLayer(baseLayer), [baseLayer])
+  const thumbnailLayer = useMemo(
+    () => getThumbnailLayer(baseLayer, terrainLayers),
+    [baseLayer, terrainLayers],
+  )
 
   useEffect(() => { localStorage.setItem('gpx-base-layer', baseLayer) }, [baseLayer])
   useEffect(() => { localStorage.setItem('gpx-hillshade', hillshade ? 'on' : 'off') }, [hillshade])
   useEffect(() => { localStorage.setItem('gpx-hillshade-opacity', String(hillshadeOpacity)) }, [hillshadeOpacity])
   useEffect(() => { localStorage.setItem('gpx-color-mode', colorMode) }, [colorMode])
+  useEffect(() => {
+    if (terrainLayers.length > 0 && !terrainLayers.some(layer => layer.id === baseLayer)) {
+      setBaseLayer(terrainLayers[0].id)
+    }
+  }, [baseLayer, terrainLayers])
 
   /**
    * Surface colouring only exists where a route has been traced, which is the
@@ -479,6 +529,7 @@ function App() {
   /* -- POIs --------------------------------------------------------- */
 
   const [activePois, setActivePois] = useState<Record<PoiKind, Poi[]>>({ fuel: [], water: [], camp: [] })
+  const [activePoiCache, setActivePoiCache] = useState<Partial<Record<PoiKind, CacheMetadata>>>({})
   const [poiLoading, setPoiLoading] = useState<PoiKind | null>(null)
 
   /* -- Creation ----------------------------------------------------- */
@@ -487,6 +538,7 @@ function App() {
   const [routedCoordinates, setRoutedCoordinates] = useState<Coordinate[]>([])
   const [routedDuration, setRoutedDuration] = useState<number | null>(null)
   const [routedEngine, setRoutedEngine] = useState<string | null>(null)
+  const [routeCache, setRouteCache] = useState<CacheMetadata | undefined>()
   const [routedLoading, setRoutedLoading] = useState(false)
   const [routeStatus, setRouteStatus] = useState('')
   const [elevationApiError, setElevationApiError] = useState(false)
@@ -498,6 +550,7 @@ function App() {
    * and switching screens should not carry one set into the other.
    */
   const [creationPois, setCreationPois] = useState<Record<PoiKind, Poi[]>>({ fuel: [], water: [], camp: [] })
+  const [creationPoiCache, setCreationPoiCache] = useState<Partial<Record<PoiKind, CacheMetadata>>>({})
   const [creationPoiLoading, setCreationPoiLoading] = useState<PoiKind | null>(null)
   /** Full-map mode: sidebar and header hidden, map overlays kept. */
   const [mapOnly, setMapOnly] = useState(false)
@@ -505,19 +558,40 @@ function App() {
   const [fuelReference, setFuelReference] = useState(DEFAULT_FUEL_REFERENCE)
   const [surfaceSegments, setSurfaceSegments] = useState<SurfaceClass[] | null>(null)
   const [surfaceApproximate, setSurfaceApproximate] = useState(false)
+  const [surfaceCache, setSurfaceCache] = useState<CacheMetadata | undefined>()
   const [surfaceLoading, setSurfaceLoading] = useState(false)
   const [surfaceError, setSurfaceError] = useState<string | null>(null)
   const [placeSearch, setPlaceSearch] = useState('')
   const [placeResults, setPlaceResults] = useState<PlaceResult[]>([])
+  const [placeCache, setPlaceCache] = useState<CacheMetadata | undefined>()
   const [placeSearching, setPlaceSearching] = useState(false)
   const [nominatimApi, setNominatimApi] = useState(DEFAULT_NOMINATIM_API)
 
   const mapRef = useRef<L.Map | null>(null)
   const notifIdRef = useRef(0)
   const vectorFallbackNotifiedRef = useRef(false)
+  const staleNotifiedRef = useRef(false)
   const routeSeqRef = useRef(0)
   const placeSearchSeqRef = useRef(0)
   const placeSearchAbortRef = useRef<AbortController | null>(null)
+  const offlineRouteKeyRef = useRef(0)
+
+  const clearRouteDerived = useCallback(() => {
+    const cleared = clearedRouteDerivedState()
+    setRoutedCoordinates(cleared.coordinates)
+    setRoutedDuration(cleared.durationSeconds)
+    setRoutedEngine(cleared.engine)
+    setRouteCache(cleared.routeCache)
+    setSurfaceSegments(cleared.surfaceSegments)
+    setSurfaceApproximate(cleared.surfaceApproximate)
+    setSurfaceCache(cleared.surfaceCache)
+    setSurfaceError(cleared.surfaceError)
+    setSurfaceLoading(cleared.surfaceLoading)
+    setElevationInterpolated(cleared.elevationInterpolated)
+    setElevationApiError(cleared.elevationApiError)
+    setRouteStatus(cleared.routeStatus)
+    setRoutedLoading(cleared.routedLoading)
+  }, [])
 
   /* -- Notifications ------------------------------------------------ */
 
@@ -533,22 +607,31 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    fetch(`${API_BASE}/config`, { signal: controller.signal })
-      .then(res => res.ok ? res.json() : null)
-      .then((config: { nominatimUrl?: unknown } | null) => {
-        if (typeof config?.nominatimUrl === 'string' && config.nominatimUrl) {
-          setNominatimApi(config.nominatimUrl)
-        }
+    void loadRuntimeConfig(API_BASE, controller.signal)
+      .then(config => {
+        setRuntime(config)
+        if (config.nominatimUrl) setNominatimApi(config.nominatimUrl)
       })
       .catch(() => {})
     return () => controller.abort()
   }, [])
 
-  const notifyVectorFallback = useCallback(() => {
+  const handleCacheMetadata = useCallback((metadata: CacheMetadata) => {
+    if (!metadata.stale || staleNotifiedRef.current) return
+    staleNotifiedRef.current = true
+    const cachedAt = formatCacheDate(metadata.cachedAt)
+    notify(`Using stale cached data${cachedAt ? ` from ${cachedAt}` : ''}`, 'info')
+  }, [notify])
+
+  const handleVectorStatus = useCallback((reason: 'webgl' | 'style' | null) => {
+    setVectorFallbackReason(reason)
+    if (!reason) return
     if (vectorFallbackNotifiedRef.current) return
     vectorFallbackNotifiedRef.current = true
     notify(
-      'WebGL2 is unavailable, so the map is using OSM raster tiles. Enable WebGL2 or use a WebGL2-capable browser for OpenFreeMap vectors.',
+      reason === 'webgl'
+        ? 'WebGL2 is unavailable, so the map is using OSM raster tiles.'
+        : 'The vector map style is unavailable, so editing continues with OSM raster tiles.',
       'info',
     )
   }, [notify])
@@ -615,8 +698,23 @@ function App() {
 
   /* -- Loading tracks ----------------------------------------------- */
 
+  const activateOfflineRoute = useCallback((track: Track | undefined) => {
+    if (!track) {
+      setOfflineRoute(null)
+      return
+    }
+    setOfflineRoute({
+      key: ++offlineRouteKeyRef.current,
+      name: fromGpxFilename(track.filename) || track.name,
+      // This snapshot deliberately does not follow edits. Caching is tied to
+      // opening/selecting a track, not every immutable edit-state replacement.
+      coordinates: track.coordinates,
+    })
+  }, [])
+
   const openTracks = useCallback((parsed: Track[], filename: string) => {
-    setTracks(parsed.map(t => ({ ...t, filename })))
+    const loaded = parsed.map(t => ({ ...t, filename }))
+    setTracks(loaded)
     setSelectedTrackIndex(0)
     setEditHistory([])
     setDirty(false)
@@ -624,8 +722,15 @@ function App() {
     setSelectionAnchor(null)
     setSelectionMode(false)
     setActivePois({ fuel: [], water: [], camp: [] })
+    setActivePoiCache({})
+    activateOfflineRoute(loaded[0])
     setViewMode('view')
-  }, [])
+  }, [activateOfflineRoute])
+
+  const selectTrack = useCallback((index: number) => {
+    setSelectedTrackIndex(index)
+    activateOfflineRoute(tracks[index])
+  }, [activateOfflineRoute, tracks])
 
   const processGPXFile = useCallback(
     async (gpxFile: File) => {
@@ -843,6 +948,7 @@ function App() {
     async (kind: PoiKind) => {
       if (activePois[kind].length > 0) {
         setActivePois(prev => ({ ...prev, [kind]: [] }))
+        setActivePoiCache(prev => ({ ...prev, [kind]: undefined }))
         return
       }
       if (!currentTrack) return
@@ -851,8 +957,12 @@ function App() {
 
       setPoiLoading(kind)
       try {
-        const { pois, source } = await fetchPoisForArea(kind, bbox)
+        const { pois, source, cache } = await fetchPoisForArea(kind, bbox, undefined, {
+          runtime,
+          onCacheMetadata: handleCacheMetadata,
+        })
         setActivePois(prev => ({ ...prev, [kind]: pois }))
+        setActivePoiCache(prev => ({ ...prev, [kind]: cache }))
         if (pois.length === 0) notify(`No ${kind} points found near this route`, 'info')
         else if (source) notify(`${pois.length} fuel stations with ${source}`, 'info')
       } catch (err) {
@@ -861,7 +971,7 @@ function App() {
         setPoiLoading(null)
       }
     },
-    [activePois, currentTrack, notify],
+    [activePois, currentTrack, handleCacheMetadata, notify, runtime],
   )
 
   /* -- Creation: full-map mode --------------------------------------- */
@@ -921,9 +1031,14 @@ function App() {
       // Overpass is a shared free service.
       for (const kind of kinds) {
         setCreationPoiLoading(kind)
+        setCreationPoiCache(prev => ({ ...prev, [kind]: undefined }))
         try {
-          const { pois, source, truncated } = await fetchPoisForArea(kind, bbox)
+          const { pois, source, truncated, cache } = await fetchPoisForArea(kind, bbox, undefined, {
+            runtime,
+            onCacheMetadata: handleCacheMetadata,
+          })
           setCreationPois(prev => ({ ...prev, [kind]: pois }))
+          setCreationPoiCache(prev => ({ ...prev, [kind]: cache }))
           const label = POI_KINDS.find(k => k.id === kind)?.label.toLowerCase() ?? kind
           if (pois.length === 0) {
             notify(`No ${label} points in this view`, 'info')
@@ -939,13 +1054,14 @@ function App() {
         }
       }
     },
-    [viewportBounds, notify],
+    [handleCacheMetadata, notify, runtime, viewportBounds],
   )
 
   const toggleCreationPoiLayer = useCallback(
     (kind: PoiKind) => {
       if (creationPois[kind].length > 0) {
         setCreationPois(prev => ({ ...prev, [kind]: [] }))
+        setCreationPoiCache(prev => ({ ...prev, [kind]: undefined }))
         return
       }
       void loadCreationPois([kind])
@@ -996,6 +1112,7 @@ function App() {
   const clearTrack = useCallback(() => {
     if (dirty && !confirm('This track has unsaved edits. Clear it anyway?')) return
     setTracks([])
+    setOfflineRoute(null)
     setSelectedTrackIndex(0)
     setEditHistory([])
     setDirty(false)
@@ -1105,6 +1222,8 @@ function App() {
         ELEVATION_API,
         {
           dataset: ELEVATION_DATASET,
+          runtime,
+          onCacheMetadata: handleCacheMetadata,
           onProgress: (done, total) =>
             setLoadingMessage(`Reading elevation… ${done}/${total} points`),
         },
@@ -1120,7 +1239,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [currentTrack, applyEdit, notify])
+  }, [currentTrack, applyEdit, handleCacheMetadata, notify, runtime])
 
   /* -- Downloads and saving ----------------------------------------- */
 
@@ -1186,6 +1305,8 @@ function App() {
         API_BASE,
         ELEVATION_API,
         ELEVATION_DATASET,
+        undefined,
+        { runtime, onCacheMetadata: handleCacheMetadata },
       )
       if (elevation === null) { setElevationApiError(true); return }
       setElevationApiError(false)
@@ -1195,7 +1316,7 @@ function App() {
     } catch {
       setElevationApiError(true)
     }
-  }, [])
+  }, [handleCacheMetadata, runtime])
 
   /*
    * Elevation tiles for the area on screen.
@@ -1324,6 +1445,7 @@ function App() {
     placeSearchAbortRef.current?.abort()
     if (!query.trim()) {
       setPlaceResults([])
+      setPlaceCache(undefined)
       setPlaceSearching(false)
       placeSearchAbortRef.current = null
       return
@@ -1332,12 +1454,20 @@ function App() {
     const controller = new AbortController()
     placeSearchAbortRef.current = controller
     setPlaceSearching(true)
+    setPlaceCache(undefined)
     try {
-      const results = await searchPlaces(query, controller.signal, nominatimApi)
+      const results = await searchPlaces(query, controller.signal, nominatimApi, {
+        runtime,
+        onCacheMetadata: metadata => {
+          handleCacheMetadata(metadata)
+          if (seq === placeSearchSeqRef.current) setPlaceCache(metadata)
+        },
+      })
       if (seq === placeSearchSeqRef.current) setPlaceResults(results)
     } catch (err) {
       if ((err as Error).name !== 'AbortError' && seq === placeSearchSeqRef.current) {
         setPlaceResults([])
+        setPlaceCache(undefined)
         notify((err as Error).message || 'Place search unavailable', 'error')
       }
     } finally {
@@ -1346,11 +1476,12 @@ function App() {
         placeSearchAbortRef.current = null
       }
     }
-  }, [nominatimApi, notify])
+  }, [handleCacheMetadata, nominatimApi, notify, runtime])
 
   const flyToPlace = useCallback((lat: string, lon: string) => {
     mapRef.current?.flyTo([parseFloat(lat), parseFloat(lon)], 13, { duration: FLY_TO_DURATION })
     setPlaceResults([])
+    setPlaceCache(undefined)
     setPlaceSearch('')
   }, [])
 
@@ -1361,54 +1492,64 @@ function App() {
 
     if (creationWaypoints.length < 2) {
       routeSeqRef.current++
-      setRoutedCoordinates([])
-      setRoutedDuration(null)
-      setRoutedEngine(null)
-      setElevationInterpolated(false)
-      setRoutedLoading(false)
-      setSurfaceSegments(null)
-      setSurfaceError(null)
-      setSurfaceLoading(false)
+      clearRouteDerived()
       return
     }
 
     const controller = new AbortController()
     const seq = ++routeSeqRef.current
+    clearRouteDerived()
     // Only the newest request may write state; a slow earlier response
     // must never overwrite a newer route.
-    const isCurrent = () => seq === routeSeqRef.current && !controller.signal.aborted
+    const isCurrent = () => routeSequenceIsCurrent(
+      seq,
+      routeSeqRef.current,
+      controller.signal.aborted,
+    )
 
     const timer = setTimeout(async () => {
       setRoutedLoading(true)
       setRouteStatus('Calculating route…')
+      let routingComplete = false
       try {
         const result = await calculateRoute(
           creationWaypoints.map(w => ({ lat: w.lat, lon: w.lon })),
           routingProfile,
           controller.signal,
+          { runtime, onCacheMetadata: handleCacheMetadata },
         )
         if (!isCurrent()) return
+        routingComplete = true
 
         setRoutedCoordinates(result.coordinates)
         setRoutedDuration(result.durationSeconds)
         setRoutedEngine(result.engine)
+        setRouteCache(result.cache)
         if (result.warning) notify(result.warning, 'info')
 
         // Surface is an overlay on top of a route that already works, so it
         // runs alongside elevation instead of in front of it: a slow or
         // missing trace service must never hold up the numbers that matter.
         setSurfaceSegments(null)
+        setSurfaceCache(undefined)
         setSurfaceError(null)
         setSurfaceLoading(true)
-        void fetchRouteSurface(result.coordinates, routingProfile, controller.signal)
+        void fetchRouteSurface(
+          result.coordinates,
+          routingProfile,
+          controller.signal,
+          { runtime, onCacheMetadata: handleCacheMetadata },
+        )
           .then(surface => {
             if (!isCurrent()) return
             setSurfaceSegments(surface.segments)
             setSurfaceApproximate(surface.approximate)
+            setSurfaceCache(surface.cache)
           })
           .catch(err => {
             if ((err as Error).name === 'AbortError' || !isCurrent()) return
             setSurfaceSegments(null)
+            setSurfaceCache(undefined)
             setSurfaceError((err as Error).message || 'Surface data unavailable')
           })
           .finally(() => { if (isCurrent()) setSurfaceLoading(false) })
@@ -1421,6 +1562,8 @@ function App() {
           {
             signal: controller.signal,
             dataset: ELEVATION_DATASET,
+            runtime,
+            onCacheMetadata: handleCacheMetadata,
             onProgress: (done, total) => {
               if (isCurrent()) setRouteStatus(`Reading elevation… ${done}/${total}`)
             },
@@ -1433,10 +1576,16 @@ function App() {
         setElevationApiError(false)
       } catch (err) {
         if ((err as Error).name === 'AbortError' || !isCurrent()) return
-        if (err instanceof ElevationUnavailableError) {
+        if (!routingComplete) {
+          clearRouteDerived()
+          notify((err as Error).message || 'Could not calculate route', 'error')
+        } else if (err instanceof ElevationUnavailableError) {
+          setElevationInterpolated(false)
           setElevationApiError(true)
         } else {
-          notify((err as Error).message || 'Could not calculate route', 'error')
+          setElevationInterpolated(false)
+          setElevationApiError(true)
+          notify((err as Error).message || 'Could not read route elevation', 'error')
         }
       } finally {
         if (isCurrent()) { setRoutedLoading(false); setRouteStatus('') }
@@ -1444,7 +1593,7 @@ function App() {
     }, ROUTE_DEBOUNCE_MS)
 
     return () => { clearTimeout(timer); controller.abort() }
-  }, [creationWaypoints, routingProfile, viewMode, notify])
+  }, [clearRouteDerived, creationWaypoints, handleCacheMetadata, routingProfile, runtime, viewMode, notify])
 
   const creationCoordinates = useMemo<Coordinate[]>(
     () =>
@@ -1558,33 +1707,24 @@ function App() {
     setCreationWaypoints([])
     setCreationPins([])
     setWaypointMode(false)
-    setRoutedCoordinates([])
-    setRoutedDuration(null)
-    setRoutedEngine(null)
-    setElevationInterpolated(false)
-    setSurfaceSegments(null)
-    setSurfaceError(null)
+    clearRouteDerived()
     setSaveFileName('')
-  }, [])
+  }, [clearRouteDerived])
 
   const resetCreation = useCallback(() => {
     routeSeqRef.current++
     setCreationWaypoints([])
     setCreationPins([])
     setWaypointMode(false)
-    setRoutedCoordinates([])
-    setRoutedDuration(null)
-    setRoutedEngine(null)
-    setElevationApiError(false)
-    setElevationInterpolated(false)
-    setSurfaceSegments(null)
-    setSurfaceError(null)
+    clearRouteDerived()
     setCreationPois({ fuel: [], water: [], camp: [] })
+    setCreationPoiCache({})
+    setPlaceCache(undefined)
     // Otherwise the next track starts with the panels hidden and no hint why.
     setMapOnly(false)
     loadSavedFiles()
     setViewMode('welcome')
-  }, [loadSavedFiles])
+  }, [clearRouteDerived, loadSavedFiles])
 
   /* -- Ground elevation under the cursor ---------------------------- */
 
@@ -1600,6 +1740,7 @@ function App() {
           ELEVATION_API,
           ELEVATION_DATASET,
           controller.signal,
+          { runtime, onCacheMetadata: handleCacheMetadata },
         )
         setCursorElevation(value)
       } catch {
@@ -1607,7 +1748,7 @@ function App() {
       }
     }, 220)
     return () => { clearTimeout(timer); controller.abort() }
-  }, [cursorPos])
+  }, [cursorPos, handleCacheMetadata, runtime])
 
   /* -- Render ------------------------------------------------------- */
 
@@ -1623,6 +1764,9 @@ function App() {
       colorMode={mode}
       onColorMode={setColorMode}
       surfaceAvailable={surfaceAvailable}
+      layers={terrainLayers}
+      hillshadeAvailable={Boolean(hillshadeLayer)}
+      vectorFallbackReason={vectorFallbackReason}
     />
   )
 
@@ -1801,6 +1945,11 @@ function App() {
                 </div>
                 {placeResults.length > 0 && (
                   <ul className="place-results">
+                    {placeCache && (
+                      <li className="place-cache-context">
+                        <CacheContext metadata={placeCache} />
+                      </li>
+                    )}
                     {placeResults.map(r => (
                       <li key={r.place_id} onClick={() => flyToPlace(r.lat, r.lon)} title={r.display_name}>
                         {r.display_name}
@@ -1850,6 +1999,12 @@ function App() {
                       <span className="route-stat-value route-stat-muted">{routedEngine}</span>
                     </div>
                   )}
+                  {routeCache && (
+                    <div className="route-stat-row">
+                      <span className="route-stat-label">Route data</span>
+                      <CacheContext metadata={routeCache} />
+                    </div>
+                  )}
                   {creationHasElevation && creationSparkPath && (
                     <div className="route-elev-sparkline">
                       <div className="sparkline-labels">
@@ -1896,6 +2051,7 @@ function App() {
 
               {surfaceReady && surfaceSummary ? (
                 <div className="surface-panel">
+                  {surfaceCache && <CacheContext metadata={surfaceCache} />}
                   <div className="surface-headline">
                     <span>
                       <strong>{(surfaceSummary.unpavedFraction * 100).toFixed(0)}%</strong> unpaved
@@ -2104,7 +2260,9 @@ function App() {
                   baseLayerId={baseLayer}
                   hillshade={hillshade}
                   hillshadeOpacity={hillshadeOpacity}
-                  onVectorFallback={notifyVectorFallback}
+                  onVectorFallback={handleVectorStatus}
+                  layers={terrainLayers}
+                  hillshadeLayer={hillshadeLayer}
                 />
                 <ViewportReporter onSettle={handleViewportSettle} />
                 {creationWaypoints.map(w => (
@@ -2190,6 +2348,7 @@ function App() {
                     {creationPois[kind.id].length > 0 && (
                       <span className="creation-poi-count">{creationPois[kind.id].length}</span>
                     )}
+                    <CacheContext metadata={creationPoiCache[kind.id]} compact />
                   </button>
                 ))}
                 {activeCreationPoiKinds.length > 0 && (
@@ -2231,7 +2390,9 @@ function App() {
                 onReference={setFuelReference}
               />
 
-              {renderTerrainControls(colorMode, surfaceReady)}
+              <div className="map-control-stack" data-testid="map-control-stack">
+                {renderTerrainControls(colorMode, surfaceReady)}
+              </div>
               {cursorReadout}
 
               {creationWaypoints.length === 0 && (
@@ -2281,7 +2442,7 @@ function App() {
                   <select
                     className="track-select"
                     value={selectedTrackIndex}
-                    onChange={e => setSelectedTrackIndex(parseInt(e.target.value))}
+                    onChange={e => selectTrack(parseInt(e.target.value))}
                     title="Select track"
                   >
                     {tracks.map((track, index) => (
@@ -2406,9 +2567,12 @@ function App() {
                   className={`btn btn-ghost btn-xs${activePois[kind.id].length > 0 ? ' active' : ''}`}
                   onClick={() => togglePoiLayer(kind.id)}
                   disabled={poiLoading !== null}
-                  title={kind.title}
+                  title={activePoiCache[kind.id]
+                    ? `${kind.title} · ${formatCacheContext(activePoiCache[kind.id]!)}`
+                    : kind.title}
                 >
                   {poiLoading === kind.id ? '…' : `${kind.glyph} ${kind.label}`}
+                  <CacheContext metadata={activePoiCache[kind.id]} compact />
                 </button>
               ))}
 
@@ -2566,7 +2730,9 @@ function App() {
                 baseLayerId={baseLayer}
                 hillshade={hillshade}
                 hillshadeOpacity={hillshadeOpacity}
-                onVectorFallback={notifyVectorFallback}
+                onVectorFallback={handleVectorStatus}
+                layers={terrainLayers}
+                hillshadeLayer={hillshadeLayer}
               />
               <MapClickHandler onClick={handleViewMapClick} />
 
@@ -2641,7 +2807,17 @@ function App() {
               onReference={setFuelReference}
             />
 
-            {renderTerrainControls(viewColorMode, false)}
+            <div className="map-control-stack" data-testid="map-control-stack">
+              {renderTerrainControls(viewColorMode, false)}
+              {offlineRoute && (
+                <OfflineStoragePanel
+                  runtime={runtime}
+                  routeKey={offlineRoute.key}
+                  routeName={offlineRoute.name}
+                  route={offlineRoute.coordinates}
+                />
+              )}
+            </div>
             {cursorReadout}
 
             {isZoomedToBar && (

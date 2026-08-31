@@ -8,6 +8,13 @@
 
 import { fetchSpanishFuelPois, intersectsSpain } from './fuel'
 import type { Coordinate } from './types'
+import {
+  fetchRuntimeService,
+  formatCacheDate,
+  OfflineCacheMissError,
+  responseError,
+} from './offline'
+import type { CacheMetadata, RuntimeRequestContext } from './offline'
 
 const OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter'
 
@@ -93,6 +100,7 @@ export interface PoiSearchResult {
   source?: string
   /** True when more were found than the limit allows. */
   truncated?: boolean
+  cache?: CacheMetadata
 }
 
 /**
@@ -107,17 +115,27 @@ export async function fetchPoisForArea(
   kind: PoiKind,
   bbox: BoundingBox,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<PoiSearchResult> {
   if (kind === 'fuel' && intersectsSpain(bbox)) {
     try {
-      const { pois, published, truncated } = await fetchSpanishFuelPois(bbox, RESULT_LIMIT, signal)
+      const { pois, published, truncated, cache } = await fetchSpanishFuelPois(
+        bbox,
+        RESULT_LIMIT,
+        signal,
+        context,
+      )
       // Outside Spain but inside the envelope — say, Perpignan — the official
       // list is simply empty, which is not an answer. Fall through to OSM.
       if (pois.length > 0) {
         return {
           pois,
-          source: published ? `official prices, ${published}` : 'official prices',
+          source: [published ? `official prices, ${published}` : 'official prices',
+            cache?.cachedAt ? `cached ${formatCacheDate(cache.cachedAt)}` : '']
+            .filter(Boolean)
+            .join(' · '),
           truncated,
+          cache,
         }
       }
     } catch (err) {
@@ -126,7 +144,8 @@ export async function fetchPoisForArea(
     }
   }
 
-  return { pois: await fetchPois(kind, bbox, signal) }
+  const { pois, cache } = await fetchPoisWithMetadata(kind, bbox, signal, context)
+  return { pois, cache }
 }
 
 /** Approximate width and height of a bounding box, in kilometres. */
@@ -158,22 +177,46 @@ export async function fetchPois(
   kind: PoiKind,
   bbox: BoundingBox,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<Poi[]> {
+  return (await fetchPoisWithMetadata(kind, bbox, signal, context)).pois
+}
+
+async function fetchPoisWithMetadata(
+  kind: PoiKind,
+  bbox: BoundingBox,
+  signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
+): Promise<{ pois: Poi[]; cache?: CacheMetadata }> {
   const area = `${bbox.south.toFixed(5)},${bbox.west.toFixed(5)},${bbox.north.toFixed(5)},${bbox.east.toFixed(5)}`
   const query = `[out:json][timeout:30];${SELECTORS[kind]}(${area});out center 400;`
 
-  const res = await fetch(OVERPASS_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `data=${encodeURIComponent(query)}`,
+  const backendEndpoint = context.runtime?.services.pois
+  const { response: res, cache } = await fetchRuntimeService({
+    ...context,
+    service: 'pois',
+    directUrl: OVERPASS_ENDPOINT,
+    backendInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, bbox }),
+    },
+    directInit: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `data=${encodeURIComponent(query)}`,
+    },
     signal,
+    fetcher: backendEndpoint ? fetch : undefined,
   })
   // Overpass is a free shared service and sheds load often enough that it is
   // worth naming: 429/504 mean "come back later", not "your query is wrong".
   if (res.status === 429 || res.status === 504) {
+    const error = await responseError(res, `Overpass returned ${res.status}`)
+    if (error instanceof OfflineCacheMissError) throw error
     throw new Error('Overpass is busy right now — try again in a moment')
   }
-  if (!res.ok) throw new Error(`Overpass returned ${res.status}`)
+  if (!res.ok) throw await responseError(res, `Overpass returned ${res.status}`)
 
   // An overloaded Overpass answers HTTP 200 with an HTML error page, so
   // parsing has to be guarded — otherwise the user sees a JSON syntax error.
@@ -203,5 +246,5 @@ export async function fetchPois(
       name: el.tags?.name ?? el.tags?.brand ?? el.tags?.operator,
     })
   }
-  return pois
+  return { pois, cache }
 }

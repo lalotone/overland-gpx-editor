@@ -15,6 +15,8 @@
  */
 
 import type { Coordinate } from './types'
+import { emitCacheMetadata, resolveApiUrl, responseError } from './offline'
+import type { RuntimeRequestContext } from './offline'
 
 const CHUNK_SIZE = 100
 const CONCURRENCY = 5
@@ -22,7 +24,7 @@ const CONCURRENCY = 5
 /** Above this many points we thin the request set and interpolate the rest. */
 export const MAX_ELEVATION_LOOKUPS = 6000
 
-export interface ElevationOptions {
+export interface ElevationOptions extends RuntimeRequestContext {
   signal?: AbortSignal
   onProgress?: (done: number, total: number) => void
   dataset?: string
@@ -39,6 +41,25 @@ export class ElevationUnavailableError extends Error {
 
 const pointCache = new Map<string, number | null>()
 
+export function elevationPointCacheKey(
+  lat: number,
+  lon: number,
+  apiBase: string,
+  elevationApi: string,
+  dataset: string,
+  context: RuntimeRequestContext = {},
+): string {
+  const runtime = context.runtime
+  return JSON.stringify({
+    dataset,
+    location: `${lat.toFixed(4)},${lon.toFixed(4)}`,
+    backend: resolveApiUrl('/elevation/batch', apiBase),
+    runtimeApiBase: runtime?.apiBase ?? '',
+    direct: elevationApi.replace(/\/+$/, ''),
+    mode: runtime?.offline?.enabled ? runtime.offline.mode : 'standalone',
+  })
+}
+
 export async function fetchGroundElevation(
   lat: number,
   lon: number,
@@ -46,14 +67,15 @@ export async function fetchGroundElevation(
   elevationApi: string,
   dataset: string,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<number | null> {
   // ~11 m of precision, comfortably finer than any DEM we query.
-  const key = `${dataset}:${lat.toFixed(4)},${lon.toFixed(4)}`
+  const key = elevationPointCacheKey(lat, lon, apiBase, elevationApi, dataset, context)
   const cached = pointCache.get(key)
   if (cached !== undefined) return cached
 
   // A failed lookup is not cached — the service may just be briefly away.
-  const values = await fetchChunk([{ lat, lon }], apiBase, elevationApi, dataset, signal)
+  const values = await fetchChunk([{ lat, lon }], apiBase, elevationApi, dataset, signal, context)
   const value = values[0] ?? null
 
   if (pointCache.size > 4000) pointCache.clear()
@@ -90,20 +112,28 @@ async function fetchChunk(
   elevationApi: string,
   dataset: string,
   signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
 ): Promise<(number | null)[]> {
   const locations = encodeLocations(coords)
+  const fetcher = context.fetcher ?? fetch
+  const managedBackend = context.runtime?.offline?.enabled === true
 
   // Preferred path: backend proxy (reachable from anywhere the app is served).
   try {
-    const res = await fetch(`${apiBase}/elevation/batch`, {
+    const res = await fetcher(resolveApiUrl('/elevation/batch', apiBase), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ locations, dataset }),
       signal,
     })
+    emitCacheMetadata(res, context.onCacheMetadata)
     if (res.ok) return readResults(await res.json(), coords.length)
+    if (managedBackend) {
+      throw await responseError(res, `Elevation service returned ${res.status}`)
+    }
   } catch (err) {
     if ((err as Error)?.name === 'AbortError') throw err
+    if (managedBackend) throw err
   }
 
   // Fallback: talk to an opentopodata-style service directly. Only configured
@@ -111,7 +141,7 @@ async function fetchChunk(
   if (!elevationApi) {
     throw new ElevationUnavailableError('Elevation service unreachable')
   }
-  const res = await fetch(
+  const res = await fetcher(
     `${elevationApi}/v1/${dataset}?locations=${encodeURIComponent(locations)}`,
     { signal },
   )
@@ -164,7 +194,7 @@ export async function fetchElevationProfile(
 
   let done = 0
   const tasks = groups.map(group => async () => {
-    const values = await fetchChunk(group, apiBase, elevationApi, dataset, opts.signal)
+    const values = await fetchChunk(group, apiBase, elevationApi, dataset, opts.signal, opts)
     done += group.length
     opts.onProgress?.(done, samples.length)
     return values

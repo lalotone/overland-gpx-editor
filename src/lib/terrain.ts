@@ -7,6 +7,8 @@
  * satellite, where imagery alone flattens gullies and ridgelines out.
  */
 
+import type { RuntimeConfig } from './offline'
+
 interface BaseLayerCommon {
   id: string
   label: string
@@ -53,6 +55,16 @@ export const SERVICE_ATTRIBUTIONS = [
 const OSM_THUMBNAIL_LAYER: ThumbnailLayerDefinition = {
   url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
   attribution: OSM_ATTRIBUTION,
+  maxZoom: 19,
+}
+
+const EMPTY_TILE_LAYER: RasterBaseLayerDefinition = {
+  id: 'unavailable',
+  label: 'Offline',
+  title: 'No cached map layer is available',
+  kind: 'raster',
+  url: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
+  attribution: '',
   maxZoom: 19,
 }
 
@@ -124,13 +136,82 @@ export const HILLSHADE_LAYER = {
 }
 
 export function getBaseLayer(id: string): BaseLayerDefinition {
-  return BASE_LAYERS.find(l => l.id === id) ?? BASE_LAYERS[0]
+  return getBaseLayerFrom(BASE_LAYERS, id)
 }
 
 /** Library cards stay as image tiles instead of creating a WebGL map per card. */
-export function getThumbnailLayer(id: string): ThumbnailLayerDefinition {
-  const layer = getBaseLayer(id)
+export function getThumbnailLayer(
+  id: string,
+  layers: BaseLayerDefinition[] = BASE_LAYERS,
+): ThumbnailLayerDefinition {
+  const layer = getBaseLayerFrom(layers, id)
   return layer.kind === 'raster' ? layer : layer.fallback
+}
+
+export function getBaseLayerFrom(
+  layers: BaseLayerDefinition[],
+  id: string,
+): BaseLayerDefinition {
+  return layers.find(layer => layer.id === id) ?? layers[0] ?? EMPTY_TILE_LAYER
+}
+
+/** Runtime routes replace only adapters explicitly advertised by the backend. */
+export function runtimeTerrainLayers(runtime?: RuntimeConfig): BaseLayerDefinition[] {
+  const raster = runtime?.maps.raster
+  const osm = raster?.osm
+  if (runtime?.offline?.mode === 'cache-only') {
+    const layers: BaseLayerDefinition[] = []
+    const vector = BASE_LAYERS[0] as VectorBaseLayerDefinition
+    const styleUrl = runtime.maps.openfreemap?.style
+    if (styleUrl) {
+      layers.push({
+        ...vector,
+        styleUrl,
+        fallback: osm ? { ...vector.fallback, url: osm } : {
+          ...vector.fallback,
+          url: EMPTY_TILE_LAYER.url,
+          attribution: '',
+        },
+      })
+    } else if (osm) {
+      layers.push({
+        ...EMPTY_TILE_LAYER,
+        id: vector.id,
+        label: 'OSM',
+        title: 'Cached OpenStreetMap raster map',
+        url: osm,
+        attribution: vector.fallback.attribution,
+        maxZoom: vector.fallback.maxZoom,
+      })
+    }
+
+    const topo = BASE_LAYERS.find(layer => layer.id === 'topo')
+    if (topo?.kind === 'raster' && raster?.opentopo) {
+      layers.push({ ...topo, url: raster.opentopo })
+    }
+    const cyclosm = BASE_LAYERS.find(layer => layer.id === 'cyclosm')
+    if (cyclosm?.kind === 'raster' && raster?.cyclosm) {
+      layers.push({ ...cyclosm, url: raster.cyclosm })
+    }
+    return layers
+  }
+
+  return BASE_LAYERS.map(layer => {
+    if (layer.kind === 'vector') {
+      return {
+        ...layer,
+        styleUrl: runtime?.maps.openfreemap?.style ?? layer.styleUrl,
+        fallback: osm ? { ...layer.fallback, url: osm } : layer.fallback,
+      }
+    }
+    if (layer.id === 'topo' && raster?.opentopo) return { ...layer, url: raster.opentopo }
+    if (layer.id === 'cyclosm' && raster?.cyclosm) return { ...layer, url: raster.cyclosm }
+    return layer
+  })
+}
+
+export function runtimeHillshadeLayer(runtime?: RuntimeConfig): typeof HILLSHADE_LAYER | undefined {
+  return runtime?.offline?.mode === 'cache-only' ? undefined : HILLSHADE_LAYER
 }
 
 /* -- Gradient colouring ---------------------------------------------- */

@@ -3,11 +3,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -71,6 +73,11 @@ type Config struct {
 	OpenFreeMapAllowBulk bool
 	// HTTPClient is an injection seam for tests and controlled embeddings.
 	HTTPClient *http.Client
+	// StatsLogInterval controls privacy-safe aggregate operational logging.
+	// Zero disables it; the CLI enables it once per minute by default.
+	StatsLogInterval time.Duration
+	// StatsLogger receives aggregate operational logs. Nil uses slog.Default.
+	StatsLogger *slog.Logger
 	// AllowedOrigins lists exact browser origins allowed to call the API.
 	// Empty permits same-origin requests only when the request host is loopback.
 	AllowedOrigins []string
@@ -98,7 +105,7 @@ type Server struct {
 	gpxMu           sync.RWMutex
 	elevation       *elevationProxy
 	nominatimURL    string
-	mode            offlineMode
+	modes           *offlineModeController
 	cache           *cacheStore
 	outbound        *outboundClient
 	providers       map[string]*providerPolicy
@@ -113,10 +120,15 @@ type Server struct {
 	allowedOrigins  map[string]struct{}
 	assets          fs.FS
 	handler         http.Handler
+	statsInterval   time.Duration
+	statsLogger     *slog.Logger
 }
 
 // New validates cfg, creates the GPX directory and returns the handler.
 func New(cfg Config) (*Server, error) {
+	if cfg.StatsLogInterval < 0 {
+		return nil, errors.New("stats log interval cannot be negative")
+	}
 	allowedOrigins, err := normalizeOrigins(cfg.AllowedOrigins)
 	if err != nil {
 		return nil, err
@@ -201,6 +213,7 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	rootCtx, cancel := context.WithCancel(context.Background())
+	modes := newOfflineModeController(rootCtx, mode)
 	// A DEM lookup of 100 points is not instant, but nothing about it should
 	// take half a minute either.
 	client := cfg.HTTPClient
@@ -259,7 +272,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		gpxDir:          cfg.GPXDir,
 		gpxRoot:         gpxRoot,
-		mode:            mode,
+		modes:           modes,
 		cache:           cache,
 		providers:       providers,
 		ctx:             rootCtx,
@@ -275,14 +288,19 @@ func New(cfg Config) (*Server, error) {
 		nominatimURL:   nominatimURL,
 		allowedOrigins: allowedOrigins,
 		assets:         cfg.Assets,
+		statsInterval:  cfg.StatsLogInterval,
+		statsLogger:    cfg.StatsLogger,
+	}
+	if s.statsLogger == nil {
+		s.statsLogger = slog.Default()
 	}
 	// The tile store must join the server-owned lifecycle, not a detached
 	// prefetch WaitGroup.
 	if tiles != nil {
-		tiles.configureLifecycle(mode == modeCacheOnly, rootCtx, &s.wg)
+		tiles.configureLifecycle(modes, rootCtx, &s.wg)
 		tiles.userAgent = ua
 	}
-	s.outbound = newOutboundClient(mode, cache, client, rootCtx, &s.wg, ua)
+	s.outbound = newOutboundClientWithModes(modes, cache, client, rootCtx, &s.wg, ua)
 	s.rasterMaps, err = newRasterAdapters()
 	if err != nil {
 		cancel()
@@ -327,6 +345,10 @@ func New(cfg Config) (*Server, error) {
 		s.openFreeMap.activate(rootCtx)
 	}
 	s.handler = s.routes()
+	if s.statsInterval > 0 {
+		s.wg.Add(1)
+		go s.logOperationalStatsLoop()
+	}
 	return s, nil
 }
 
@@ -462,6 +484,7 @@ func (s *Server) routes() http.Handler {
 		s.openFreeMap.handleSprite(w, r)
 	}))
 	r.Get("/offline/status", s.handleOfflineStatus)
+	r.Put("/offline/mode", s.requireOfflineControl(s.handleOfflineMode))
 	r.Get("/offline/packs", s.requireOfflineRead(s.handleListPacks))
 	r.Post("/offline/packs/estimate", s.requireOfflineControl(s.handleEstimatePack))
 	r.Post("/offline/packs", s.requireOfflineControl(s.handleCreatePack))
@@ -557,6 +580,14 @@ func loopbackSameOrigin(origin, requestHost string) bool {
 	if err != nil || !strings.EqualFold(u.Host, requestHost) {
 		return false
 	}
+	return loopbackOrigin(origin)
+}
+
+func loopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
 	host := u.Hostname()
 	return strings.EqualFold(host, "localhost") || net.ParseIP(host).IsLoopback()
 }
@@ -588,6 +619,10 @@ func (s *Server) assetHandler() http.Handler {
 		if name == "" {
 			name = "index.html"
 		}
+		if name == "index.html" {
+			s.serveIndex(w, r)
+			return
+		}
 
 		if _, err := fs.Stat(s.assets, name); err != nil {
 			// Unknown path: hand it to the SPA router rather than 404ing, so
@@ -596,7 +631,7 @@ func (s *Server) assetHandler() http.Handler {
 				http.NotFound(w, r)
 				return
 			}
-			serveIndex(w, r, s.assets)
+			s.serveIndex(w, r)
 			return
 		}
 
@@ -611,11 +646,17 @@ func (s *Server) assetHandler() http.Handler {
 	})
 }
 
-func serveIndex(w http.ResponseWriter, r *http.Request, assets fs.FS) {
-	index, err := fs.ReadFile(assets, "index.html")
+func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
+	index, err := fs.ReadFile(s.assets, "index.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
+	}
+	marker := []byte(`<meta name="gpx-editor-offline-mode" content="` + string(s.modes.mode()) + `">`)
+	if bytes.Contains(index, []byte("<head>")) {
+		index = bytes.Replace(index, []byte("<head>"), append([]byte("<head>"), marker...), 1)
+	} else {
+		index = append(index, marker...)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")

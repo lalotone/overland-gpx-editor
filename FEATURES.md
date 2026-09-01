@@ -19,7 +19,11 @@ A route planner and track editor for offroad, overlanding and motorbike use.
   own range, so the route itself reads as topography.
 - Layer, relief and colour-mode choices persist across sessions.
 - Policy-permitted viewed OSM, OpenTopoMap and CyclOSM tiles can replay from the
-  server cache after a restart. Public map services are never bulk-prefetched.
+  server cache after a restart. They are never bulk-prefetched; bounded
+  OpenFreeMap vector packs are the supported exception.
+- OpenFreeMap style, source, sprite, glyph and tile failures produce a
+  dismissible structured warning. The selected layer remains OpenFreeMap until
+  the user deliberately chooses another map; there is no silent fallback.
 
 ## Track statistics
 
@@ -140,6 +144,12 @@ the service is down, the OSM fuel layer answers as before.
   reference rather than copied, and deleting a pack releases only its pins.
 - Exact route, surface and search replies can replay; arbitrary new offline
   routing still requires a local routing engine.
+- Explore can prepare a drawn rectangular area without a route. Its estimate
+  updates automatically, completed bounds appear as light map coverage, and a
+  dedicated manager hides, restores, cancels or deletes downloaded areas.
+- In startup `auto` mode, **Work offline** immediately closes the outbound gate
+  for both the UI and Go server while preserving cache reads. **Go online**
+  reopens it. Operator-started `cache-only` mode cannot be overridden by the UI.
 
 ## Interface
 
@@ -163,6 +173,9 @@ the service is down, the OSM fuel layer answers as before.
 - **Route readiness control** — appears only for a loaded GPX, directly below
   Terrain, and makes dead-zone readiness visible without exposing cache
   administration controls.
+- **Downloaded-area manager** — keeps many Explore downloads out of the map
+  tool stack while retaining progress, coverage visibility and explicit
+  cancel/delete actions. Coverage returns after a reload.
 - **Editing tools behind a Tools toggle**, grouped by what they do; the POI
   layers and undo stay on the always-visible strip.
 
@@ -205,6 +218,11 @@ the service is down, the OSM fuel layer answers as before.
   atomic files, restrictive permissions and scope-specific clearing.
 - `-offline-mode cache-only` blocks every Go outbound path before transport;
   misses return immediately as `offline_cache_miss`.
+- Runtime offline switching uses the same protected management boundary as pack
+  changes, cancels the active outbound generation and never disables cache reads.
+- Periodic structured diagnostics report only aggregate cache inventory,
+  hit/miss/stale counts, outbound status classes and timing, queue pressure,
+  elevation-tile usage and pack-state counts. They never log travel data.
 - Standard-library-only HTTP backend; the command interface uses `urfave/cli`.
 
 ---

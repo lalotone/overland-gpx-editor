@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -97,16 +98,20 @@ func validateTile(zRaw, xRaw, yRaw string, maxZoom int) (int, int, int, error) {
 func (s *Server) protectOutboundResource(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !s.isTrustedResourceOrigin(origin, r) {
+				writeError(w, http.StatusForbidden, "Cross-origin resource relay refused")
+				return
+			}
+			next(w, r)
+			return
+		}
 		if site == "cross-site" {
 			writeError(w, http.StatusForbidden, "Cross-site resource relay refused")
 			return
 		}
-		if site == "" && r.Header.Get("Origin") == "" && !remoteIsLoopback(r.RemoteAddr) {
+		if !remoteIsLoopback(r.RemoteAddr) && (site != "same-origin" || !s.isAllowedResourceHost(r.Host)) {
 			writeError(w, http.StatusForbidden, "Resource requests require a same-origin or loopback client")
-			return
-		}
-		if origin := r.Header.Get("Origin"); origin != "" && !s.isTrustedResourceOrigin(origin, r) {
-			writeError(w, http.StatusForbidden, "Cross-origin resource relay refused")
 			return
 		}
 		next(w, r)
@@ -168,6 +173,15 @@ type openFreeMapManager struct {
 	generation    string
 	cacheResponse cachedResponse
 	fontStacks    []string
+	failure       *openFreeMapFailure
+}
+
+type openFreeMapFailure struct {
+	Detail         string `json:"detail"`
+	Code           string `json:"code"`
+	Scope          string `json:"scope"`
+	Stage          string `json:"stage"`
+	UpstreamStatus int    `json:"upstreamStatus,omitempty"`
 }
 
 type openFreeMapGeneration struct {
@@ -303,14 +317,89 @@ func (m *openFreeMapManager) styleURL() string {
 	return providerEndpoint(m.base, "/styles/liberty")
 }
 
+func classifyOpenFreeMapFailure(stage string, err error) openFreeMapFailure {
+	failure := openFreeMapFailure{Scope: "maps-openfreemap", Stage: stage}
+	var upstream *upstreamStatusError
+	var miss *offlineMissError
+	var busy *outboundBusyError
+	switch {
+	case errors.As(err, &upstream):
+		failure.Code = "upstream_http_status"
+		failure.UpstreamStatus = upstream.Status
+		failure.Detail = fmt.Sprintf("OpenFreeMap provider returned HTTP %d while loading %s", upstream.Status, stage)
+	case errors.As(err, &miss):
+		failure.Code = "offline_cache_miss"
+		failure.Detail = fmt.Sprintf("OpenFreeMap %s is not available in the offline cache", stage)
+	case errors.As(err, &busy):
+		failure.Code = "outbound_queue_full"
+		failure.Detail = fmt.Sprintf("OpenFreeMap %s is waiting for a full outbound queue", stage)
+	case errors.Is(err, context.DeadlineExceeded):
+		failure.Code = "upstream_timeout"
+		failure.Detail = fmt.Sprintf("OpenFreeMap provider timed out while loading %s", stage)
+	case strings.Contains(strings.ToLower(err.Error()), "invalid") ||
+		strings.Contains(strings.ToLower(err.Error()), "malformed") ||
+		strings.Contains(strings.ToLower(err.Error()), "content type") ||
+		strings.Contains(strings.ToLower(err.Error()), "empty") ||
+		strings.Contains(strings.ToLower(err.Error()), "exceeds"):
+		failure.Code = "invalid_upstream_response"
+		failure.Detail = fmt.Sprintf("OpenFreeMap provider returned an invalid %s response", stage)
+	default:
+		failure.Code = "upstream_unreachable"
+		failure.Detail = fmt.Sprintf("OpenFreeMap provider could not be reached while loading %s", stage)
+	}
+	return failure
+}
+
+func logOpenFreeMapFailure(failure openFreeMapFailure) {
+	attributes := []any{
+		"component", "openfreemap",
+		"stage", failure.Stage,
+		"code", failure.Code,
+	}
+	if failure.UpstreamStatus != 0 {
+		attributes = append(attributes, "upstream_status", failure.UpstreamStatus)
+	}
+	slog.Error("OpenFreeMap resource failed", attributes...)
+}
+
+func (m *openFreeMapManager) recordActivationFailure(stage string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	failure := classifyOpenFreeMapFailure(stage, err)
+	m.mu.Lock()
+	m.failure = &failure
+	m.mu.Unlock()
+	logOpenFreeMapFailure(failure)
+}
+
+func (m *openFreeMapManager) writeResourceFailure(w http.ResponseWriter, stage string, err error) {
+	failure := classifyOpenFreeMapFailure(stage, err)
+	logOpenFreeMapFailure(failure)
+	status := http.StatusBadGateway
+	var miss *offlineMissError
+	var busy *outboundBusyError
+	var upstream *upstreamStatusError
+	if errors.As(err, &miss) {
+		status = http.StatusGatewayTimeout
+	} else if errors.As(err, &busy) {
+		status = http.StatusServiceUnavailable
+	} else if errors.As(err, &upstream) && upstream.Status >= 400 && upstream.Status < 500 {
+		status = upstream.Status
+	}
+	writeJSON(w, status, failure)
+}
+
 func (m *openFreeMapManager) activate(ctx context.Context) {
 	styleURL := m.styleURL()
 	response, err := m.fetch(ctx, styleURL, "style", []string{"application/json"})
 	if err != nil {
+		m.recordActivationFailure("style", err)
 		return
 	}
 	var style map[string]any
-	if json.Unmarshal(response.Body, &style) != nil {
+	if err := json.Unmarshal(response.Body, &style); err != nil {
+		m.recordActivationFailure("style", fmt.Errorf("invalid style JSON: %w", err))
 		return
 	}
 	generationID := checksum(response.Body)
@@ -324,34 +413,41 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 	sources, _ := style["sources"].(map[string]any)
 	for sourceID, raw := range sources {
 		if !safeResourceID(sourceID) {
+			m.recordActivationFailure("source", errors.New("invalid source identifier"))
 			return
 		}
 		source, ok := raw.(map[string]any)
 		if !ok {
+			m.recordActivationFailure("source", errors.New("invalid source definition"))
 			return
 		}
 		if rawURL, ok := source["url"].(string); ok && rawURL != "" {
 			resolved, err := m.resolve(styleBase, rawURL)
 			if err != nil {
+				m.recordActivationFailure("source", fmt.Errorf("invalid source URL: %w", err))
 				return
 			}
 			tileJSON, err := m.fetch(ctx, resolved.String(), generationID+":source:"+sourceID, []string{"application/json"})
 			if err != nil {
+				m.recordActivationFailure("source", err)
 				return
 			}
 			coreKeys = append(coreKeys, tileJSON.Key)
 			durableCore = durableCore && tileJSON.State != "bypass"
 			var manifest map[string]any
-			if json.Unmarshal(tileJSON.Body, &manifest) != nil {
+			if err := json.Unmarshal(tileJSON.Body, &manifest); err != nil {
+				m.recordActivationFailure("source", fmt.Errorf("invalid source JSON: %w", err))
 				return
 			}
 			if !m.rewriteTiles(manifest, resolved, sourceID, candidateTiles, candidateRasters) {
+				m.recordActivationFailure("source", errors.New("invalid source tile templates"))
 				return
 			}
 			candidateSources[sourceID], _ = json.Marshal(manifest)
 			source["url"] = "/map/openfreemap/source/" + url.PathEscape(sourceID) + ".json"
 		}
 		if !m.rewriteTiles(source, styleBase, sourceID, candidateTiles, candidateRasters) {
+			m.recordActivationFailure("source", errors.New("invalid inline source tile templates"))
 			return
 		}
 	}
@@ -360,6 +456,7 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 	if raw, ok := style["glyphs"].(string); ok && raw != "" {
 		resolved, err := m.resolve(styleBase, raw)
 		if err != nil {
+			m.recordActivationFailure("glyph", fmt.Errorf("invalid glyph URL: %w", err))
 			return
 		}
 		glyphs = resourceTemplateString(resolved)
@@ -369,6 +466,7 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 	if raw, ok := style["sprite"].(string); ok && raw != "" {
 		resolved, err := m.resolve(styleBase, raw)
 		if err != nil {
+			m.recordActivationFailure("sprite", fmt.Errorf("invalid sprite URL: %w", err))
 			return
 		}
 		sprite = resolved.String()
@@ -379,6 +477,7 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 			}
 			spriteResponse, err := m.fetch(ctx, sprite+suffix, generationID+":sprite:"+suffix, accepted)
 			if err != nil {
+				m.recordActivationFailure("sprite", err)
 				return
 			}
 			coreKeys = append(coreKeys, spriteResponse.Key)
@@ -388,6 +487,7 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 	}
 	rewritten, err := json.Marshal(style)
 	if err != nil {
+		m.recordActivationFailure("style", fmt.Errorf("invalid rewritten style: %w", err))
 		return
 	}
 	primary := ""
@@ -421,6 +521,7 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 	m.generation = generationID
 	m.cacheResponse = response
 	m.fontStacks = fontStacks
+	m.failure = nil
 	m.mu.Unlock()
 }
 
@@ -650,7 +751,14 @@ func (m *openFreeMapManager) handleStyle(w http.ResponseWriter, _ *http.Request)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.active {
-		writeError(w, http.StatusServiceUnavailable, "Configured map style is not available")
+		if m.failure != nil {
+			writeJSON(w, http.StatusServiceUnavailable, *m.failure)
+		} else {
+			writeJSON(w, http.StatusServiceUnavailable, openFreeMapFailure{
+				Detail: "Configured OpenFreeMap style is not available",
+				Code:   "style_unavailable", Scope: "maps-openfreemap", Stage: "style",
+			})
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -711,7 +819,7 @@ func (m *openFreeMapManager) handleTile(w http.ResponseWriter, r *http.Request, 
 	}
 	response, err := m.fetch(r.Context(), endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, id, z, x, y), accepted)
 	if err != nil {
-		writeOutboundError(w, err, m.policy.scope)
+		m.writeResourceFailure(w, "tile", err)
 		return
 	}
 	writeCachedResponse(w, response)
@@ -740,7 +848,7 @@ func (m *openFreeMapManager) handleGlyph(w http.ResponseWriter, r *http.Request)
 	endpoint := strings.NewReplacer("{fontstack}", url.PathEscape(font), "{range}", rangeValue).Replace(template)
 	response, err := m.fetch(r.Context(), endpoint, generation+":glyph:"+font+":"+rangeValue, []string{"application/x-protobuf", "application/octet-stream", "application/vnd.mapbox-vector-tile"})
 	if err != nil {
-		writeOutboundError(w, err, m.policy.scope)
+		m.writeResourceFailure(w, "glyph", err)
 		return
 	}
 	writeCachedResponse(w, response)
@@ -770,7 +878,7 @@ func (m *openFreeMapManager) handleSprite(w http.ResponseWriter, r *http.Request
 	}
 	response, err := m.fetch(r.Context(), base+suffix, generation+":sprite:"+suffix, accepted)
 	if err != nil {
-		writeOutboundError(w, err, m.policy.scope)
+		m.writeResourceFailure(w, "sprite", err)
 		return
 	}
 	writeCachedResponse(w, response)

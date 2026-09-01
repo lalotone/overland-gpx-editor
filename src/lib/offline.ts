@@ -18,6 +18,7 @@ export interface OfflineCapability {
   mode: OfflineMode
   status: string
   packs: string
+  modeControl?: string
 }
 
 export interface RuntimeConfig {
@@ -27,7 +28,7 @@ export interface RuntimeConfig {
   services: Partial<Record<RuntimeService, string>>
   maps: {
     raster: Partial<Record<RuntimeRasterMap, string>>
-    openfreemap?: { style: string }
+    openfreemap?: { style: string; allowBulk: boolean }
   }
 }
 
@@ -88,6 +89,7 @@ export interface OfflineStatus {
 }
 
 export interface PackSummary extends OfflineJob {
+  bbox?: PackBounds
   createdAt?: string
   updatedAt?: string
   incomplete?: boolean
@@ -118,11 +120,18 @@ export interface PackEstimateRequest {
 
 export type PackArea = 'route' | 'bbox'
 
+export interface PackBounds {
+  south: number
+  west: number
+  north: number
+  east: number
+}
+
 export interface PackRequestDraft {
   name: string
   area: PackArea
   route: { lat: number; lon: number }[]
-  bbox: { south: number; west: number; north: number; east: number } | null
+  bbox: PackBounds | null
   paddingKm: number
   minZoom: number
   maxZoom: number
@@ -193,22 +202,57 @@ export function syncPackLayers(
   return userEdited ? selected : [packLayerId(activeLayerId)]
 }
 
+const WEB_MERCATOR_LATITUDE = 85.05112878
+const PACK_LAYERS = new Set(['openfreemap', 'osm', 'opentopo', 'cyclosm', 'satellite', 'relief', 'hillshade'])
+const PACK_SCOPES = new Set(['elevation', 'routing', 'surface', 'pois', 'fuel', 'places'])
+
+function normalizedLongitude(value: number): number {
+  const normalized = ((value + 180) % 360 + 360) % 360 - 180
+  return Object.is(normalized, -0) ? 0 : normalized
+}
+
+/** Convert two unwrapped map corners to the backend's antimeridian-aware bbox. */
+export function normalizePackBounds(
+  first: { lat: number; lon: number },
+  second: { lat: number; lon: number },
+): PackBounds | null {
+  if (![first.lat, first.lon, second.lat, second.lon].every(Number.isFinite)) return null
+  const south = Math.max(-WEB_MERCATOR_LATITUDE, Math.min(first.lat, second.lat))
+  const north = Math.min(WEB_MERCATOR_LATITUDE, Math.max(first.lat, second.lat))
+  const rawWest = Math.min(first.lon, second.lon)
+  const rawEast = Math.max(first.lon, second.lon)
+  const longitudeSpan = rawEast - rawWest
+  if (south >= north || longitudeSpan <= 0 || longitudeSpan >= 360) return null
+  return { south, west: normalizedLongitude(rawWest), north, east: normalizedLongitude(rawEast) }
+}
+
+function validPackBounds(bounds: PackBounds): boolean {
+  return [bounds.south, bounds.west, bounds.north, bounds.east].every(Number.isFinite) &&
+    bounds.south >= -WEB_MERCATOR_LATITUDE && bounds.north <= WEB_MERCATOR_LATITUDE &&
+    bounds.south < bounds.north && bounds.west >= -180 && bounds.west <= 180 &&
+    bounds.east >= -180 && bounds.east <= 180 && bounds.west !== bounds.east
+}
+
 export function buildPackEstimateRequest(draft: PackRequestDraft): PackEstimateRequest | null {
   const name = draft.name.trim()
-  if (!name) return null
+  if (!name || name.length > 100 || !Number.isFinite(draft.paddingKm) || draft.paddingKm < 0 || draft.paddingKm > 100) return null
+  if (!Number.isInteger(draft.minZoom) || !Number.isInteger(draft.maxZoom) ||
+      draft.minZoom < 0 || draft.minZoom > 19 || draft.maxZoom < 0 || draft.maxZoom > 19) return null
+  if (draft.layers.some(layer => !PACK_LAYERS.has(layer)) || draft.scopes.some(scope => !PACK_SCOPES.has(scope))) return null
   const request: PackEstimateRequest = {
     name,
     paddingKm: draft.paddingKm,
     minZoom: Math.min(draft.minZoom, draft.maxZoom),
     maxZoom: Math.max(draft.minZoom, draft.maxZoom),
-    layers: [...draft.layers],
-    scopes: [...draft.scopes],
+    layers: [...new Set(draft.layers)].sort(),
+    scopes: [...new Set(draft.scopes)].sort(),
   }
   if (draft.area === 'route') {
     if (draft.route.length < 2) return null
-    request.route = draft.route.map(({ lat, lon }) => ({ lat, lon }))
+    if (draft.route.some(({ lat, lon }) => !Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)) return null
+    request.route = limitPackRoute(draft.route)
   } else {
-    if (!draft.bbox) return null
+    if (!draft.bbox || !validPackBounds(draft.bbox)) return null
     request.bbox = [draft.bbox.south, draft.bbox.west, draft.bbox.north, draft.bbox.east]
   }
   return request
@@ -253,6 +297,21 @@ function boolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined
 }
 
+function decodePackBounds(value: unknown): PackBounds | undefined {
+  const item = record(value)
+  if (!item) return undefined
+  const bounds = {
+    south: item.south,
+    west: item.west,
+    north: item.north,
+    east: item.east,
+  }
+  if (!Object.values(bounds).every(coordinate => typeof coordinate === 'number' && Number.isFinite(coordinate))) {
+    return undefined
+  }
+  return validPackBounds(bounds as PackBounds) ? bounds as PackBounds : undefined
+}
+
 /** Resolve an advertised application route without consuming map URL templates. */
 export function resolveApiUrl(endpoint: string, apiBase = ''): string {
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(endpoint)) return endpoint
@@ -281,11 +340,13 @@ export function decodeRuntimeConfig(value: unknown, apiBase = ''): RuntimeConfig
 
   const openfreemapRaw = record(mapsRaw?.openfreemap)
   const style = text(openfreemapRaw?.style)
+  const allowBulk = boolean(openfreemapRaw?.allowBulk) ?? false
   const offlineRaw = record(root?.offline)
   const enabled = offlineRaw?.enabled === true
   const mode: OfflineMode = offlineRaw?.mode === 'cache-only' ? 'cache-only' : 'auto'
   const status = text(offlineRaw?.status)
   const packs = text(offlineRaw?.packs)
+  const modeControl = text(offlineRaw?.modeControl)
 
   return {
     apiBase,
@@ -296,29 +357,43 @@ export function decodeRuntimeConfig(value: unknown, apiBase = ''): RuntimeConfig
           mode,
           status: resolveApiUrl(status ?? '/offline/status', apiBase),
           packs: resolveApiUrl(packs ?? '/offline/packs', apiBase),
+          modeControl: modeControl ? resolveApiUrl(modeControl, apiBase) : undefined,
         }
       : undefined,
     services,
     maps: {
       raster,
-      openfreemap: style ? { style: resolveApiUrl(style, apiBase) } : undefined,
+      openfreemap: style ? { style: resolveApiUrl(style, apiBase), allowBulk } : undefined,
     },
   }
 }
 
-/** A missing or unreachable config endpoint intentionally means standalone mode. */
+export function bootstrapRuntimeConfig(apiBase = '', embeddedMode?: string): RuntimeConfig {
+  if (embeddedMode === 'auto' || embeddedMode === 'cache-only') {
+    return decodeRuntimeConfig({ offline: { enabled: true, mode: embeddedMode } }, apiBase)
+  }
+  // A configured remote backend is authoritative. Until its config arrives,
+  // fail closed rather than leaking requests through standalone fallbacks.
+  if (apiBase.trim()) {
+    return decodeRuntimeConfig({ offline: { enabled: true, mode: 'cache-only' } }, apiBase)
+  }
+  return decodeRuntimeConfig(null, apiBase)
+}
+
+/** A missing config means standalone mode unless server-rendered policy supplied a fallback. */
 export async function loadRuntimeConfig(
   apiBase = '',
   signal?: AbortSignal,
   fetcher: typeof fetch = fetch,
+  fallback?: RuntimeConfig,
 ): Promise<RuntimeConfig> {
   try {
     const response = await fetcher(resolveApiUrl('/config', apiBase), { signal })
-    if (!response.ok) return decodeRuntimeConfig(null, apiBase)
+    if (!response.ok) return fallback ?? decodeRuntimeConfig(null, apiBase)
     return decodeRuntimeConfig(await response.json(), apiBase)
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') throw error
-    return decodeRuntimeConfig(null, apiBase)
+    return fallback ?? decodeRuntimeConfig(null, apiBase)
   }
 }
 
@@ -520,6 +595,7 @@ export function decodePacks(value: unknown): PackSummary[] {
     if (!job || !item) return []
     return [{
       ...job,
+      bbox: decodePackBounds(item.bbox),
       createdAt: text(item.createdAt),
       updatedAt: text(item.updatedAt),
       incomplete: boolean(item.incomplete) ?? job.status === 'incomplete',
@@ -620,6 +696,23 @@ export async function fetchPacks(runtime: RuntimeConfig, signal?: AbortSignal): 
   const response = await fetch(runtime.offline.packs, { signal })
   await managementResponse(response, 'Trip packs')
   return decodePacks(await response.json())
+}
+
+export async function setRuntimeOfflineMode(
+  runtime: RuntimeConfig,
+  mode: OfflineMode,
+  fetcher: typeof fetch = fetch,
+): Promise<OfflineMode> {
+  const endpoint = runtime.offline?.modeControl
+  if (!endpoint) throw new Error('Runtime offline mode control is unavailable')
+  const response = await fetcher(endpoint, {
+    method: 'PUT',
+    headers: managementHeaders,
+    body: JSON.stringify({ mode }),
+  })
+  await managementResponse(response, 'Offline mode change')
+  const payload = record(await response.json().catch(() => null))
+  return payload?.mode === 'cache-only' ? 'cache-only' : 'auto'
 }
 
 export async function estimatePack(

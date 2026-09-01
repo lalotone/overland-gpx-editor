@@ -151,8 +151,11 @@ export async function fetchPoisForArea(
 /** Approximate width and height of a bounding box, in kilometres. */
 export function boundingBoxSpanKm(bbox: BoundingBox): { widthKm: number; heightKm: number } {
   const midLat = (bbox.south + bbox.north) / 2
+  const longitudeSpan = bbox.east >= bbox.west
+    ? bbox.east - bbox.west
+    : bbox.east - bbox.west + 360
   return {
-    widthKm: (bbox.east - bbox.west) * 111 * Math.cos((midLat * Math.PI) / 180),
+    widthKm: longitudeSpan * 111 * Math.cos((midLat * Math.PI) / 180),
     heightKm: (bbox.north - bbox.south) * 111,
   }
 }

@@ -27,6 +27,92 @@ const (
 	defaultOutboundFetchTimeout          = 30 * time.Second
 )
 
+// offlineModeController linearizes runtime mode changes with transport starts.
+// Cache lookups remain available in either mode; only network generations are
+// cancelled when the user chooses cache-only.
+type offlineModeController struct {
+	mu         sync.Mutex
+	root       context.Context
+	configured offlineMode
+	current    offlineMode
+	generation context.Context
+	cancel     context.CancelFunc
+	active     int
+	cond       *sync.Cond
+}
+
+func newOfflineModeController(root context.Context, mode offlineMode) *offlineModeController {
+	controller := &offlineModeController{root: root, configured: mode, current: mode}
+	controller.cond = sync.NewCond(&controller.mu)
+	if mode == modeAuto {
+		controller.generation, controller.cancel = context.WithCancel(root)
+	}
+	return controller
+}
+
+func (c *offlineModeController) mode() offlineMode {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.current
+}
+
+func (c *offlineModeController) canToggle() bool { return c.configured == modeAuto }
+
+func (c *offlineModeController) set(mode offlineMode) (bool, error) {
+	if mode != modeAuto && mode != modeCacheOnly {
+		return false, errors.New("offline mode must be auto or cache-only")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if mode == modeAuto && c.configured == modeCacheOnly {
+		return false, errors.New("startup cache-only mode cannot be overridden")
+	}
+	if c.current == mode {
+		return false, nil
+	}
+	if mode == modeCacheOnly {
+		c.current = mode
+		if c.cancel != nil {
+			c.cancel()
+		}
+		for c.active != 0 {
+			c.cond.Wait()
+		}
+		c.generation = nil
+		c.cancel = nil
+		return true, nil
+	}
+	c.generation, c.cancel = context.WithCancel(c.root)
+	c.current = mode
+	return true, nil
+}
+
+func (c *offlineModeController) networkContext(parent context.Context) (context.Context, func(), bool) {
+	c.mu.Lock()
+	if c.current == modeCacheOnly || c.generation == nil {
+		c.mu.Unlock()
+		return nil, func() {}, false
+	}
+	ctx, cancel := context.WithCancel(c.generation)
+	stop := context.AfterFunc(parent, cancel)
+	if parent.Err() != nil {
+		cancel()
+	}
+	c.active++
+	c.mu.Unlock()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			stop()
+			cancel()
+			c.mu.Lock()
+			c.active--
+			c.cond.Broadcast()
+			c.mu.Unlock()
+		})
+	}, true
+}
+
 type offlineMissError struct{ Scope string }
 
 func (e *offlineMissError) Error() string { return "resource is not available in the offline cache" }
@@ -99,6 +185,26 @@ type providerHealth struct {
 	LastSuccess time.Time `json:"lastSuccess,omitempty"`
 }
 
+type outboundStats struct {
+	CacheHits        uint64
+	CacheMisses      uint64
+	CacheStale       uint64
+	CacheRevalidated uint64
+	CacheBypass      uint64
+	OfflineMisses    uint64
+	QueueRejected    uint64
+	NetworkRequests  uint64
+	NetworkFailures  uint64
+	Status2xx        uint64
+	Status3xx        uint64
+	Status4xx        uint64
+	Status5xx        uint64
+	Duration         time.Duration
+	MaxDuration      time.Duration
+	InFlight         int
+	PeakInFlight     int
+}
+
 type healthState struct {
 	failures    int
 	openUntil   time.Time
@@ -106,7 +212,7 @@ type healthState struct {
 }
 
 type outboundClient struct {
-	mode      offlineMode
+	modes     *offlineModeController
 	store     *cacheStore
 	client    *http.Client
 	ctx       context.Context
@@ -119,6 +225,7 @@ type outboundClient struct {
 	inflight map[string]*inflightFetch
 	health   map[string]*healthState
 	pending  map[string]int
+	stats    outboundStats
 
 	maxPending            int
 	maxPendingPerProvider int
@@ -126,8 +233,12 @@ type outboundClient struct {
 }
 
 func newOutboundClient(mode offlineMode, store *cacheStore, client *http.Client, ctx context.Context, wg *sync.WaitGroup, userAgent string) *outboundClient {
+	return newOutboundClientWithModes(newOfflineModeController(ctx, mode), store, client, ctx, wg, userAgent)
+}
+
+func newOutboundClientWithModes(modes *offlineModeController, store *cacheStore, client *http.Client, ctx context.Context, wg *sync.WaitGroup, userAgent string) *outboundClient {
 	return &outboundClient{
-		mode: mode, store: store, client: client, ctx: ctx, wg: wg, userAgent: userAgent,
+		modes: modes, store: store, client: client, ctx: ctx, wg: wg, userAgent: userAgent,
 		referer: "https://github.com/lalotone/overland-gpx-editor", now: time.Now,
 		inflight: make(map[string]*inflightFetch), health: make(map[string]*healthState), pending: make(map[string]int),
 		maxPending: defaultMaxPendingOutbound, maxPendingPerProvider: defaultMaxPendingOutboundPerProvider,
@@ -149,7 +260,8 @@ func sourceFingerprint(u *url.URL) string {
 	return canonicalCacheKey("source", strings.ToLower(u.Scheme+"://"+u.Host), http.MethodGet, u.EscapedPath(), "", nil)
 }
 
-func (o *outboundClient) do(ctx context.Context, request cachedRequest) (cachedResponse, error) {
+func (o *outboundClient) do(ctx context.Context, request cachedRequest) (response cachedResponse, err error) {
+	defer func() { o.recordResult(response, err) }()
 	p := request.policy
 	if p == nil || p.baseURL == nil {
 		return cachedResponse{}, errors.New("provider is not configured")
@@ -169,7 +281,7 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (cachedR
 			stale = entry
 		}
 	}
-	if o.mode == modeCacheOnly {
+	if o.modes.mode() == modeCacheOnly {
 		if stale != nil && staleAllowed(stale.Meta, now) {
 			return responseFromEntry(stale, key, "stale"), nil
 		}
@@ -197,6 +309,9 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (cachedR
 	fetch := &inflightFetch{done: make(chan struct{})}
 	o.inflight[key] = fetch
 	o.pending[p.name]++
+	if len(o.inflight) > o.stats.PeakInFlight {
+		o.stats.PeakInFlight = len(o.inflight)
+	}
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
@@ -206,7 +321,25 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (cachedR
 		}
 		fetchCtx, cancel := context.WithTimeout(fetchParent, o.fetchTimeout)
 		defer cancel()
-		fetch.resp, fetch.err = o.fetch(fetchCtx, request, key, stale)
+		networkCtx, release, online := o.modes.networkContext(fetchCtx)
+		if !online {
+			if stale != nil && staleAllowed(stale.Meta, o.now().UTC()) {
+				fetch.resp = responseFromEntry(stale, key, "stale")
+			} else {
+				fetch.err = &offlineMissError{Scope: p.scope}
+			}
+		} else {
+			fetch.resp, fetch.err = o.fetch(networkCtx, request, key, stale)
+			release()
+			if fetch.err != nil && o.modes.mode() == modeCacheOnly {
+				if stale != nil && staleAllowed(stale.Meta, o.now().UTC()) {
+					fetch.resp = responseFromEntry(stale, key, "stale")
+					fetch.err = nil
+				} else if errors.Is(fetch.err, context.Canceled) {
+					fetch.err = &offlineMissError{Scope: p.scope}
+				}
+			}
+		}
 		o.mu.Lock()
 		delete(o.inflight, key)
 		o.pending[p.name]--
@@ -277,7 +410,9 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 		}
 	}
 
+	started := time.Now()
 	resp, err := o.client.Do(req)
+	o.recordTransport(resp, err, time.Since(started))
 	if err != nil {
 		o.recordFailure(p.name, now)
 		if stale != nil && p.staleOnError && staleAllowed(stale.Meta, now) {
@@ -558,6 +693,66 @@ func (o *outboundClient) healthSnapshot() map[string]providerHealth {
 		out[name] = providerHealth{Failures: state.failures, CircuitOpen: now.Before(state.openUntil), LastSuccess: state.lastSuccess}
 	}
 	return out
+}
+
+func (o *outboundClient) recordResult(response cachedResponse, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	switch response.State {
+	case "hit":
+		o.stats.CacheHits++
+	case "miss":
+		o.stats.CacheMisses++
+	case "stale":
+		o.stats.CacheStale++
+	case "revalidated":
+		o.stats.CacheRevalidated++
+	case "bypass":
+		o.stats.CacheBypass++
+	}
+	var offlineMiss *offlineMissError
+	var busy *outboundBusyError
+	if errors.As(err, &offlineMiss) {
+		o.stats.OfflineMisses++
+	}
+	if errors.As(err, &busy) {
+		o.stats.QueueRejected++
+	}
+}
+
+func (o *outboundClient) recordTransport(response *http.Response, err error, duration time.Duration) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stats.NetworkRequests++
+	o.stats.Duration += duration
+	if duration > o.stats.MaxDuration {
+		o.stats.MaxDuration = duration
+	}
+	if err != nil {
+		o.stats.NetworkFailures++
+		return
+	}
+	switch response.StatusCode / 100 {
+	case 2:
+		o.stats.Status2xx++
+	case 3:
+		o.stats.Status3xx++
+	case 4:
+		o.stats.Status4xx++
+	case 5:
+		o.stats.Status5xx++
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		o.stats.NetworkFailures++
+	}
+}
+
+func (o *outboundClient) statsSnapshot() outboundStats {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	stats := o.stats
+	stats.InFlight = len(o.inflight)
+	return stats
 }
 
 type rateGroup struct {

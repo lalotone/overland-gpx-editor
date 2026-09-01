@@ -130,7 +130,8 @@ a public interface. Browser writes are loopback-only by default; pass one or
 more exact `--allowed-origin https://planner.example.com` values for every
 non-loopback UI origin, including a public same-origin deployment. Origin
 checks reduce browser abuse but do not authenticate command-line or network
-clients.
+clients. Offline management on any non-loopback deployment additionally needs
+`--trusted-ui-origin https://planner.example.com` (or an admin bearer token).
 
 ---
 
@@ -180,18 +181,33 @@ shows live readiness for the vector map, elevation, fuel, water and campsites;
 open it for per-resource progress and item counts. Recent prepared routes remain
 pinned; at the manifest limit the oldest completed automatic pack is released.
 
-`--offline-mode cache-only` is the deterministic no-network mode. Cached data
-is served with its source and cache date; unknown resources fail immediately
-without bypassing the server or stopping GPX editing. It does not calculate a
-new route without a local Valhalla/OSRM service, and it does not make the web UI
-available when the browser cannot reach the Go server itself.
+Explore can also download a rectangular area without a GPX. Draw the bounds and
+the estimate updates automatically before download. Completed bounds are shown
+as light coverage rectangles and restored after reload; the downloaded-area
+manager can hide them, inspect progress, cancel work or delete a saved area.
+
+In the default `auto` mode, **Work offline** switches the running server and UI
+to deterministic no-network operation immediately; **Go online** re-enables
+provider traffic. Starting with `--offline-mode cache-only` is an operator lock
+and cannot be overridden by the browser. Cached data is served with its source
+and cache date; unknown resources fail immediately without bypassing the server
+or stopping GPX editing. It does not calculate a new route without a local
+Valhalla/OSRM service, and it does not make the web UI available when the browser
+cannot reach the Go server itself.
 
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be
 overridden or bulk fetching disabled at startup. OSM, OpenTopoMap and CyclOSM
 are cached only as they are viewed and are never area-prefetched. Esri live
-layers remain browser-direct and are not stored by the server. See
+layers remain browser-direct and are not stored by the server. An OpenFreeMap
+failure produces a dismissible structured warning and never silently switches
+the selected map to another provider. See
 **[docs/OFFLINE.md](docs/OFFLINE.md)** for provider and privacy details.
+
+The server prints aggregate cache, outbound, elevation-tile and pack counters in
+labeled sections once per minute. `--stats-log-interval 0` disables them. These
+summaries contain no URLs, searches, coordinates, cache keys, response bodies or
+pack identities.
 
 ---
 
@@ -211,8 +227,9 @@ bundle at build time.
 | `OFFLINE_CACHE_MAX_BYTES` | backend | `1GiB` | Generic cache quota, including metadata |
 | `OFFLINE_CACHE_MAX_ENTRIES` | backend | `100000` | Generic cache entry/inode guard |
 | `OFFLINE_MODE` | backend | `auto` | `auto` or strict no-outbound `cache-only` |
+| `STATS_LOG_INTERVAL` | backend | `1m` | Privacy-safe aggregate cache/outbound log interval; `0` disables it |
 | `UPSTREAM_CONTACT` | backend | project URL | Contact included in the outbound User-Agent |
-| `TRUSTED_UI_ORIGIN` | backend | *(same origin)* | Exact separately hosted UI origin allowed to manage offline data |
+| `TRUSTED_UI_ORIGIN` | backend | *(loopback UI only)* | Exact non-loopback UI origin allowed to manage offline data |
 | `OFFLINE_ADMIN_TOKEN` | backend | *(empty)* | Bearer token for non-loopback management clients |
 | `VALHALLA_URL` / `OSRM_URL` | backend | public FOSSGIS services | Startup-only routing service overrides |
 | `OVERPASS_URL` / `FUEL_URL` | backend | public services | Startup-only data-service overrides |
@@ -224,7 +241,7 @@ bundle at build time.
 | `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `1GiB` | Separate legacy Terrarium cache quota |
 | `ELEVATION_HOST` | backend | *(empty)* | Self-hosted opentopodata-style DEM. Takes precedence over tiles |
 | `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
-| `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at a backend on another host |
+| `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at an authoritative remote backend; direct fallbacks stay closed until its config loads |
 | `VITE_DEV_API_TARGET` | frontend | `http://localhost:8000` | Where `npm run dev` proxies the API |
 | `VITE_ELEVATION_API` | frontend | *(empty — disabled)* | Optional direct DEM call if the proxy fails |
 | `VITE_ELEVATION_DATASET` | frontend | `srtm30m` | DEM dataset name |
@@ -316,9 +333,10 @@ is rendered on the map by Leaflet.
 
 These are shared community resources. Routing and Nominatim requests are
 serialized to their one-request-per-second limits, and repeated place searches
-are cached. Public basemap tiles are never prefetched; OSM, OpenTopoMap and
-CyclOSM viewed tiles may use the bounded server cache for their
-provider-permitted lifetime.
+are cached. Public raster basemap tiles are never prefetched; OSM, OpenTopoMap
+and CyclOSM viewed tiles may use the bounded server cache for their
+provider-permitted lifetime. Bounded OpenFreeMap vector packs are the explicit
+supported exception.
 For high-traffic, commercial or automated workloads, use contracted or
 self-hosted services instead.
 

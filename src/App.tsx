@@ -1,15 +1,18 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { MapContainer, Marker, Polyline, Popup, useMap } from 'react-leaflet'
+import { MapContainer, Marker, Polyline, Popup, ZoomControl, useMap } from 'react-leaflet'
 import L from 'leaflet'
 
 import { ColoredTrack } from './components/ColoredTrack'
 import { ElevationProfile } from './components/ElevationProfile'
 import type { ProfileBar, TrimSelection } from './components/ElevationProfile'
-import { MapTiles, TerrainControls } from './components/MapLayers'
+import { ExploreScreen } from './components/ExploreScreen'
+import { MapTiles, TerrainControls, VectorMapDiagnostic } from './components/MapLayers'
+import type { VectorMapIssue } from './components/MapLayers'
 import { OfflineStoragePanel } from './components/OfflineStoragePanel'
 import { SplashScreen } from './components/SplashScreen'
 import { TrackCard } from './components/TrackCard'
 import type { TrackPreview } from './components/TrackCard'
+import { ESCAPE_PRIORITY, useEscapeDismiss } from './components/useEscapeDismiss'
 
 import {
   attachElevations,
@@ -62,12 +65,13 @@ import {
 import type { ColorMode } from './lib/terrain'
 import type { Coordinate, GpxWaypoint, Track } from './lib/types'
 import {
-  decodeRuntimeConfig,
+  bootstrapRuntimeConfig,
   formatCacheContext,
   formatCacheDate,
   loadRuntimeConfig,
+  setRuntimeOfflineMode,
 } from './lib/offline'
-import type { CacheMetadata } from './lib/offline'
+import type { CacheMetadata, OfflineMode } from './lib/offline'
 
 import './App.css'
 
@@ -84,6 +88,11 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 const ELEVATION_API = import.meta.env.VITE_ELEVATION_API ?? ''
 const ELEVATION_DATASET = import.meta.env.VITE_ELEVATION_DATASET ?? 'srtm30m'
 
+function initialRuntimeConfig() {
+  const embeddedMode = document.querySelector<HTMLMetaElement>('meta[name="gpx-editor-offline-mode"]')?.content
+  return bootstrapRuntimeConfig(API_BASE, embeddedMode)
+}
+
 const MAX_PROFILE_BARS = 200
 const FLY_TO_DURATION = 1.5
 const BAR_ZOOM_LEVEL = 16
@@ -93,6 +102,14 @@ const ROUTE_DEBOUNCE_MS = 350
 const DEFAULT_SIMPLIFY_TARGET = 500
 /** How far off the route a fuel station still counts as reachable. */
 const FUEL_CORRIDOR_M = 3000
+
+function expectedOfflineVectorMiss(issue: VectorMapIssue, mode?: OfflineMode): boolean {
+  return mode === 'cache-only' &&
+    (issue.code === 'offline_cache_miss' || issue.status === 504) &&
+    issue.phase !== 'webgl' && issue.phase !== 'initialization'
+}
+
+type ViewMode = 'welcome' | 'upload' | 'creation' | 'explore' | 'view'
 
 interface TilePrefetch {
   running: boolean
@@ -376,11 +393,11 @@ function NotificationBar({
   onDismiss: (id: number) => void
 }) {
   return (
-    <div className="notification-container">
+    <div className="notification-container" aria-live="polite" aria-label="Notifications">
       {notifications.map(n => (
         <div key={n.id} className={`notification notification-${n.type}`}>
           <span>{n.message}</span>
-          <button onClick={() => onDismiss(n.id)} className="notification-close">&times;</button>
+          <button onClick={() => onDismiss(n.id)} className="notification-close" aria-label="Dismiss notification">&times;</button>
         </div>
       ))}
     </div>
@@ -422,12 +439,41 @@ function ThemeToggle({
   )
 }
 
+function OfflineModeToggle({
+  mode,
+  available,
+  busy,
+  onToggle,
+}: {
+  mode: OfflineMode
+  available: boolean
+  busy: boolean
+  onToggle: () => void
+}) {
+  const offline = mode === 'cache-only'
+  const label = busy ? 'Changing mode…' : offline && available ? 'Go online' : offline ? 'Offline' : 'Work offline'
+  return (
+    <button
+      type="button"
+      className={`offline-mode-toggle${offline ? ' is-offline' : ''}`}
+      onClick={onToggle}
+      disabled={!available || busy}
+      aria-pressed={offline}
+      title={!available && offline ? 'Offline mode was fixed when the server started' : label}
+      data-testid="offline-mode-toggle"
+    >
+      <span className="offline-mode-icon" aria-hidden="true"><i /></span>
+      <span>{label}</span>
+    </button>
+  )
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main App                                                           */
 /* ------------------------------------------------------------------ */
 
 function App() {
-  const [viewMode, setViewMode] = useState<'welcome' | 'upload' | 'creation' | 'view'>('welcome')
+  const [viewMode, setViewMode] = useState<ViewMode>('welcome')
   const [showSplash, setShowSplash] = useState(true)
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (localStorage.getItem('gpx-theme') as 'light' | 'dark') ?? 'light',
@@ -452,11 +498,14 @@ function App() {
 
   /* -- Terrain / map presentation ----------------------------------- */
 
-  const [runtime, setRuntime] = useState(() => decodeRuntimeConfig(null, API_BASE))
+  const [runtime, setRuntime] = useState(initialRuntimeConfig)
+  const initialRuntimeRef = useRef(runtime)
+  const runtimeModeRef = useRef(runtime.offline?.mode)
+  useEffect(() => { runtimeModeRef.current = runtime.offline?.mode }, [runtime.offline?.mode])
 
   const [baseLayer, setBaseLayer] = useState(() => {
     const stored = localStorage.getItem('gpx-base-layer')
-    return stored === 'osm' ? 'openfreemap' : stored ?? 'openfreemap'
+    return stored ?? 'openfreemap'
   })
   const [hillshade, setHillshade] = useState(() => localStorage.getItem('gpx-hillshade') !== 'off')
   const [hillshadeOpacity, setHillshadeOpacity] = useState(
@@ -465,25 +514,25 @@ function App() {
   const [colorMode, setColorMode] = useState<ColorMode>(
     () => (localStorage.getItem('gpx-color-mode') as ColorMode) ?? 'slope',
   )
-  const [vectorFallbackReason, setVectorFallbackReason] = useState<'webgl' | 'style' | null>(null)
+  const [vectorMapIssue, setVectorMapIssue] = useState<VectorMapIssue | null>(null)
+  const [offlineModeBusy, setOfflineModeBusy] = useState(false)
 
   const terrainLayers = useMemo(() => runtimeTerrainLayers(runtime), [runtime])
   const hillshadeLayer = useMemo(() => runtimeHillshadeLayer(runtime), [runtime])
+  const activeBaseLayer = useMemo(() => terrainLayers.some(layer => layer.id === baseLayer)
+    ? baseLayer
+    : (terrainLayers.find(layer => layer.id === 'openfreemap') ?? terrainLayers[0])?.id ?? baseLayer,
+  [baseLayer, terrainLayers])
   /** Vector maps use an image-tile fallback so each card stays lightweight. */
   const thumbnailLayer = useMemo(
-    () => getThumbnailLayer(baseLayer, terrainLayers),
-    [baseLayer, terrainLayers],
+    () => getThumbnailLayer(activeBaseLayer, terrainLayers),
+    [activeBaseLayer, terrainLayers],
   )
 
   useEffect(() => { localStorage.setItem('gpx-base-layer', baseLayer) }, [baseLayer])
   useEffect(() => { localStorage.setItem('gpx-hillshade', hillshade ? 'on' : 'off') }, [hillshade])
   useEffect(() => { localStorage.setItem('gpx-hillshade-opacity', String(hillshadeOpacity)) }, [hillshadeOpacity])
   useEffect(() => { localStorage.setItem('gpx-color-mode', colorMode) }, [colorMode])
-  useEffect(() => {
-    if (terrainLayers.length > 0 && !terrainLayers.some(layer => layer.id === baseLayer)) {
-      setBaseLayer(terrainLayers[0].id)
-    }
-  }, [baseLayer, terrainLayers])
 
   /**
    * Surface colouring only exists where a route has been traced, which is the
@@ -569,7 +618,7 @@ function App() {
 
   const mapRef = useRef<L.Map | null>(null)
   const notifIdRef = useRef(0)
-  const vectorFallbackNotifiedRef = useRef(false)
+  const vectorIssueNotifiedRef = useRef('')
   const staleNotifiedRef = useRef(false)
   const routeSeqRef = useRef(0)
   const placeSearchSeqRef = useRef(0)
@@ -607,7 +656,7 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    void loadRuntimeConfig(API_BASE, controller.signal)
+    void loadRuntimeConfig(API_BASE, controller.signal, fetch, initialRuntimeRef.current)
       .then(config => {
         setRuntime(config)
         if (config.nominatimUrl) setNominatimApi(config.nominatimUrl)
@@ -623,18 +672,46 @@ function App() {
     notify(`Using stale cached data${cachedAt ? ` from ${cachedAt}` : ''}`, 'info')
   }, [notify])
 
-  const handleVectorStatus = useCallback((reason: 'webgl' | 'style' | null) => {
-    setVectorFallbackReason(reason)
-    if (!reason) return
-    if (vectorFallbackNotifiedRef.current) return
-    vectorFallbackNotifiedRef.current = true
-    notify(
-      reason === 'webgl'
-        ? 'WebGL2 is unavailable, so the map is using OSM raster tiles.'
-        : 'The vector map style is unavailable, so editing continues with OSM raster tiles.',
-      'info',
-    )
+  const handleVectorStatus = useCallback((issue: VectorMapIssue | null) => {
+    if (issue && expectedOfflineVectorMiss(issue, runtimeModeRef.current)) {
+      setVectorMapIssue(null)
+      return
+    }
+    setVectorMapIssue(issue)
+    if (!issue) return
+    const fingerprint = `${issue.phase}:${issue.status ?? ''}:${issue.source ?? ''}:${issue.message}`
+    if (vectorIssueNotifiedRef.current === fingerprint) return
+    vectorIssueNotifiedRef.current = fingerprint
+    notify(issue.message, 'error')
   }, [notify])
+
+  const selectBaseLayer = useCallback((id: string) => {
+    setVectorMapIssue(null)
+    setBaseLayer(id)
+  }, [])
+
+  const toggleOfflineMode = useCallback(async () => {
+    if (!runtime.offline?.modeControl || offlineModeBusy) return
+    const previousMode = runtime.offline.mode
+    const requested: OfflineMode = runtime.offline.mode === 'cache-only' ? 'auto' : 'cache-only'
+    runtimeModeRef.current = requested === 'cache-only' ? requested : previousMode
+    setOfflineModeBusy(true)
+    try {
+      const mode = await setRuntimeOfflineMode(runtime, requested)
+      const nextRuntime = runtime.offline
+        ? { ...runtime, offline: { ...runtime.offline, mode } }
+        : runtime
+      runtimeModeRef.current = mode
+      setRuntime(nextRuntime)
+      setVectorMapIssue(null)
+      notify(mode === 'cache-only' ? 'Working offline. Only cached resources will be used.' : 'Online access restored.', 'success')
+    } catch (reason) {
+      runtimeModeRef.current = previousMode
+      notify((reason as Error).message || 'Could not change offline mode', 'error')
+    } finally {
+      setOfflineModeBusy(false)
+    }
+  }, [offlineModeBusy, notify, runtime])
 
   /* -- Saved files -------------------------------------------------- */
 
@@ -874,6 +951,18 @@ function App() {
     [smoothedElevations],
   )
 
+  const cancelTrackSelection = useCallback(() => {
+    setSelectionMode(false)
+    setSelectionAnchor(null)
+    setSelection(null)
+  }, [])
+  useEscapeDismiss(viewMode === 'view' && selectionMode, cancelTrackSelection, ESCAPE_PRIORITY.nested)
+  useEscapeDismiss(viewMode === 'view' && showTools, () => setShowTools(false), ESCAPE_PRIORITY.panel)
+  useEscapeDismiss(viewMode === 'view' && !elevationCollapsed && hasElevationData, () => setElevationCollapsed(true), ESCAPE_PRIORITY.panel)
+  useEscapeDismiss((viewMode === 'view' || viewMode === 'creation') && waypointMode, () => setWaypointMode(false), ESCAPE_PRIORITY.mode)
+  useEscapeDismiss(viewMode === 'creation' && mapOnly, () => setMapOnly(false), ESCAPE_PRIORITY.mode)
+  useEscapeDismiss(viewMode === 'view' && isZoomedToBar, () => setRestoreView(true), ESCAPE_PRIORITY.passive)
+
   /**
    * Profile samples, spaced by real distance rather than by array index so
    * the slope denominator is always meaningful regardless of how densely the
@@ -984,14 +1073,6 @@ function App() {
     if (!map) return
     const frame = requestAnimationFrame(() => map.invalidateSize())
     return () => cancelAnimationFrame(frame)
-  }, [mapOnly])
-
-  useEffect(() => {
-    if (!mapOnly) return
-    // Escape is the way out that needs no on-screen furniture.
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMapOnly(false) }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
   }, [mapOnly])
 
   /* -- Creation: POIs in the current view ---------------------------- */
@@ -1478,12 +1559,26 @@ function App() {
     }
   }, [handleCacheMetadata, nominatimApi, notify, runtime])
 
-  const flyToPlace = useCallback((lat: string, lon: string) => {
-    mapRef.current?.flyTo([parseFloat(lat), parseFloat(lon)], 13, { duration: FLY_TO_DURATION })
+  const flyToPlace = useCallback((lat: number, lon: number) => {
+    mapRef.current?.flyTo([lat, lon], 13, { duration: FLY_TO_DURATION })
     setPlaceResults([])
     setPlaceCache(undefined)
     setPlaceSearch('')
   }, [])
+
+  const dismissPlaceResults = useCallback(() => {
+    placeSearchSeqRef.current++
+    placeSearchAbortRef.current?.abort()
+    placeSearchAbortRef.current = null
+    setPlaceResults([])
+    setPlaceCache(undefined)
+    setPlaceSearching(false)
+  }, [])
+  useEscapeDismiss(
+    viewMode === 'creation' && !mapOnly && (placeResults.length > 0 || placeSearching),
+    dismissPlaceResults,
+    ESCAPE_PRIORITY.popover,
+  )
 
   /* -- Creation: routing -------------------------------------------- */
 
@@ -1753,20 +1848,20 @@ function App() {
   /* -- Render ------------------------------------------------------- */
 
   /** Surface colouring is only offered on a screen that has surface data. */
-  const renderTerrainControls = (mode: ColorMode, surfaceAvailable: boolean) => (
+  const renderTerrainControls = (mode?: ColorMode, surfaceAvailable = false) => (
     <TerrainControls
-      baseLayerId={baseLayer}
-      onBaseLayer={setBaseLayer}
+      baseLayerId={activeBaseLayer}
+      onBaseLayer={selectBaseLayer}
       hillshade={hillshade}
       onHillshade={setHillshade}
       hillshadeOpacity={hillshadeOpacity}
       onHillshadeOpacity={setHillshadeOpacity}
       colorMode={mode}
-      onColorMode={setColorMode}
+      onColorMode={mode ? setColorMode : undefined}
       surfaceAvailable={surfaceAvailable}
       layers={terrainLayers}
       hillshadeAvailable={Boolean(hillshadeLayer)}
-      vectorFallbackReason={vectorFallbackReason}
+      vectorIssue={vectorMapIssue}
     />
   )
 
@@ -1778,6 +1873,14 @@ function App() {
       )}
     </div>
   )
+  const offlineModeAction = runtime.offline && (
+    <OfflineModeToggle
+      mode={runtime.offline.mode}
+      available={Boolean(runtime.offline.modeControl)}
+      busy={offlineModeBusy}
+      onToggle={() => void toggleOfflineMode()}
+    />
+  )
 
   return (
     <div className="app">
@@ -1785,7 +1888,10 @@ function App() {
       <NotificationBar notifications={notifications} onDismiss={dismissNotification} />
 
       {(viewMode === 'welcome' || viewMode === 'upload') && (
-        <ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} />
+        <div className="corner-actions">
+          {offlineModeAction}
+          <ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} inline />
+        </div>
       )}
 
       {/* ===================== WELCOME ============================= */}
@@ -1804,9 +1910,16 @@ function App() {
                 <span className="welcome-title-mark">GPX</span> Editor
               </h1>
               <p className="welcome-subtitle">
-                Plan and edit offroad routes — terrain, gradient and elevation at a glance
+                Explore, plan and edit offroad routes — terrain, gradient and elevation at a glance
               </p>
               <div className="welcome-buttons">
+                <button className="btn btn-explore" onClick={() => setViewMode('explore')}>
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="m15.8 8.2-2.1 5.5-5.5 2.1 2.1-5.5 5.5-2.1Z" />
+                  </svg>
+                  Explore map
+                </button>
                 <button className="btn btn-primary" onClick={() => setViewMode('creation')}>
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                     <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
@@ -1903,6 +2016,28 @@ function App() {
             </label>
           </div>
         </div>
+      )}
+
+      {/* ===================== EXPLORE ============================= */}
+      {viewMode === 'explore' && (
+        <ExploreScreen
+          runtime={runtime}
+          nominatimApi={nominatimApi}
+          baseLayerId={activeBaseLayer}
+          hillshade={hillshade}
+          hillshadeOpacity={hillshadeOpacity}
+          layers={terrainLayers}
+          hillshadeLayer={hillshadeLayer}
+          terrainControls={renderTerrainControls()}
+          modeAction={offlineModeAction}
+          themeAction={<ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} inline />}
+          vectorIssue={vectorMapIssue}
+          onVectorStatus={handleVectorStatus}
+          onDismissVectorIssue={() => setVectorMapIssue(null)}
+          onHome={() => setViewMode('welcome')}
+          onCacheMetadata={handleCacheMetadata}
+          onNotify={notify}
+        />
       )}
 
       {/* ===================== CREATION ============================ */}
@@ -2243,6 +2378,7 @@ function App() {
                   </svg>
                   Discard
                 </button>
+                {offlineModeAction}
                 <ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} inline />
               </div>
             </div>
@@ -2254,16 +2390,18 @@ function App() {
                 minZoom={1}
                 style={{ width: '100%', height: '100%' }}
                 scrollWheelZoom
+                zoomControl={false}
                 ref={map => { if (map) mapRef.current = map }}
               >
                 <MapTiles
-                  baseLayerId={baseLayer}
+                  baseLayerId={activeBaseLayer}
                   hillshade={hillshade}
                   hillshadeOpacity={hillshadeOpacity}
-                  onVectorFallback={handleVectorStatus}
+                  onVectorStatus={handleVectorStatus}
                   layers={terrainLayers}
                   hillshadeLayer={hillshadeLayer}
                 />
+                <ZoomControl position="bottomright" />
                 <ViewportReporter onSettle={handleViewportSettle} />
                 {creationWaypoints.map(w => (
                   <Marker
@@ -2393,6 +2531,10 @@ function App() {
               <div className="map-control-stack" data-testid="map-control-stack">
                 {renderTerrainControls(colorMode, surfaceReady)}
               </div>
+              <VectorMapDiagnostic
+                issue={activeBaseLayer === 'openfreemap' ? vectorMapIssue : null}
+                onDismiss={() => setVectorMapIssue(null)}
+              />
               {cursorReadout}
 
               {creationWaypoints.length === 0 && (
@@ -2472,6 +2614,7 @@ function App() {
                 >
                   Clear
                 </button>
+                {offlineModeAction}
                 <ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} inline />
               </div>
             </div>
@@ -2718,22 +2861,24 @@ function App() {
             )}
           </div>
 
-          <div className={`map-wrapper-with-elevation${waypointMode ? ' placing-waypoint' : ''}`}>
+          <div className={`map-wrapper-with-elevation${hasElevationData && !elevationCollapsed ? ' elevation-expanded' : ''}${waypointMode ? ' placing-waypoint' : ''}`}>
             <MapContainer
               center={[currentTrack.coordinates[0]?.lat ?? 0, currentTrack.coordinates[0]?.lon ?? 0]}
               zoom={13}
               minZoom={1}
               style={{ width: '100%', flex: 1 }}
+              zoomControl={false}
               ref={map => { if (map) mapRef.current = map }}
             >
               <MapTiles
-                baseLayerId={baseLayer}
+                baseLayerId={activeBaseLayer}
                 hillshade={hillshade}
                 hillshadeOpacity={hillshadeOpacity}
-                onVectorFallback={handleVectorStatus}
+                onVectorStatus={handleVectorStatus}
                 layers={terrainLayers}
                 hillshadeLayer={hillshadeLayer}
               />
+              <ZoomControl position="bottomright" />
               <MapClickHandler onClick={handleViewMapClick} />
 
               <ColoredTrack
@@ -2818,6 +2963,10 @@ function App() {
                 />
               )}
             </div>
+            <VectorMapDiagnostic
+              issue={activeBaseLayer === 'openfreemap' ? vectorMapIssue : null}
+              onDismiss={() => setVectorMapIssue(null)}
+            />
             {cursorReadout}
 
             {isZoomedToBar && (

@@ -566,6 +566,9 @@ func TestPrefetchReplacesThePreviousArea(t *testing.T) {
 	if done.Total != second.Total {
 		t.Errorf("progress reports %d total, want the newest request's %d", done.Total, second.Total)
 	}
+	if done.Done != second.Total {
+		t.Errorf("newest prefetch finished at %d/%d", done.Done, second.Total)
+	}
 }
 
 func TestPrefetchEndpointsReportDisabledWithoutTiles(t *testing.T) {

@@ -14,6 +14,7 @@ import type {
   PackSummary,
   RuntimeConfig,
 } from '../lib/offline'
+import { ESCAPE_PRIORITY, useEscapeDismiss } from './useEscapeDismiss'
 
 const ACTIVE_STATES = new Set(['queued', 'running', 'cancelling'])
 
@@ -150,6 +151,7 @@ export function OfflineStoragePanel({
   const [attempt, setAttempt] = useState(0)
   const packID = pack?.id
   const packStatus = pack?.status
+  useEscapeDismiss(open, () => setOpen(false), ESCAPE_PRIORITY.panel)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -232,13 +234,6 @@ export function OfflineStoragePanel({
     void refresh()
     return () => { disposed = true; controller.abort(); window.clearInterval(timer) }
   }, [packID, packStatus, runtime])
-
-  useEffect(() => {
-    if (!open) return
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
-    window.addEventListener('keydown', close)
-    return () => window.removeEventListener('keydown', close)
-  }, [open])
 
   const total = pack?.total ?? estimate?.resources ?? 0
   const done = pack?.done ?? 0

@@ -82,6 +82,15 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     fallback: OSM_THUMBNAIL_LAYER,
   },
   {
+    id: 'osm',
+    label: 'OSM',
+    title: 'OpenStreetMap Standard — raster map',
+    kind: 'raster',
+    url: OSM_THUMBNAIL_LAYER.url,
+    attribution: OSM_THUMBNAIL_LAYER.attribution,
+    maxZoom: OSM_THUMBNAIL_LAYER.maxZoom,
+  },
+  {
     id: 'topo',
     label: 'Topo',
     title: 'OpenTopoMap — contour lines and shaded relief',
@@ -152,7 +161,7 @@ export function getBaseLayerFrom(
   layers: BaseLayerDefinition[],
   id: string,
 ): BaseLayerDefinition {
-  return layers.find(layer => layer.id === id) ?? layers[0] ?? EMPTY_TILE_LAYER
+  return layers.find(layer => layer.id === id) ?? EMPTY_TILE_LAYER
 }
 
 /** Runtime routes replace only adapters explicitly advertised by the backend. */
@@ -161,28 +170,18 @@ export function runtimeTerrainLayers(runtime?: RuntimeConfig): BaseLayerDefiniti
   const osm = raster?.osm
   if (runtime?.offline?.mode === 'cache-only') {
     const layers: BaseLayerDefinition[] = []
-    const vector = BASE_LAYERS[0] as VectorBaseLayerDefinition
+    const vector = BASE_LAYERS.find(layer => layer.id === 'openfreemap') as VectorBaseLayerDefinition
     const styleUrl = runtime.maps.openfreemap?.style
     if (styleUrl) {
       layers.push({
         ...vector,
         styleUrl,
-        fallback: osm ? { ...vector.fallback, url: osm } : {
-          ...vector.fallback,
-          url: EMPTY_TILE_LAYER.url,
-          attribution: '',
-        },
+        fallback: osm ? { ...vector.fallback, url: osm } : EMPTY_TILE_LAYER,
       })
-    } else if (osm) {
-      layers.push({
-        ...EMPTY_TILE_LAYER,
-        id: vector.id,
-        label: 'OSM',
-        title: 'Cached OpenStreetMap raster map',
-        url: osm,
-        attribution: vector.fallback.attribution,
-        maxZoom: vector.fallback.maxZoom,
-      })
+    }
+    const osmLayer = BASE_LAYERS.find(layer => layer.id === 'osm')
+    if (osmLayer?.kind === 'raster' && osm) {
+      layers.push({ ...osmLayer, url: osm })
     }
 
     const topo = BASE_LAYERS.find(layer => layer.id === 'topo')
@@ -201,9 +200,9 @@ export function runtimeTerrainLayers(runtime?: RuntimeConfig): BaseLayerDefiniti
       return {
         ...layer,
         styleUrl: runtime?.maps.openfreemap?.style ?? layer.styleUrl,
-        fallback: osm ? { ...layer.fallback, url: osm } : layer.fallback,
       }
     }
+    if (layer.id === 'osm' && osm) return { ...layer, url: osm }
     if (layer.id === 'topo' && raster?.opentopo) return { ...layer, url: raster.opentopo }
     if (layer.id === 'cyclosm' && raster?.cyclosm) return { ...layer, url: raster.cyclosm }
     return layer

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -287,6 +289,118 @@ func TestPublicOpenFreeMapIsNotAdvertised(t *testing.T) {
 	rec := do(t, s, http.MethodGet, "/config", nil)
 	if strings.Contains(rec.Body.String(), `"openfreemap"`) {
 		t.Fatalf("public OpenFreeMap advertised: %s", rec.Body)
+	}
+}
+
+func TestConfiguredOpenFreeMapFailureIsDiagnosable(t *testing.T) {
+	const secret = "UPSTREAM_BODY_MUST_NOT_LEAK"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, secret)
+	}))
+	t.Cleanup(upstream.Close)
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	s, err := New(Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OpenFreeMapURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+
+	config := do(t, s, http.MethodGet, "/config", nil)
+	if !strings.Contains(config.Body.String(), `"openfreemap"`) {
+		t.Errorf("configured OpenFreeMap proxy is not advertised after activation failure: %s", config.Body)
+	}
+
+	rec := do(t, s, http.MethodGet, "/map/openfreemap/style.json", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("style status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	var payload struct {
+		Code           string `json:"code"`
+		Scope          string `json:"scope"`
+		Stage          string `json:"stage"`
+		UpstreamStatus int    `json:"upstreamStatus"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "upstream_http_status" || payload.Scope != "maps-openfreemap" ||
+		payload.Stage != "style" || payload.UpstreamStatus != http.StatusServiceUnavailable {
+		t.Errorf("style diagnostic = %+v; body=%s", payload, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), secret) || strings.Contains(logs.String(), secret) {
+		t.Fatalf("upstream body leaked: response=%s logs=%s", rec.Body, logs.String())
+	}
+	for _, field := range []string{"component=openfreemap", "stage=style", "code=upstream_http_status", "upstream_status=503"} {
+		if !strings.Contains(logs.String(), field) {
+			t.Errorf("log missing %q: %s", field, logs.String())
+		}
+	}
+}
+
+func TestOpenFreeMapTileFailureIsDiagnosableWithoutLeakingTemplateQuery(t *testing.T) {
+	const secret = "DO_NOT_LEAK_TILE_TOKEN"
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/styles/liberty":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"version":8,"sources":{"vector":{"type":"vector","tiles":[%q]}},"layers":[]}`,
+				upstream.URL+"/tiles/{z}/{x}/{y}.pbf?token="+secret)
+		case "/tiles/1/0/0.pbf":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, secret)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	s, err := New(Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OpenFreeMapURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+
+	rec := do(t, s, http.MethodGet, "/map/openfreemap/tiles/vector-0/1/0/0.pbf", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("tile status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body)
+	}
+	var payload struct {
+		Code           string `json:"code"`
+		Scope          string `json:"scope"`
+		Stage          string `json:"stage"`
+		UpstreamStatus int    `json:"upstreamStatus"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "upstream_http_status" || payload.Scope != "maps-openfreemap" ||
+		payload.Stage != "tile" || payload.UpstreamStatus != http.StatusServiceUnavailable {
+		t.Errorf("tile diagnostic = %+v; body=%s", payload, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), secret) || strings.Contains(logs.String(), secret) {
+		t.Fatalf("tile query leaked: response=%s logs=%s", rec.Body, logs.String())
+	}
+	for _, field := range []string{"component=openfreemap", "stage=tile", "code=upstream_http_status", "upstream_status=503"} {
+		if !strings.Contains(logs.String(), field) {
+			t.Errorf("log missing %q: %s", field, logs.String())
+		}
 	}
 }
 

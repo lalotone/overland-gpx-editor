@@ -176,6 +176,7 @@ type packSummary struct {
 	ID        string                          `json:"id"`
 	Name      string                          `json:"name"`
 	State     string                          `json:"state"`
+	BBox      *bbox                           `json:"bbox,omitempty"`
 	Done      int                             `json:"done"`
 	Total     int                             `json:"total"`
 	Failures  int                             `json:"failed"`
@@ -1403,7 +1404,12 @@ func clonePackResources(resources map[string]packResourceProgress) map[string]pa
 }
 
 func (m *packManager) summaryLocked(p *packManifest) packSummary {
-	return packSummary{ID: p.ID, Name: p.Name, State: p.State, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	var bounds *bbox
+	if p.Input.BBox != nil && p.Input.BBox.validate(20000, true) == nil {
+		copy := *p.Input.BBox
+		bounds = &copy
+	}
+	return packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 }
 
 func (m *packManager) publicCopyLocked(p *packManifest) packManifest {

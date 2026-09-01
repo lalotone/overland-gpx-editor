@@ -102,7 +102,7 @@ func TestOfflineReadWithoutOriginRejectsRemoteHostAndFetchMetadata(t *testing.T)
 	}
 }
 
-func TestOfflineManagementAllowsDefaultSameOriginBrowser(t *testing.T) {
+func TestOfflineManagementAllowsDefaultLoopbackBrowser(t *testing.T) {
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 	})
@@ -111,9 +111,9 @@ func TestOfflineManagementAllowsDefaultSameOriginBrowser(t *testing.T) {
 	}
 	cleanupTestServer(t, s)
 	req := httptest.NewRequest(http.MethodPost, "/offline/packs/estimate", strings.NewReader(`{"name":"trip","bbox":{"south":40,"west":-1,"north":41,"east":0},"zoomMin":1,"zoomMax":1}`))
-	req.RemoteAddr = "192.0.2.10:1"
-	req.Host = "planner.example.test"
-	req.Header.Set("Origin", "https://planner.example.test")
+	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = "localhost:8000"
+	req.Header.Set("Origin", "http://localhost:5173")
 	req.Header.Set("X-GPX-Editor", "1")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -122,14 +122,46 @@ func TestOfflineManagementAllowsDefaultSameOriginBrowser(t *testing.T) {
 		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
 	preflight := httptest.NewRequest(http.MethodOptions, "/offline/packs", nil)
-	preflight.RemoteAddr = "192.0.2.10:1"
-	preflight.Host = "planner.example.test"
-	preflight.Header.Set("Origin", "https://planner.example.test")
+	preflight.RemoteAddr = "127.0.0.1:1"
+	preflight.Host = "localhost:8000"
+	preflight.Header.Set("Origin", "http://localhost:5173")
 	preflight.Header.Set("Access-Control-Request-Headers", "content-type, x-gpx-editor")
 	preflightRec := httptest.NewRecorder()
 	s.ServeHTTP(preflightRec, preflight)
 	if preflightRec.Code != http.StatusNoContent {
 		t.Fatalf("preflight status = %d, want %d (%s)", preflightRec.Code, http.StatusNoContent, preflightRec.Body)
+	}
+}
+
+func TestOfflineManagementRejectsReboundOrForgedDefaultOrigins(t *testing.T) {
+	s, err := New(Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	body := `{"name":"trip","bbox":{"south":40,"west":-1,"north":41,"east":0},"zoomMin":1,"zoomMax":1}`
+	tests := []struct {
+		name, remote, host, origin string
+	}{
+		{"dns rebind", "127.0.0.1:1", "attacker.example.test", "https://attacker.example.test"},
+		{"forged loopback origin", "192.0.2.10:1", "localhost:8000", "http://localhost:8000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/offline/packs/estimate", strings.NewReader(body))
+			req.RemoteAddr = tt.remote
+			req.Host = tt.host
+			req.Header.Set("Origin", tt.origin)
+			req.Header.Set("X-GPX-Editor", "1")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusForbidden, rec.Body)
+			}
+		})
 	}
 }
 
@@ -217,6 +249,7 @@ func TestRemoteSameOriginFetchMetadataAllowsLegitimateDataAndMapGets(t *testing.
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		NominatimURL: "https://nominatim.example.test", HTTPClient: client,
+		AllowedOrigins: []string{"https://planner.example.test"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -235,6 +268,34 @@ func TestRemoteSameOriginFetchMetadataAllowsLegitimateDataAndMapGets(t *testing.
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("outbound calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestOutboundResourcesRejectReboundSameHostOrigin(t *testing.T) {
+	var calls atomic.Int64
+	s, err := New(Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return nil, errorsNew("unexpected transport")
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	req := httptest.NewRequest(http.MethodGet, "/places/search?q=private", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	req.Host = "attacker.example.test"
+	req.Header.Set("Origin", "https://attacker.example.test")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusForbidden, rec.Body)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("rebound request made %d outbound calls", calls.Load())
 	}
 }
 

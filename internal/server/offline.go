@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/subtle"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,12 +35,18 @@ func (s *Server) isTrustedResourceOrigin(origin string, r *http.Request) bool {
 	if normalized == s.trustedUIOrigin {
 		return true
 	}
-	u, _ := url.Parse(normalized)
-	if strings.EqualFold(u.Host, r.Host) {
-		return true
-	}
 	_, allowed := s.allowedOrigins[normalized]
-	return allowed
+	return allowed || (remoteIsLoopback(r.RemoteAddr) && loopbackOrigin(normalized))
+}
+
+func (s *Server) isAllowedResourceHost(host string) bool {
+	for origin := range s.allowedOrigins {
+		u, _ := url.Parse(origin)
+		if strings.EqualFold(u.Host, host) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) isTrustedManagementOrigin(origin string, r *http.Request) bool {
@@ -50,8 +57,7 @@ func (s *Server) isTrustedManagementOrigin(origin string, r *http.Request) bool 
 	if s.trustedUIOrigin != "" {
 		return normalized == s.trustedUIOrigin
 	}
-	u, _ := url.Parse(normalized)
-	return strings.EqualFold(u.Host, r.Host)
+	return remoteIsLoopback(r.RemoteAddr) && loopbackOrigin(normalized)
 }
 
 func (s *Server) authorizedOfflineControl(r *http.Request, requireHeader bool) bool {
@@ -157,7 +163,7 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 		Jobs       []jobAggregate            `json:"jobs"`
 		ActiveJobs int                       `json:"activeJobs"`
 	}{
-		Enabled: true, Mode: s.mode, Writable: cache.Writable, Bytes: cache.Bytes,
+		Enabled: true, Mode: s.modes.mode(), Writable: cache.Writable, Bytes: cache.Bytes,
 		MaxBytes: cache.Quota, Entries: cache.Entries, MaxEntries: s.cache.maxEntries,
 		Scopes: cache.Scopes, Cache: cache,
 		Elevation: struct {
@@ -167,6 +173,39 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 		}{legacyBytes, legacyMaxBytes, legacyEntries},
 		Providers: s.outbound.healthSnapshot(), Jobs: jobs, ActiveJobs: active.Active,
 	})
+}
+
+func (s *Server) handleOfflineMode(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Mode offlineMode `json:"mode"`
+	}
+	if err := decodeJSONBody(w, r, 4<<10, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	changed, err := s.modes.set(request.Mode)
+	if err != nil {
+		status := http.StatusBadRequest
+		if request.Mode == modeAuto && !s.modes.canToggle() {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if changed {
+		slog.Info("Offline mode changed", "mode", request.Mode)
+		if request.Mode == modeAuto && s.openFreeMap != nil && !s.openFreeMap.isActive() {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.openFreeMap.activate(s.ctx)
+			}()
+		}
+	}
+	noStoreJSON(w, http.StatusOK, struct {
+		Mode    offlineMode `json:"mode"`
+		Changed bool        `json:"changed"`
+	}{Mode: s.modes.mode(), Changed: changed})
 }
 
 func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
@@ -192,10 +231,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	type configResponse struct {
 		NominatimURL string `json:"nominatimUrl"`
 		Offline      struct {
-			Enabled bool        `json:"enabled"`
-			Mode    offlineMode `json:"mode"`
-			Status  string      `json:"status"`
-			Packs   string      `json:"packs"`
+			Enabled     bool        `json:"enabled"`
+			Mode        offlineMode `json:"mode"`
+			Status      string      `json:"status"`
+			Packs       string      `json:"packs"`
+			ModeControl string      `json:"modeControl,omitempty"`
 		} `json:"offline"`
 		Services map[string]string `json:"services"`
 		Maps     struct {
@@ -206,9 +246,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	var response configResponse
 	response.NominatimURL = s.nominatimURL
 	response.Offline.Enabled = true
-	response.Offline.Mode = s.mode
+	response.Offline.Mode = s.modes.mode()
 	response.Offline.Status = "/offline/status"
 	response.Offline.Packs = "/offline/packs"
+	if s.modes.canToggle() {
+		response.Offline.ModeControl = "/offline/mode"
+	}
 	response.Services = map[string]string{
 		"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search",
 		"valhallaRoute": "/routing/valhalla/route", "osrmRoute": "/routing/osrm/route",
@@ -219,7 +262,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"opentopo": "/map/raster/opentopo/{z}/{x}/{y}.png",
 		"cyclosm":  "/map/raster/cyclosm/{z}/{x}/{y}.png",
 	}
-	if s.openFreeMap != nil && s.openFreeMap.isActive() {
+	if s.openFreeMap != nil {
 		response.Maps.OpenFreeMap = &openFreeMapCapability{Style: "/map/openfreemap/style.json", AllowBulk: s.openFreeMap.allowBulk}
 	}
 	writeJSON(w, http.StatusOK, response)

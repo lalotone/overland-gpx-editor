@@ -114,9 +114,9 @@ area jobs, cancel active work and delete completed packs with confirmation.
 
 ## Operational Statistics
 
-`overland serve` writes a readable group of structured aggregate lines per
-minute by default. Set `--stats-log-interval` / `STATS_LOG_INTERVAL` to another
-duration, or `0` to disable it. The sections cover cache entries and bytes, get
+`overland serve` writes one aligned, human-readable aggregate table per minute
+by default. Set `--stats-log-interval` / `STATS_LOG_INTERVAL` to another duration,
+or `0` to disable it. The rows cover cache entries and bytes, get
 and response-state counts, outbound status classes and timing, current/peak
 queue pressure, Terrarium memory/disk usage and pack-state counts.
 

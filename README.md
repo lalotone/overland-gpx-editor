@@ -205,9 +205,9 @@ the selected map to another provider. See
 **[docs/OFFLINE.md](docs/OFFLINE.md)** for provider and privacy details.
 
 The server prints aggregate cache, outbound, elevation-tile and pack counters in
-labeled sections once per minute. `--stats-log-interval 0` disables them. These
-summaries contain no URLs, searches, coordinates, cache keys, response bodies or
-pack identities.
+one aligned, human-readable table per minute. `--stats-log-interval 0` disables
+it. The summaries contain no URLs, searches, coordinates, cache keys, response
+bodies or pack identities.
 
 ---
 

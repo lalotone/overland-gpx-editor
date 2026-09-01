@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -250,6 +251,122 @@ func TestCacheQuotaNeverEvictsPinsButRetentionDoes(t *testing.T) {
 	}
 	if _, ok := store.get("fuel", keyA); ok {
 		t.Fatal("pin extended mandatory retention")
+	}
+}
+
+func TestCachePinReconciliationIsExactAndIdempotent(t *testing.T) {
+	store, err := newCacheStore(t.TempDir(), 1<<20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	now := time.Now().UTC()
+	store.now = func() time.Time { return now }
+	keys := []string{
+		canonicalCacheKey("p", "s", http.MethodGet, "kept", "", nil),
+		canonicalCacheKey("p", "s", http.MethodGet, "orphaned", "", nil),
+		canonicalCacheKey("p", "s", http.MethodGet, "expired", "", nil),
+	}
+	for _, key := range keys {
+		meta := testMetadata(key, "places", now)
+		if key == keys[2] {
+			meta.StaleUntil = now.Add(time.Minute)
+		}
+		if err := store.put(meta, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for key, pin := range map[string]string{keys[0]: "old-owner", keys[1]: "ghost-owner", keys[2]: "ghost-owner"} {
+		if err := store.pin(key, pin, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.now = func() time.Time { return now.Add(2 * time.Minute) }
+	missingKey := canonicalCacheKey("p", "s", http.MethodGet, "missing", "", nil)
+	desired := map[string][]string{
+		keys[0]:     {"pack-b", "pack-a", "pack-a"},
+		keys[2]:     {"pack-a"},
+		missingKey:  {"pack-b"},
+		"not-a-key": {"pack-a"},
+	}
+	unavailable, changed, err := store.reconcilePins(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 3 {
+		t.Fatalf("changed sidecars = %d, want 3", changed)
+	}
+	for _, key := range []string{keys[2], missingKey, "not-a-key"} {
+		if _, ok := unavailable[key]; !ok {
+			t.Errorf("unavailable keys missing %q", key)
+		}
+	}
+	store.mu.Lock()
+	keptPins := append([]string(nil), store.entries[keys[0]].Pins...)
+	orphanedPins := append([]string(nil), store.entries[keys[1]].Pins...)
+	expiredPins := append([]string(nil), store.entries[keys[2]].Pins...)
+	indexedBytes := int64(0)
+	for _, meta := range store.entries {
+		indexedBytes += meta.Length + meta.metadataLength
+	}
+	store.mu.Unlock()
+	if fmt.Sprint(keptPins) != "[pack-a pack-b]" || len(orphanedPins) != 0 || len(expiredPins) != 0 {
+		t.Fatalf("reconciled pins: kept=%v orphaned=%v expired=%v", keptPins, orphanedPins, expiredPins)
+	}
+	if stats := store.stats(); stats.Bytes != indexedBytes {
+		t.Fatalf("cache bytes = %d, indexed metadata = %d", stats.Bytes, indexedBytes)
+	}
+	if _, changed, err := store.reconcilePins(desired); err != nil || changed != 0 {
+		t.Fatalf("idempotent reconciliation changed %d sidecars: %v", changed, err)
+	}
+}
+
+func TestCachePinOwnerReconciliationPreservesOtherOwners(t *testing.T) {
+	store, err := newCacheStore(t.TempDir(), 1<<20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	now := time.Now().UTC()
+	key := canonicalCacheKey("p", "s", http.MethodGet, "owned", "", nil)
+	newKey := canonicalCacheKey("p", "s", http.MethodGet, "new-owner", "", nil)
+	missingKey := canonicalCacheKey("p", "s", http.MethodGet, "missing-owner", "", nil)
+	for _, cacheKey := range []string{key, newKey} {
+		if err := store.put(testMetadata(cacheKey, "places", now), []byte("owned")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.pin(key, "pack-owner", true); err != nil {
+		t.Fatal(err)
+	}
+	ownerUnavailable, changed, err := store.reconcilePinOwner("internal-owner", []string{key, missingKey})
+	if err != nil || changed != 1 {
+		t.Fatalf("owner reconciliation changed %d sidecars: unavailable=%v err=%v", changed, ownerUnavailable, err)
+	}
+	if _, missing := ownerUnavailable[missingKey]; !missing {
+		t.Fatalf("missing key was available: %v", ownerUnavailable)
+	}
+	store.mu.Lock()
+	ownerPins := append([]string(nil), store.entries[key].Pins...)
+	store.mu.Unlock()
+	if fmt.Sprint(ownerPins) != "[internal-owner pack-owner]" {
+		t.Fatalf("owner reconciliation replaced other pins: %v", ownerPins)
+	}
+	if _, changed, err := store.addPinOwner("internal-owner", []string{newKey}); err != nil || changed != 1 {
+		t.Fatalf("owner addition changed %d sidecars: %v", changed, err)
+	}
+	store.mu.Lock()
+	oldPins := append([]string(nil), store.entries[key].Pins...)
+	newPins := append([]string(nil), store.entries[newKey].Pins...)
+	store.mu.Unlock()
+	if !containsString(oldPins, "internal-owner") || !containsString(newPins, "internal-owner") {
+		t.Fatalf("owner addition was not two-phase: old=%v new=%v", oldPins, newPins)
+	}
+	if _, changed, err := store.reconcilePinOwner("internal-owner", []string{newKey}); err != nil || changed != 1 {
+		t.Fatalf("owner replacement changed %d sidecars: %v", changed, err)
+	}
+	if _, changed, err := store.reconcilePinOwner("internal-owner", nil); err != nil || changed != 1 {
+		t.Fatalf("owner removal changed %d sidecars: %v", changed, err)
 	}
 }
 

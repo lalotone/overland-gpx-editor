@@ -158,23 +158,28 @@ type openFreeMapManager struct {
 	policy    *providerPolicy
 	allowBulk bool
 
-	mu            sync.RWMutex
-	active        bool
-	style         []byte
-	sources       map[string][]byte
-	tiles         map[string]string
-	rasters       map[string]string
-	rasterMaxZoom map[string]int
-	glyphs        string
-	sprite        string
-	primarySource string
-	coreKeys      []string
-	durableCore   bool
-	generation    string
-	cacheResponse cachedResponse
-	fontStacks    []string
-	failure       *openFreeMapFailure
+	activationMu         sync.Mutex
+	initialActivation    chan struct{}
+	initialActivationEnd sync.Once
+	mu                   sync.RWMutex
+	active               bool
+	style                []byte
+	sources              map[string][]byte
+	tiles                map[string]string
+	rasters              map[string]string
+	rasterMaxZoom        map[string]int
+	glyphs               string
+	sprite               string
+	primarySource        string
+	coreKeys             []string
+	durableCore          bool
+	generation           string
+	cacheResponse        cachedResponse
+	fontStacks           []string
+	failure              *openFreeMapFailure
 }
+
+const openFreeMapGenerationPin = "openfreemap-generation"
 
 type openFreeMapFailure struct {
 	Detail         string `json:"detail"`
@@ -203,7 +208,7 @@ type openFreeMapGeneration struct {
 func newOpenFreeMapManager(server *Server, base *url.URL, allowBulk bool) *openFreeMapManager {
 	policy := newProviderPolicy("openfreemap-compatible", "maps-openfreemap", base, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 16<<20,
 		[]string{"application/json", "application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream", "image/png", "image/jpeg", "image/webp"}, newConcurrentRateGroup(0, 4), allowBulk)
-	m := &openFreeMapManager{server: server, base: base, policy: policy, allowBulk: allowBulk}
+	m := &openFreeMapManager{server: server, base: base, policy: policy, allowBulk: allowBulk, initialActivation: make(chan struct{})}
 	m.loadGeneration()
 	return m
 }
@@ -310,6 +315,52 @@ func (m *openFreeMapManager) persistGeneration(generation openFreeMapGeneration)
 	return atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, path, raw)
 }
 
+func (m *openFreeMapManager) addDesiredPins(desired map[string][]string) {
+	m.mu.RLock()
+	durable := m.active && m.durableCore
+	keys := append([]string(nil), m.coreKeys...)
+	m.mu.RUnlock()
+	if !durable {
+		return
+	}
+	for _, key := range keys {
+		desired[key] = append(desired[key], openFreeMapGenerationPin)
+	}
+}
+
+func (m *openFreeMapManager) persistPinnedGeneration(generation openFreeMapGeneration) error {
+	m.mu.RLock()
+	previousDurable := m.durableCore
+	previousKeys := append([]string(nil), m.coreKeys...)
+	m.mu.RUnlock()
+	if !previousDurable {
+		previousKeys = nil
+	}
+	restore := func(cause error) error {
+		unavailable, _, restoreErr := m.server.cache.reconcilePinOwner(openFreeMapGenerationPin, previousKeys)
+		return errors.Join(cause, pinAvailabilityError(unavailable), restoreErr)
+	}
+	unavailable, _, err := m.server.cache.addPinOwner(openFreeMapGenerationPin, generation.CoreKeys)
+	if err != nil {
+		return restore(err)
+	}
+	if availabilityErr := pinAvailabilityError(unavailable); availabilityErr != nil {
+		return restore(availabilityErr)
+	}
+	if err := m.persistGeneration(generation); err != nil {
+		return restore(err)
+	}
+	unavailable, _, err = m.server.cache.reconcilePinOwner(openFreeMapGenerationPin, generation.CoreKeys)
+	return errors.Join(pinAvailabilityError(unavailable), err)
+}
+
+func pinAvailabilityError(unavailable map[string]struct{}) error {
+	if len(unavailable) == 0 {
+		return nil
+	}
+	return errors.New("OpenFreeMap core cache entries are unavailable")
+}
+
 func (m *openFreeMapManager) styleURL() string {
 	if strings.HasSuffix(m.base.Path, ".json") || strings.Contains(m.base.Path, "/styles/") {
 		return m.base.String()
@@ -391,6 +442,11 @@ func (m *openFreeMapManager) writeResourceFailure(w http.ResponseWriter, stage s
 }
 
 func (m *openFreeMapManager) activate(ctx context.Context) {
+	m.activationMu.Lock()
+	defer func() {
+		m.activationMu.Unlock()
+		m.initialActivationEnd.Do(func() { close(m.initialActivation) })
+	}()
 	styleURL := m.styleURL()
 	response, err := m.fetch(ctx, styleURL, "style", []string{"application/json"})
 	if err != nil {
@@ -503,8 +559,10 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 		Glyphs: glyphs, Sprite: sprite, PrimarySource: primary, CoreKeys: coreKeys, CachedAt: response.Meta.FetchedAt,
 		FontStacks: fontStacks,
 	}
-	if durableCore && m.persistGeneration(generation) != nil {
-		durableCore = false
+	if durableCore {
+		if err := m.persistPinnedGeneration(generation); err != nil {
+			durableCore = false
+		}
 	}
 	m.mu.Lock()
 	m.active = true
@@ -747,26 +805,65 @@ func (m *openFreeMapManager) isActive() bool {
 	return m.active
 }
 
-func (m *openFreeMapManager) handleStyle(w http.ResponseWriter, _ *http.Request) {
+func (m *openFreeMapManager) awaitInitialActivation(ctx context.Context) bool {
+	if m.isActive() {
+		return true
+	}
+	return m.waitForInitialActivation(ctx)
+}
+
+func (m *openFreeMapManager) waitForInitialActivation(ctx context.Context) bool {
+	select {
+	case <-m.initialActivation:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (m *openFreeMapManager) writeActivationFailure(w http.ResponseWriter) bool {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if !m.active {
-		if m.failure != nil {
-			writeJSON(w, http.StatusServiceUnavailable, *m.failure)
-		} else {
-			writeJSON(w, http.StatusServiceUnavailable, openFreeMapFailure{
-				Detail: "Configured OpenFreeMap style is not available",
-				Code:   "style_unavailable", Scope: "maps-openfreemap", Stage: "style",
-			})
+	active := m.active
+	var failure *openFreeMapFailure
+	if m.failure != nil {
+		copyFailure := *m.failure
+		failure = &copyFailure
+	}
+	m.mu.RUnlock()
+	if active {
+		return false
+	}
+	if failure == nil {
+		failure = &openFreeMapFailure{
+			Detail: "Configured OpenFreeMap style is not available",
+			Code:   "style_unavailable", Scope: "maps-openfreemap", Stage: "style",
 		}
+	}
+	writeJSON(w, http.StatusServiceUnavailable, *failure)
+	return true
+}
+
+func (m *openFreeMapManager) handleStyle(w http.ResponseWriter, r *http.Request) {
+	if !m.awaitInitialActivation(r.Context()) {
 		return
 	}
+	if m.writeActivationFailure(w) {
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	setCacheHeaders(w, m.cacheResponse)
 	w.Write(m.style)
 }
 
 func (m *openFreeMapManager) handleSource(w http.ResponseWriter, r *http.Request) {
+	if !m.awaitInitialActivation(r.Context()) {
+		return
+	}
+	if m.writeActivationFailure(w) {
+		return
+	}
 	id := strings.TrimSuffix(chi.URLParam(r, "source"), ".json")
 	m.mu.RLock()
 	if id == "" {
@@ -785,6 +882,12 @@ func (m *openFreeMapManager) handleSource(w http.ResponseWriter, r *http.Request
 }
 
 func (m *openFreeMapManager) handleTile(w http.ResponseWriter, r *http.Request, raster bool) {
+	if !m.awaitInitialActivation(r.Context()) {
+		return
+	}
+	if m.writeActivationFailure(w) {
+		return
+	}
 	id := chi.URLParam(r, "source")
 	m.mu.RLock()
 	if id == "" {
@@ -828,6 +931,12 @@ func (m *openFreeMapManager) handleTile(w http.ResponseWriter, r *http.Request, 
 var glyphRangePattern = regexp.MustCompile(`^(\d+)-(\d+)$`)
 
 func (m *openFreeMapManager) handleGlyph(w http.ResponseWriter, r *http.Request) {
+	if !m.awaitInitialActivation(r.Context()) {
+		return
+	}
+	if m.writeActivationFailure(w) {
+		return
+	}
 	font := chi.URLParam(r, "fontstack")
 	rangeValue := strings.TrimSuffix(chi.URLParam(r, "range"), ".pbf")
 	matches := glyphRangePattern.FindStringSubmatch(rangeValue)
@@ -862,6 +971,12 @@ func valueAt(values []string, index int) string {
 }
 
 func (m *openFreeMapManager) handleSprite(w http.ResponseWriter, r *http.Request) {
+	if !m.awaitInitialActivation(r.Context()) {
+		return
+	}
+	if m.writeActivationFailure(w) {
+		return
+	}
 	variant := chi.URLParam(r, "variant")
 	if variant != "sprite.json" && variant != "sprite.png" && variant != "sprite@2x.json" && variant != "sprite@2x.png" {
 		writeError(w, http.StatusNotFound, "Unknown sprite resource")
@@ -872,6 +987,10 @@ func (m *openFreeMapManager) handleSprite(w http.ResponseWriter, r *http.Request
 	base := m.sprite
 	generation := m.generation
 	m.mu.RUnlock()
+	if base == "" {
+		writeError(w, http.StatusNotFound, "Sprites are not configured")
+		return
+	}
 	accepted := []string{"image/png"}
 	if strings.HasSuffix(variant, ".json") {
 		accepted = []string{"application/json"}

@@ -221,59 +221,122 @@ func newPackManager(server *Server) (*packManager, error) {
 	if !server.cache.writable {
 		return m, nil
 	}
-	if err := server.cache.resetPins(); err != nil {
-		return nil, fmt.Errorf("reset cache pins: %w", err)
-	}
-	entries, err := fs.ReadDir(server.cache.root.FS(), filepath.ToSlash(server.cache.packsRel))
+	changed, err := m.loadStoredPacks()
 	if err != nil {
 		return nil, err
 	}
+	if err := m.pruneExcessStoredPacks(changed); err != nil {
+		return nil, err
+	}
+	desired, unavailable := m.desiredStoredPins()
+	if server.openFreeMap != nil {
+		server.openFreeMap.addDesiredPins(desired)
+	}
+	reconcileUnavailable, _, err := server.cache.reconcilePins(desired)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile cache pins: %w", err)
+	}
+	for key := range reconcileUnavailable {
+		unavailable[key] = struct{}{}
+	}
+	if err := m.persistRecoveredPacks(changed, unavailable); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (m *packManager) loadStoredPacks() (map[string]bool, error) {
+	entries, err := fs.ReadDir(m.server.cache.root.FS(), filepath.ToSlash(m.server.cache.packsRel))
+	if err != nil {
+		return nil, err
+	}
+	changed := make(map[string]bool)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !validPackID(strings.TrimSuffix(entry.Name(), ".json")) {
+		filenameID := strings.TrimSuffix(entry.Name(), ".json")
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !validPackID(filenameID) {
 			continue
 		}
-		raw, err := readFileLimitAt(server.cache.root, filepath.Join(server.cache.packsRel, entry.Name()), maxPackManifestBytes)
+		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxPackManifestBytes)
 		if err != nil {
 			continue
 		}
 		var manifest packManifest
-		if json.Unmarshal(raw, &manifest) != nil || !validPackID(manifest.ID) {
+		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(manifest.CacheKeys) > maxPackResources {
 			continue
 		}
 		if manifest.State == "running" || manifest.State == "queued" {
 			manifest.State = "incomplete"
 			manifest.ErrorCode = "interrupted"
+			changed[manifest.ID] = true
 		} else if manifest.State == "complete" && manifest.Resources == nil {
 			// Older manifests cannot prove which route resources completed. Force
 			// one safe refresh rather than exposing contradictory per-resource state.
 			manifest.State = "incomplete"
 			manifest.ErrorCode = "legacy_manifest"
+			changed[manifest.ID] = true
 		}
 		copyManifest := manifest
 		m.packs[manifest.ID] = &copyManifest
-		for _, key := range manifest.CacheKeys {
-			if err := server.cache.pin(key, manifest.ID, true); err != nil {
-				copyManifest.State = "incomplete"
-				copyManifest.ErrorCode = "missing_cache_entries"
-			}
-		}
-		if err := m.persistLocked(&copyManifest); err != nil {
-			return nil, fmt.Errorf("persist recovered pack %s: %w", manifest.ID, err)
-		}
 	}
+	return changed, nil
+}
+
+func (m *packManager) pruneExcessStoredPacks(changed map[string]bool) error {
 	for len(m.packs) > maxStoredPackManifests {
 		pruneID := m.oldestAutomaticPackLocked()
 		if pruneID == "" {
 			break
 		}
 		pruned := m.packs[pruneID]
-		if err := m.cleanupPack(pruned); err != nil {
-			return nil, fmt.Errorf("repair interrupted automatic pack replacement: %w", err)
+		if err := m.removeManifestFile(pruned.ID); err != nil {
+			return fmt.Errorf("repair interrupted automatic pack replacement: %w", err)
 		}
 		pruned.deleted = true
 		delete(m.packs, pruneID)
+		delete(changed, pruneID)
 	}
-	return m, nil
+	return nil
+}
+
+func (m *packManager) desiredStoredPins() (map[string][]string, map[string]struct{}) {
+	desired := make(map[string][]string)
+	unavailable := make(map[string]struct{})
+	for _, manifest := range m.packs {
+		seen := make(map[string]struct{}, len(manifest.CacheKeys))
+		for _, key := range manifest.CacheKeys {
+			if !validCacheKey(key) {
+				unavailable[key] = struct{}{}
+				continue
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			desired[key] = append(desired[key], manifest.ID)
+		}
+	}
+	return desired, unavailable
+}
+
+func (m *packManager) persistRecoveredPacks(changed map[string]bool, unavailable map[string]struct{}) error {
+	for _, manifest := range m.packs {
+		for _, key := range manifest.CacheKeys {
+			if _, missing := unavailable[key]; missing {
+				if manifest.State != "incomplete" || manifest.ErrorCode != "missing_cache_entries" {
+					manifest.State = "incomplete"
+					manifest.ErrorCode = "missing_cache_entries"
+					changed[manifest.ID] = true
+				}
+				break
+			}
+		}
+		if changed[manifest.ID] {
+			if err := m.persistLocked(manifest); err != nil {
+				return fmt.Errorf("persist recovered pack %s: %w", manifest.ID, err)
+			}
+		}
+	}
+	return nil
 }
 
 func validPackID(id string) bool {
@@ -304,6 +367,16 @@ func (m *packManager) persistLocked(manifest *packManifest) error {
 		return errors.New("pack manifest exceeds storage limit")
 	}
 	return atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw)
+}
+
+func (m *packManager) removeManifestFile(id string) error {
+	if !m.server.cache.writable {
+		return nil
+	}
+	if err := m.server.cache.root.Remove(filepath.Join(m.server.cache.packsRel, id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncRootDir(m.server.cache.root, m.server.cache.packsRel)
 }
 
 func validatePackInput(input packInput) (bbox, error) {
@@ -685,6 +758,10 @@ func packResponseItems(category string, body []byte) int {
 }
 
 func (m *packManager) estimate(input packInput) (packEstimate, error) {
+	return m.estimateContext(context.Background(), input)
+}
+
+func (m *packManager) estimateContext(ctx context.Context, input packInput) (packEstimate, error) {
 	bounds, err := validatePackInput(input)
 	if err != nil {
 		return packEstimate{}, err
@@ -695,6 +772,9 @@ func (m *packManager) estimate(input packInput) (packEstimate, error) {
 		case "osm", "opentopo", "cyclosm", "satellite", "relief", "hillshade":
 			estimate.Blocked = append(estimate.Blocked, blockedPackResource{Layer: layer, Reason: "public provider permits passive caching only"})
 		case "openfreemap":
+			if m.server.openFreeMap != nil && !m.server.openFreeMap.waitForInitialActivation(ctx) {
+				return packEstimate{}, ctx.Err()
+			}
 			if m.server.openFreeMap == nil || !m.server.openFreeMap.isActive() {
 				estimate.Blocked = append(estimate.Blocked, blockedPackResource{Layer: layer, Reason: "map source is not available through the offline cache"})
 				continue
@@ -948,6 +1028,10 @@ func (m *packManager) estimate(input packInput) (packEstimate, error) {
 }
 
 func (m *packManager) start(input packInput) (*packManifest, packEstimate, error) {
+	return m.startContext(context.Background(), input)
+}
+
+func (m *packManager) startContext(ctx context.Context, input packInput) (*packManifest, packEstimate, error) {
 	if !m.server.cache.writable {
 		return nil, packEstimate{}, errors.New("persistent offline cache is disabled")
 	}
@@ -956,7 +1040,7 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 	if existing := m.matchingPackLocked(input); existing != nil {
 		copyManifest := m.publicCopyLocked(existing)
 		m.mu.Unlock()
-		estimate, err := m.estimate(input)
+		estimate, err := m.estimateContext(ctx, input)
 		return &copyManifest, estimate, err
 	}
 	active, stored := m.activeLocked(), len(m.packs)
@@ -971,7 +1055,7 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 	if stored >= maxStoredPackManifests && pruneID == "" {
 		return nil, packEstimate{}, fmt.Errorf("at most %d pack manifests may be retained", maxStoredPackManifests)
 	}
-	estimate, err := m.estimate(input)
+	estimate, err := m.estimateContext(ctx, input)
 	if err != nil {
 		return nil, packEstimate{}, err
 	}
@@ -989,13 +1073,16 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 			return nil, estimate, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, estimate, err
+	}
 	id, err := newPackID()
 	if err != nil {
 		return nil, estimate, err
 	}
 	now := time.Now().UTC()
 	manifest := &packManifest{ID: id, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input}
-	ctx, cancel := context.WithTimeout(m.server.ctx, m.jobTimeout)
+	jobCtx, cancel := context.WithTimeout(m.server.ctx, m.jobTimeout)
 	manifest.cancel = cancel
 	var pruned *packManifest
 	m.mu.Lock()
@@ -1021,6 +1108,11 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 		}
 		pruned = m.packs[pruneID]
 	}
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		cancel()
+		return nil, estimate, err
+	}
 	if err := m.persistLocked(manifest); err != nil {
 		m.mu.Unlock()
 		cancel()
@@ -1044,7 +1136,7 @@ func (m *packManager) start(input packInput) (*packManifest, packEstimate, error
 	copyManifest := m.publicCopyLocked(manifest)
 	m.mu.Unlock()
 	m.server.wg.Add(1)
-	go m.run(ctx, cancel, manifest, estimate)
+	go m.run(jobCtx, cancel, manifest, estimate)
 	return &copyManifest, estimate, nil
 }
 
@@ -1454,12 +1546,7 @@ func (m *packManager) cleanupPack(p *packManifest) error {
 	for _, key := range p.CacheKeys {
 		persistenceErr = errors.Join(persistenceErr, m.server.cache.pin(key, p.ID, false))
 	}
-	if m.server.cache.writable {
-		if err := m.server.cache.root.Remove(filepath.Join(m.server.cache.packsRel, p.ID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-			persistenceErr = errors.Join(persistenceErr, err)
-		}
-		persistenceErr = errors.Join(persistenceErr, syncRootDir(m.server.cache.root, m.server.cache.packsRel))
-	}
+	persistenceErr = errors.Join(persistenceErr, m.removeManifestFile(p.ID))
 	return persistenceErr
 }
 
@@ -1473,7 +1560,7 @@ func (s *Server) handleEstimatePack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	estimate, err := s.packs.estimate(input)
+	estimate, err := s.packs.estimateContext(r.Context(), input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1487,7 +1574,7 @@ func (s *Server) handleCreatePack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	manifest, _, err := s.packs.start(input)
+	manifest, _, err := s.packs.startContext(r.Context(), input)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

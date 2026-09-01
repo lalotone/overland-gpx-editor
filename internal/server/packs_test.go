@@ -296,6 +296,160 @@ func TestFuelPackPersistsPinsAndDeleteReleasesThem(t *testing.T) {
 	}
 }
 
+func TestPackStartupReconcilesPinsBeforeLimitEnforcement(t *testing.T) {
+	cacheDir := t.TempDir()
+	config := Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		OfflineCacheMaxBytes: 32 << 20, OfflineCacheMaxEntries: 8,
+	}
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	referenced := canonicalCacheKey("p", "s", http.MethodGet, "referenced", "", nil)
+	ghostPinned := canonicalCacheKey("p", "s", http.MethodGet, "ghost-pinned", "", nil)
+	if err := s.cache.put(testMetadata(referenced, "places", now), []byte("referenced")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cache.put(testMetadata(ghostPinned, "places", now.Add(time.Second)), []byte("ghost")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cache.pin(ghostPinned, "ffffffffffffffffffffffffffffffff", true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &packManifest{
+		ID: "0123456789abcdef0123456789abcdef", Name: "retained", State: "complete",
+		CreatedAt: now, UpdatedAt: now, Done: 1, Total: 1,
+		Resources: map[string]packResourceProgress{packResourcePlaces: {Done: 1, Total: 1}},
+		CacheKeys: []string{referenced},
+	}
+	s.packs.mu.Lock()
+	err = s.packs.persistLocked(manifest)
+	s.packs.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	config.OfflineCacheMaxEntries = 1
+	config.OfflineMode = "cache-only"
+	restarted, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	restarted.cache.mu.Lock()
+	referencedMeta := restarted.cache.entries[referenced]
+	_, ghostRemains := restarted.cache.entries[ghostPinned]
+	var pins []string
+	if referencedMeta != nil {
+		pins = append(pins, referencedMeta.Pins...)
+	}
+	restarted.cache.mu.Unlock()
+	if referencedMeta == nil || ghostRemains || fmt.Sprint(pins) != "[0123456789abcdef0123456789abcdef]" {
+		t.Fatalf("reconciled startup: referenced=%v ghost=%v pins=%v", referencedMeta != nil, ghostRemains, pins)
+	}
+	if summary, ok := restarted.packs.publicManifest(manifest.ID); !ok || summary.State != "complete" {
+		t.Fatalf("restored manifest = %+v, %v", summary, ok)
+	}
+}
+
+func TestPackWarmRestartDoesNotRewriteReconciledSidecar(t *testing.T) {
+	cacheDir := t.TempDir()
+	config := Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		OfflineCacheMaxBytes: 32 << 20,
+	}
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	key := canonicalCacheKey("p", "s", http.MethodGet, "warm", "", nil)
+	if err := s.cache.put(testMetadata(key, "places", now), []byte("warm")); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &packManifest{
+		ID: "0123456789abcdef0123456789abcdef", Name: "warm", State: "complete",
+		CreatedAt: now, UpdatedAt: now, Done: 1, Total: 1,
+		Resources: map[string]packResourceProgress{packResourcePlaces: {Done: 1, Total: 1}},
+		CacheKeys: []string{key},
+	}
+	if err := s.cache.pin(key, manifest.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	s.packs.mu.Lock()
+	err = s.packs.persistLocked(manifest)
+	s.packs.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, metaPath, err := s.cache.paths("places", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Unix(946684800, 0)
+	if err := os.Chtimes(metaPath, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	info, err := os.Stat(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(fixed) {
+		t.Fatalf("warm restart rewrote unchanged sidecar: modtime=%s", info.ModTime())
+	}
+}
+
+func TestPackStartupRejectsMismatchedManifestIdentity(t *testing.T) {
+	cacheDir := t.TempDir()
+	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filenameID := "0123456789abcdef0123456789abcdef"
+	embeddedID := "fedcba9876543210fedcba9876543210"
+	manifest := packManifest{
+		ID: embeddedID, Name: "mismatch", State: "complete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Resources: map[string]packResourceProgress{packResourcePlaces: {Done: 1, Total: 1}},
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFileAt(s.cache.root, s.cache.tmpRel, filepath.Join(s.cache.packsRel, filenameID+".json"), raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if summaries := restarted.packs.summaries(); len(summaries) != 0 {
+		t.Fatalf("mismatched manifest was loaded: %+v", summaries)
+	}
+	if _, err := restarted.cache.root.Lstat(filepath.Join(restarted.cache.packsRel, embeddedID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("mismatched manifest created alternate identity: %v", err)
+	}
+}
+
 func TestLegacyCompleteManifestIsRepreparedWithoutChangingRetention(t *testing.T) {
 	cacheDir := t.TempDir()
 	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}

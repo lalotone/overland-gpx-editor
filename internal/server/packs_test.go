@@ -392,6 +392,15 @@ func TestPackHTTPContractAcceptsFrontendAliases(t *testing.T) {
 	if summary["pack"] != nil {
 		t.Fatalf("unexpected response wrapper: %v", summary)
 	}
+	bounds, ok := summary["bbox"].(map[string]any)
+	if !ok || bounds["south"] != float64(40) || bounds["west"] != float64(-1) ||
+		bounds["north"] != float64(41) || bounds["east"] != float64(0) {
+		t.Fatalf("creation response lost area bounds: %v", summary)
+	}
+	if strings.Contains(rec.Body.String(), `"input"`) || strings.Contains(rec.Body.String(), `"cacheKeys"`) ||
+		strings.Contains(rec.Body.String(), `"route"`) {
+		t.Fatalf("creation response exposed private manifest data: %s", rec.Body)
+	}
 }
 
 func TestPackStartReusesIdenticalActiveRoute(t *testing.T) {

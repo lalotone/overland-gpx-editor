@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { altitudeColor } from '../lib/terrain'
+import { ESCAPE_PRIORITY, useEscapeDismiss } from './useEscapeDismiss'
 
 /*
  * Intro animation: a topographic map drawing itself.
@@ -123,17 +124,20 @@ const FADE_MS = 480
 
 export function SplashScreen({ onDone }: { onDone: () => void }) {
   const [fading, setFading] = useState(false)
+  const onDoneRef = useRef(onDone)
+  onDoneRef.current = onDone
+  useEscapeDismiss(true, onDone, ESCAPE_PRIORITY.modal)
 
   useEffect(() => {
     const fade = setTimeout(() => setFading(true), HOLD_MS)
-    const done = setTimeout(onDone, HOLD_MS + FADE_MS)
+    const done = setTimeout(() => onDoneRef.current(), HOLD_MS + FADE_MS)
     return () => { clearTimeout(fade); clearTimeout(done) }
-  }, [onDone])
+  }, [])
 
   // Respect a reduced-motion preference by skipping straight to the app.
   useEffect(() => {
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) onDone()
-  }, [onDone])
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) onDoneRef.current()
+  }, [])
 
   return (
     <div

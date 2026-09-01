@@ -35,6 +35,20 @@ This gate includes API elevation, Terrarium misses, background prefetch and pack
 workers. The frontend does not bypass an advertised cache-only backend through
 its standalone direct-provider fallbacks.
 
+When the server starts in `auto`, the **Work offline** control changes both the
+browser's runtime service policy and the server's transport gate. Entering
+`cache-only` cancels the active network generation before the control reports
+success; new provider and Terrarium requests cannot start, while cache reads
+continue. **Go online** creates a new network generation. A server deliberately
+started with `--offline-mode cache-only` does not advertise this control and
+rejects attempts to switch online, so a browser cannot weaken operator policy.
+Server-rendered HTML carries the initial mode, so a cache-only page also starts
+closed and remains closed if its later `/config` request fails. Standalone
+frontend builds with no backend configured have no such marker and retain their
+best-effort direct mode. Setting `VITE_API_BASE` makes that remote backend
+authoritative: the bundle starts closed and does not enable direct providers
+unless backend config explicitly permits normal `auto` operation.
+
 ## Provider Policy
 
 Reviewed 28 August 2026. Provider terms can change; review the linked policies
@@ -90,12 +104,45 @@ raster basemaps. Cancellation or process restart leaves a pack incomplete;
 completed shared cache entries remain valid. A failed provider marks its own
 resource unavailable while preparation continues for unrelated resources.
 
+Explore creates the same kind of bounded pack from a drawn rectangle. Estimates
+run automatically after the bounds or options settle and remain traffic-free.
+Completed area summaries expose only their validated bbox, never the manifest's
+route, cache keys or request data. The frontend renders those bboxes as light
+coverage rectangles, restores them after reload, and shows them again whenever
+the download tool opens. The dedicated manager can hide coverage, inspect all
+area jobs, cancel active work and delete completed packs with confirmation.
+
+## Operational Statistics
+
+`overland serve` writes a readable group of structured aggregate lines per
+minute by default. Set `--stats-log-interval` / `STATS_LOG_INTERVAL` to another
+duration, or `0` to disable it. The sections cover cache entries and bytes, get
+and response-state counts, outbound status classes and timing, current/peak
+queue pressure, Terrarium memory/disk usage and pack-state counts.
+
+The summary never includes provider URLs, request paths or queries, search text,
+coordinates, response bodies, cache keys, pack IDs/names, credentials or GPX
+content. Counters are cumulative for the process; inventory and in-flight values
+describe the instant at which the group is written.
+
 ## Management Security
 
 Browser mutations require a trusted same-origin request and the
-`X-GPX-Editor` header. Separately hosted frontends must set
-`TRUSTED_UI_ORIGIN`. Requests without an `Origin` are accepted only from a
-loopback peer or with `Authorization: Bearer <OFFLINE_ADMIN_TOKEN>`. These
-checks reduce CSRF and relay abuse; they do not authenticate the rest of a
-public deployment. Keep the server on loopback or put it behind an
-authenticated reverse proxy.
+`X-GPX-Editor` header. Without configuration, management is limited to an
+actual loopback peer using a `localhost` or loopback-IP origin; matching an
+arbitrary `Host` is not enough. Every non-loopback frontend, including a public
+same-origin deployment behind a reverse proxy, must set `TRUSTED_UI_ORIGIN`.
+Requests without an `Origin` are accepted only from a loopback peer or with
+`Authorization: Bearer <OFFLINE_ADMIN_TOKEN>`. These checks reduce CSRF, DNS
+rebinding and relay abuse; they do not authenticate the rest of a public
+deployment. Keep the server on loopback or put it behind an authenticated
+reverse proxy.
+
+This boundary covers `PUT /offline/mode`, pack creation/cancellation/deletion
+and cache clearing. Read-only status and public pack summaries expose aggregate
+state only.
+
+Traffic-generating read endpoints use a related relay guard. Loopback clients
+may use loopback origins; every remote browser host must be named explicitly in
+`ALLOWED_ORIGINS` (a trusted UI origin is included automatically). Merely making
+`Origin` equal an attacker-controlled `Host` is not accepted.

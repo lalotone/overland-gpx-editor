@@ -1,11 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { maplibreGL } from '@maplibre/maplibre-gl-leaflet'
 import type { StyleSpecification } from 'maplibre-gl'
 import { Pane, TileLayer, useMap } from 'react-leaflet'
+import { resolveMapStyleResources } from '../lib/mapStyle'
 import { SERVICE_ATTRIBUTIONS, getBaseLayerFrom } from '../lib/terrain'
 import type { BaseLayerDefinition, ColorMode, ThumbnailLayerDefinition } from '../lib/terrain'
+import { ESCAPE_PRIORITY, useEscapeDismiss } from './useEscapeDismiss'
 
 let webGL2Available: boolean | undefined
+
+export type VectorMapPhase = 'webgl' | 'style' | 'initialization' | 'source' | 'tile' | 'glyph' | 'sprite'
+
+export interface VectorMapIssue {
+  phase: VectorMapPhase
+  message: string
+  status?: number
+  source?: string
+  resource?: string
+  code?: string
+}
 
 function ServiceAttributions() {
   const map = useMap()
@@ -36,90 +49,171 @@ function hasWebGL2(): boolean {
   return webGL2Available
 }
 
+function safeText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return cleaned ? cleaned.slice(0, 240) : undefined
+}
+
+function safeResource(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined
+  try {
+    const url = new URL(value, window.location.href)
+    return url.origin === window.location.origin ? url.pathname : `${url.host}${url.pathname}`
+  } catch {
+    return undefined
+  }
+}
+
+function phaseFrom(value: unknown, fallback: VectorMapPhase): VectorMapPhase {
+  return value === 'style' || value === 'source' || value === 'tile' || value === 'glyph' || value === 'sprite'
+    ? value
+    : fallback
+}
+
+async function styleResponseIssue(response: Response, styleUrl: string): Promise<VectorMapIssue> {
+  const payload = await response.clone().json().catch(() => null) as Record<string, unknown> | null
+  const phase = phaseFrom(payload?.stage, 'style')
+  const upstreamStatus = typeof payload?.upstreamStatus === 'number' ? payload.upstreamStatus : response.status
+  const detail = safeText(payload?.detail)
+  return {
+    phase,
+    status: upstreamStatus,
+    code: safeText(payload?.code),
+    resource: safeResource(styleUrl),
+    message: detail
+      ? `${detail}${detail.includes(`HTTP ${upstreamStatus}`) ? '' : ` (HTTP ${upstreamStatus})`}`
+      : `OpenFreeMap ${phase} failed with HTTP ${upstreamStatus}`,
+  }
+}
+
+function mapLibreIssue(event: unknown): VectorMapIssue {
+  const raw = typeof event === 'object' && event !== null ? event as Record<string, unknown> : {}
+  const error = typeof raw.error === 'object' && raw.error !== null ? raw.error as Record<string, unknown> : {}
+  const status = typeof error.status === 'number' ? error.status : undefined
+  const source = safeText(raw.sourceId)
+  const resource = safeResource(error.url)
+  const rawMessage = safeText(error.message)
+  const lowerMessage = rawMessage?.toLowerCase() ?? ''
+  const phase: VectorMapPhase = raw.tile
+    ? 'tile'
+    : resource?.includes('/glyph') || resource?.includes('/font')
+      ? 'glyph'
+      : resource?.includes('/sprite')
+        ? 'sprite'
+        : lowerMessage.includes('glyph') || lowerMessage.includes('font')
+          ? 'glyph'
+          : lowerMessage.includes('sprite')
+            ? 'sprite'
+        : source
+          ? 'source'
+          : 'style'
+  const label = source ? `OpenFreeMap ${phase} "${source}"` : `OpenFreeMap ${phase}`
+  const cause = status ? `HTTP ${status}` : rawMessage?.replace(/https?:\/\/\S+/g, 'remote resource') ?? 'unknown error'
+  return { phase, status, source, resource, message: `${label} failed with ${cause}` }
+}
+
 function VectorBaseLayer({
   styleUrl,
   attribution,
-  fallback,
   onStatus,
 }: {
   styleUrl: string
   attribution: string
-  fallback: ThumbnailLayerDefinition
-  onStatus?: (reason: 'webgl' | 'style' | null) => void
+  onStatus?: (issue: VectorMapIssue | null) => void
 }) {
   const map = useMap()
   const webGL2 = hasWebGL2()
   const [style, setStyle] = useState<StyleSpecification | null>(null)
-  const [styleFailed, setStyleFailed] = useState(false)
+  const lastLoggedRef = useRef('')
+
+  const reportIssue = useCallback((issue: VectorMapIssue | null) => {
+    if (!issue) {
+      lastLoggedRef.current = ''
+      onStatus?.(null)
+      return
+    }
+    const fingerprint = `${issue.phase}:${issue.status ?? ''}:${issue.source ?? ''}:${issue.message}`
+    if (lastLoggedRef.current === fingerprint) return
+    lastLoggedRef.current = fingerprint
+    onStatus?.(issue)
+    console.error(`[vector-map] ${issue.message}${issue.resource ? ` (${issue.resource})` : ''}`)
+  }, [onStatus])
 
   useEffect(() => {
     const controller = new AbortController()
     setStyle(null)
-    setStyleFailed(false)
+    reportIssue(null)
     if (!webGL2) return () => controller.abort()
-    void fetch(styleUrl, { signal: controller.signal })
-      .then(async response => {
-        if (!response.ok) throw new Error(`map style returned ${response.status}`)
+    void (async () => {
+      try {
+        const response = await fetch(styleUrl, { signal: controller.signal })
+        if (!response.ok) {
+          reportIssue(await styleResponseIssue(response, styleUrl))
+          return
+        }
         const value = await response.json() as StyleSpecification
         if (value.version !== 8 || !value.sources || !Array.isArray(value.layers)) {
-          throw new Error('map style is invalid')
+          reportIssue({
+            phase: 'style',
+            message: 'OpenFreeMap returned an invalid style document',
+            resource: safeResource(styleUrl),
+            code: 'invalid_style',
+          })
+          return
         }
-        setStyle(value)
-      })
-      .catch(reason => {
+        const absoluteStyleUrl = new URL(styleUrl, window.location.href).toString()
+        setStyle(resolveMapStyleResources(value, absoluteStyleUrl))
+      } catch (reason) {
         if ((reason as Error).name === 'AbortError') return
-        setStyleFailed(true)
-        onStatus?.('style')
-      })
+        reportIssue({
+          phase: 'style',
+          message: `OpenFreeMap style request failed: ${safeText((reason as Error).message) ?? 'network error'}`,
+          resource: safeResource(styleUrl),
+          code: 'style_request_failed',
+        })
+      }
+    })()
     return () => controller.abort()
-  }, [onStatus, styleUrl, webGL2])
+  }, [reportIssue, styleUrl, webGL2])
 
   useEffect(() => {
-    if (!webGL2 || !style || styleFailed) return
+    if (!webGL2 || !style) return
 
-    let layer
+    let layer: ReturnType<typeof maplibreGL>
     try {
       layer = maplibreGL({ style, attributionControl: false }).addTo(map)
-    } catch {
-      setStyleFailed(true)
-      onStatus?.('style')
+    } catch (reason) {
+      reportIssue({
+        phase: 'initialization',
+        message: `OpenFreeMap could not start: ${safeText((reason as Error).message) ?? 'MapLibre initialization failed'}`,
+        code: 'map_initialization_failed',
+      })
       return
     }
     const libreMap = layer.getMaplibreMap()
-    const markReady = () => onStatus?.(null)
-    const failCriticalResource = (event: unknown) => {
-      // A single unavailable tile should leave the vector map in place: other
-      // tiles still render. Style graph/source failures cannot render a map.
-      if (typeof event === 'object' && event !== null && 'tile' in event && event.tile) return
-      setStyleFailed(true)
-      onStatus?.('style')
-    }
-    libreMap.once('style.load', markReady)
-    libreMap.on('error', failCriticalResource)
+    const reportResourceFailure = (event: unknown) => reportIssue(mapLibreIssue(event))
+    libreMap.on('error', reportResourceFailure)
     map.attributionControl.addAttribution(attribution)
 
     return () => {
-      libreMap.off('style.load', markReady)
-      libreMap.off('error', failCriticalResource)
+      libreMap.off('error', reportResourceFailure)
       map.attributionControl.removeAttribution(attribution)
       if (map.hasLayer(layer)) map.removeLayer(layer)
     }
-  }, [attribution, map, onStatus, style, styleFailed, webGL2])
+  }, [attribution, map, reportIssue, style, webGL2])
 
   useEffect(() => {
-    if (!webGL2) onStatus?.('webgl')
-  }, [onStatus, webGL2])
+    if (!webGL2) {
+      reportIssue({
+        phase: 'webgl',
+        message: 'OpenFreeMap requires WebGL2, which is unavailable in this browser',
+        code: 'webgl2_unavailable',
+      })
+    }
+  }, [reportIssue, webGL2])
 
-  if (webGL2 && !styleFailed) return null
-
-  return (
-    <TileLayer
-      url={fallback.url}
-      attribution={fallback.attribution}
-      maxZoom={fallback.maxZoom}
-      maxNativeZoom={fallback.maxZoom}
-    />
-  )
+  return null
 }
 
 /**
@@ -133,14 +227,14 @@ export function MapTiles({
   baseLayerId,
   hillshade,
   hillshadeOpacity,
-  onVectorFallback,
+  onVectorStatus,
   layers,
   hillshadeLayer,
 }: {
   baseLayerId: string
   hillshade: boolean
   hillshadeOpacity: number
-  onVectorFallback?: (reason: 'webgl' | 'style' | null) => void
+  onVectorStatus?: (issue: VectorMapIssue | null) => void
   layers: BaseLayerDefinition[]
   hillshadeLayer?: ThumbnailLayerDefinition
 }) {
@@ -154,8 +248,7 @@ export function MapTiles({
           key={base.id}
           styleUrl={base.styleUrl}
           attribution={base.attribution}
-          fallback={base.fallback}
-          onStatus={onVectorFallback}
+          onStatus={onVectorStatus}
         />
       ) : (
         <TileLayer
@@ -181,6 +274,27 @@ export function MapTiles({
   )
 }
 
+export function VectorMapDiagnostic({
+  issue,
+  onDismiss,
+}: {
+  issue: VectorMapIssue | null
+  onDismiss?: () => void
+}) {
+  useEscapeDismiss(Boolean(issue && onDismiss), () => onDismiss?.(), ESCAPE_PRIORITY.passive)
+  if (!issue) return null
+  const degraded = issue.phase === 'source' || issue.phase === 'tile' || issue.phase === 'glyph' || issue.phase === 'sprite'
+  return (
+    <div className="vector-map-diagnostic" role="alert" data-testid="vector-map-diagnostic">
+      {onDismiss && <button type="button" onClick={onDismiss} aria-label="Dismiss vector map warning">&times;</button>}
+      <strong>{degraded ? 'OpenFreeMap is incomplete' : 'OpenFreeMap could not load'}</strong>
+      <span>{issue.message}</span>
+      {issue.resource && <code>{issue.resource}</code>}
+      <small>Vector remains selected. Choose another map layer manually.</small>
+    </div>
+  )
+}
+
 /** Base-map picker, relief toggle and track colouring mode. */
 export function TerrainControls({
   baseLayerId,
@@ -194,7 +308,7 @@ export function TerrainControls({
   surfaceAvailable = false,
   layers,
   hillshadeAvailable = true,
-  vectorFallbackReason = null,
+  vectorIssue = null,
 }: {
   baseLayerId: string
   onBaseLayer: (id: string) => void
@@ -208,11 +322,12 @@ export function TerrainControls({
   surfaceAvailable?: boolean
   layers: BaseLayerDefinition[]
   hillshadeAvailable?: boolean
-  vectorFallbackReason?: 'webgl' | 'style' | null
+  vectorIssue?: VectorMapIssue | null
 }) {
   const [open, setOpen] = useState(false)
   const base = getBaseLayerFrom(layers, baseLayerId)
-  const vectorFallback = base.kind === 'vector' && (vectorFallbackReason ?? (!hasWebGL2() ? 'webgl' : null))
+  const activeVectorIssue = base.kind === 'vector' ? vectorIssue : null
+  useEscapeDismiss(open, () => setOpen(false), ESCAPE_PRIORITY.panel)
 
   // Collapsed by default: the expanded panel is useful but covers a corner of
   // the map, which matters when you are reading terrain under it.
@@ -227,7 +342,7 @@ export function TerrainControls({
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <path d="M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z" />
         </svg>
-        <span className="terrain-fab-label">{vectorFallback ? 'OSM' : base.label}</span>
+        <span className="terrain-fab-label">{base.label}</span>
         {hillshade && hillshadeAvailable && <span className="terrain-fab-dot" title="Relief on" />}
       </button>
     )
@@ -292,11 +407,7 @@ export function TerrainControls({
       {base.hasContours && <div className="terrain-row terrain-note">Contour lines included</div>}
       {base.kind === 'vector' && (
         <div className="terrain-row terrain-note">
-          {vectorFallback === 'style'
-            ? 'OSM raster fallback — vector style unavailable'
-            : vectorFallback === 'webgl'
-              ? 'OSM raster fallback — WebGL2 unavailable'
-              : 'OpenFreeMap vector'}
+          {activeVectorIssue ? activeVectorIssue.message : 'OpenFreeMap vector'}
         </div>
       )}
 

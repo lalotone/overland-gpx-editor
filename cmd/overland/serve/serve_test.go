@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/lalotone/overland-gpx-editor/cmd/overland/util"
 	"github.com/urfave/cli/v3"
@@ -13,7 +14,7 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 		"ADDR", "GPX_DIR", "ELEVATION_HOST", "ELEVATION_DATASET",
 		"ELEVATION_TILES", "ELEVATION_TILE_ZOOM", "ELEVATION_TILE_CACHE",
 		"ELEVATION_TILE_CACHE_MAX_BYTES",
-		"NOMINATIM_URL", "OPENFREEMAP_URL", "OPENFREEMAP_ALLOW_BULK", "ALLOWED_ORIGINS",
+		"NOMINATIM_URL", "OPENFREEMAP_URL", "OPENFREEMAP_ALLOW_BULK", "ALLOWED_ORIGINS", "STATS_LOG_INTERVAL",
 	} {
 		t.Setenv(key, "")
 	}
@@ -54,6 +55,9 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			if got := cmd.StringSlice("allowed-origin"); len(got) != 0 {
 				t.Errorf("allowed-origin = %v, want empty", got)
 			}
+			if got := cmd.Duration("stats-log-interval"); got != time.Minute {
+				t.Errorf("stats-log-interval = %s, want 1m", got)
+			}
 			return nil
 		},
 	}
@@ -67,6 +71,19 @@ func TestElevationTileCacheQuotaEnvironment(t *testing.T) {
 	cmd := &cli.Command{Flags: Flags(), Action: func(_ context.Context, cmd *cli.Command) error {
 		if got := cmd.String("elevation-tile-cache-max-bytes"); got != "256MiB" {
 			t.Errorf("elevation-tile-cache-max-bytes = %q", got)
+		}
+		return nil
+	}}
+	if err := cmd.Run(context.Background(), []string{"test"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStatsLogIntervalEnvironment(t *testing.T) {
+	t.Setenv("STATS_LOG_INTERVAL", "15s")
+	cmd := &cli.Command{Flags: Flags(), Action: func(_ context.Context, cmd *cli.Command) error {
+		if got := cmd.Duration("stats-log-interval"); got != 15*time.Second {
+			t.Errorf("stats-log-interval = %s", got)
 		}
 		return nil
 	}}

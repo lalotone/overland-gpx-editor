@@ -38,7 +38,10 @@ src/
 ├── components/                 Presentational React components
 │   ├── ColoredTrack.tsx        Full-resolution track, run-length coloured
 │   ├── ElevationProfile.tsx    Profile chart, hover, range selection
+│   ├── ExploreScreen.tsx       Search, POIs, area packs and coverage
 │   ├── MapLayers.tsx           Base tiles, hillshade pane, terrain controls
+│   ├── OfflineAreaPanel.tsx    Drawn-area options, estimate and start
+│   ├── OfflineAreasPanel.tsx   Saved-area management and visibility
 │   ├── SplashScreen.tsx        Generated topographic intro
 │   └── TrackCard.tsx           Library card with route thumbnail
 └── lib/                        Pure logic — no React, no DOM*
@@ -47,6 +50,8 @@ src/
     ├── gpx.ts                  Parsing and GPX 1.1 writing
     ├── edit.ts                 Trim, split, stages, simplify, smooth
     ├── elevation.ts            Batched DEM lookups
+    ├── offline.ts              Runtime policy, status and pack client
+    ├── mapStyle.ts             Safe style-resource URL resolution
     ├── fuel.ts                 Spanish official fuel prices
     ├── routing.ts              Valhalla costing and fallbacks
     ├── surface.ts              Per-segment surface via trace_attributes
@@ -68,7 +73,8 @@ internal/server/
 ├── data_endpoints.go           Narrow fuel/place/POI/routing adapters
 ├── maps.go                     Approved raster and compatible-style adapters
 ├── packs.go                    Trip-pack estimates, manifests and workers
-└── offline.go                  Capabilities, status and management security
+├── offline.go                  Capabilities, status and management security
+└── telemetry.go                Privacy-safe aggregate operational logs
 web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
 
@@ -137,12 +143,24 @@ routine logs. Bodies and JSON sidecars are written atomically with private
 permissions, indexed on startup and bounded by byte and entry quotas. Provider
 descriptors decide freshness, stale replay, retention, body/content limits,
 pack eligibility and shared request queues. `cache-only` resolves disk/memory
-first and returns a typed miss before any outbound transport can run.
+first and returns a typed miss before any outbound transport can run. A
+generation-based controller linearises runtime mode changes with transport
+starts: switching offline cancels and drains the current generation before the
+management response returns, and only startup `auto` mode may create a new
+online generation later.
 
 Trip packs are manifests of references to shared cache objects plus explicitly
 eligible work such as Terrarium corridor tiles. Public map adapters cannot be
 made pack-eligible by a browser request. Interrupted jobs restart as incomplete
-and require an explicit new action.
+and require an explicit new action. Public summaries contain a validated bbox
+for rectangular packs but omit route coordinates, cache keys and raw input.
+
+`telemetry.go` periodically snapshots cumulative aggregate counters and current
+inventory. It reports cache bytes/hits/misses, response states, outbound status
+classes/timing/queue pressure, Terrarium cache use and pack-state counts. It
+does not inspect or emit request identities, URLs, provider payloads or pack
+identities. The loop belongs to the server context and exits before `Close`
+returns.
 
 Coordinates are parsed and range-checked before they reach an upstream URL, and
 requests are chunked to the 100-point limit both services impose, then stitched
@@ -174,6 +192,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |
+| `PUT /offline/mode` | Protected runtime transition between `auto` and `cache-only` when startup policy permits |
 | `/offline/packs` | Estimate, create, inspect, cancel and delete trip packs |
 | `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope |
 | `GET /healthz` | Lightweight liveness check; returns 204 |
@@ -197,6 +216,27 @@ be visible.
 `App.tsx` owns screens and state; everything under `components/` is
 presentational.
 
+Explore owns its area-pack polling and downloaded-coverage visibility. Opening
+the area tool enables completed coverage, estimates are aborted and regenerated
+when bounds/options change, and the manager scales independently from the map
+control stack. Pack summaries are fetched again when Explore remounts, so saved
+rectangles survive navigation and reload without browser persistence.
+
+MapLibre runs inside Leaflet through `MapLayers.tsx`. A fetched style graph is
+resolved against its style URL before MapLibre sees it, including root-relative
+sprite, glyph, source, tile and GeoJSON resources while preserving URL template
+tokens. Structured style/source/tile/WebGL failures are dismissible and
+deduplicated. They never silently replace OpenFreeMap with a raster provider;
+the user must choose a different layer explicitly.
+
+When the Go server serves `index.html`, it injects a meta value containing only
+the current offline mode. This closes the pre-`/config` startup window: a
+server-started cache-only UI begins without direct providers and uses that
+embedded policy as the fallback if config loading fails. A standalone Vite
+bundle with no `VITE_API_BASE` has no marker and keeps its deliberate
+backend-optional behavior. Supplying `VITE_API_BASE` declares an authoritative
+remote backend, so that bundle also starts closed until config succeeds.
+
 Two rules that have each been a bug already:
 
 - **The filename is a track's identity, not its GPX `<name>`.** Cards are
@@ -214,6 +254,7 @@ Two rules that have each been a bug already:
 make check          # everything below, plus go vet, gofmt, tsc, eslint
 npm run verify      # logic harness
 go test ./internal/...
+npm run test:e2e    # Playwright desktop and mobile Chromium projects
 ```
 
 `npm run verify` is the one that matters when touching parsing, elevation maths
@@ -230,9 +271,10 @@ checks still run.
 
 The Go tests cover the backend's own traps: path-traversal refusal, chunking in
 the elevation proxy, result alignment when a DEM returns fewer points than
-asked for, the dataset allowlist, and both provider dialects.
-
-There is no browser test setup. UI changes need looking at by hand.
+asked for, the dataset allowlist, provider dialects, no-network transitions and
+telemetry privacy. Playwright covers the production browser boundary, including
+desktop/mobile vector failure diagnostics, manual offline switching, trip-pack
+readiness and downloaded-area restoration.
 
 > [!TIP]
 > `go test ./...` also matches a stray Go package inside `node_modules`. Use

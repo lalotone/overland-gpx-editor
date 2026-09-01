@@ -4,15 +4,13 @@ import type { Page, Route } from '@playwright/test'
 const STYLE = {
   version: 8,
   sources: {
-    transient: {
-      type: 'raster',
-      tiles: ['/e2e/transient/{z}/{x}/{y}.png'],
-      tileSize: 256,
+    fixture: {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
     },
   },
   layers: [
     { id: 'background', type: 'background', paint: { 'background-color': '#dce8df' } },
-    { id: 'transient', type: 'raster', source: 'transient' },
   ],
 }
 
@@ -22,6 +20,32 @@ const BROKEN_SOURCE_STYLE = {
   layers: [
     { id: 'background', type: 'background', paint: { 'background-color': '#dce8df' } },
     { id: 'roads', type: 'line', source: 'roads', 'source-layer': 'roads' },
+  ],
+}
+
+const BROKEN_TILE_STYLE = {
+  version: 8,
+  sources: {
+    roads: {
+      type: 'vector',
+      tiles: ['/e2e/vector/{z}/{x}/{y}.pbf'],
+      minzoom: 0,
+      maxzoom: 14,
+    },
+  },
+  layers: [
+    { id: 'background', type: 'background', paint: { 'background-color': '#dce8df' } },
+    { id: 'roads', type: 'line', source: 'roads', 'source-layer': 'roads' },
+  ],
+}
+
+const PROXIED_STYLE = {
+  version: 8,
+  sprite: '/map/openfreemap/sprite',
+  glyphs: '/map/openfreemap/glyphs/{fontstack}/{range}.pbf',
+  sources: {},
+  layers: [
+    { id: 'background', type: 'background', paint: { 'background-color': '#dce8df' } },
   ],
 }
 
@@ -47,83 +71,202 @@ async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function mockRuntime(page: Page, options: { style?: object; elevationUnavailable?: boolean } = {}) {
+async function mockRuntime(page: Page, options: {
+  style?: object
+  styleFailure?: { status: number; body: Record<string, unknown> }
+  elevationUnavailable?: boolean
+  webGL2Unavailable?: boolean
+  startupCacheOnly?: boolean
+  vectorMissDuringOfflineTransition?: boolean
+} = {}) {
   let started = false
+  let offlineMode: 'auto' | 'cache-only' = options.startupCacheOnly ? 'cache-only' : 'auto'
+  let osmRequests = 0
+  let vectorRequests = 0
+  let placeRequests = 0
   let packRequest: Record<string, unknown> | undefined
+  const pendingVectorRoutes: Route[] = []
   const activeResources = options.elevationUnavailable
     ? Object.fromEntries(Object.entries(resourceProgress).filter(([key]) => key !== 'elevation'))
     : resourceProgress
-  const total = Object.values(activeResources).reduce((sum, progress) => sum + progress.total, 0)
-  const pack = (state: 'queued' | 'complete') => ({
-    id: '0123456789abcdef0123456789abcdef',
-    name: 'Route: Browser trip',
-    state,
-    done: state === 'complete' ? total : 0,
-    total,
-    failed: 0,
-    bytes: state === 'complete' ? 24000 : 0,
-    resources: state === 'complete'
-      ? activeResources
-      : Object.fromEntries(Object.entries(activeResources).map(([key, value]) => [key, { ...value, done: 0, bytes: 0, items: 0 }])),
-    createdAt: '2026-08-31T12:00:00Z',
-    updatedAt: '2026-08-31T12:00:01Z',
-  })
+  const mapResources = {
+    'vector-map': resourceProgress['vector-map'],
+    places: { done: 1, total: 1, failed: 0, bytes: 900, items: 1 },
+  }
+  const isMapPack = () => String(packRequest?.name ?? '').startsWith('Map: ')
+  const pack = (state: 'queued' | 'complete') => {
+    const resources = isMapPack() ? mapResources : activeResources
+    const total = Object.values(resources).reduce((sum, progress) => sum + progress.total, 0)
+    const requestedBounds = Array.isArray(packRequest?.bbox) ? packRequest.bbox as number[] : null
+    return {
+      id: '0123456789abcdef0123456789abcdef',
+      name: String(packRequest?.name ?? 'Route: Browser trip'),
+      state,
+      done: state === 'complete' ? total : 0,
+      total,
+      failed: 0,
+      bytes: state === 'complete' ? 24000 : 0,
+      resources: state === 'complete'
+        ? resources
+        : Object.fromEntries(Object.entries(resources).map(([key, value]) => [key, { ...value, done: 0, bytes: 0, items: 0 }])),
+      ...(requestedBounds?.length === 4 ? { bbox: {
+        south: requestedBounds[0], west: requestedBounds[1], north: requestedBounds[2], east: requestedBounds[3],
+      } } : {}),
+      createdAt: '2026-08-31T12:00:00Z',
+      updatedAt: '2026-08-31T12:00:01Z',
+    }
+  }
 
-  await page.addInitScript(() => {
+  await page.addInitScript(({ webGL2Unavailable }) => {
     localStorage.setItem('gpx-hillshade', 'off')
-    localStorage.setItem('gpx-base-layer', 'openfreemap')
-  })
+    if (!localStorage.getItem('gpx-base-layer')) localStorage.setItem('gpx-base-layer', 'openfreemap')
+    if (webGL2Unavailable) {
+      const original = HTMLCanvasElement.prototype.getContext
+      HTMLCanvasElement.prototype.getContext = function (type: string, ...args: unknown[]) {
+        if (type === 'webgl2') return null
+        return original.call(this, type, ...args as [])
+      } as typeof HTMLCanvasElement.prototype.getContext
+    }
+  }, { webGL2Unavailable: options.webGL2Unavailable === true })
   await page.route(/\/config$/, route => json(route, {
-    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs' },
-    services: {},
+    offline: {
+      enabled: true,
+      mode: offlineMode,
+      status: '/offline/status',
+      packs: '/offline/packs',
+      ...(options.startupCacheOnly ? {} : { modeControl: '/offline/mode' }),
+    },
+    services: { places: '/places/search' },
     maps: { raster: { osm: '/e2e/osm/{z}/{x}/{y}.png' }, openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
   }))
   await page.route(/\/files$/, route => json(route, { files: [] }))
   await page.route(/\/upload$/, route => json(route, { filename: 'browser-trip.gpx' }, 201))
   await page.route(/\/elevation\/prefetch$/, route => json(route, { done: 0, total: 0, state: 'complete' }))
-  await page.route(/\/map\/openfreemap\/style\.json$/, route => json(route, options.style ?? STYLE))
-  await page.route(/\/e2e\/transient\//, route => route.fulfill({ status: 503, body: 'temporary tile failure' }))
-  await page.route(/\/e2e\/source\.json$/, route => route.fulfill({ status: 503, body: 'source unavailable' }))
-  await page.route(/\/e2e\/osm\//, route => route.fulfill({
+  await page.route(/\/map\/openfreemap\/style\.json$/, route => options.styleFailure
+    ? json(route, options.styleFailure.body, options.styleFailure.status)
+    : json(route, options.style ?? STYLE))
+  await page.route(/\/map\/openfreemap\/sprite(?:@2x)?\.json$/, route => json(route, {}))
+  await page.route(/\/map\/openfreemap\/sprite(?:@2x)?\.png$/, route => route.fulfill({
     status: 200,
     contentType: 'image/png',
     body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
   }))
+  await page.route(/\/e2e\/transient\//, route => route.fulfill({ status: 503, body: 'temporary tile failure' }))
+  await page.route(/\/e2e\/source\.json$/, route => route.fulfill({ status: 503, body: 'source unavailable' }))
+  await page.route(/\/e2e\/vector\//, route => {
+    vectorRequests++
+    if (options.vectorMissDuringOfflineTransition && offlineMode === 'auto') {
+      pendingVectorRoutes.push(route)
+      return
+    }
+    return route.fulfill({
+      status: offlineMode === 'cache-only' ? 504 : 503,
+      contentType: 'application/json',
+      body: offlineMode === 'cache-only'
+        ? JSON.stringify({ code: 'offline_cache_miss', detail: 'resource is not available in the offline cache' })
+        : JSON.stringify({ detail: 'tile unavailable' }),
+    })
+  })
+  await page.route(/\/e2e\/osm\//, route => {
+    osmRequests++
+    return route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+    })
+  })
+  await page.route(/\/places\/search/, route => {
+    placeRequests++
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { 'X-GPX-Cache': 'hit', Age: '120' },
+      body: JSON.stringify([{
+        place_id: 123456,
+        display_name: 'Vitoria-Gasteiz, Araba, Euskadi, España',
+        lat: '42.8467',
+        lon: '-2.6726',
+        boundingbox: ['42.80', '42.90', '-2.75', '-2.58'],
+        class: 'place',
+        type: 'city',
+      }]),
+    })
+  })
   await page.route(/\/offline\/packs\/estimate$/, async route => {
     packRequest = route.request().postDataJSON() as Record<string, unknown>
     if (options.elevationUnavailable && (packRequest.scopes as string[]).includes('elevation')) {
       await json(route, { detail: 'elevation packs require Terrarium tile mode with a persistent tile cache' }, 400)
       return
     }
+    const estimatedResources = isMapPack() ? mapResources : activeResources
+    const total = Object.values(estimatedResources).reduce((sum, progress) => sum + progress.total, 0)
     await json(route, {
       resources: total,
       estimatedBytes: 24000,
       remainingQuota: 1000000,
-      counts: {
-        'openfreemap-core': 1,
-        openfreemap: 2,
-        ...(options.elevationUnavailable ? {} : { elevation: 2 }),
-        'pois-fuel': 1,
-        'pois-water': 1,
-        'pois-camp': 1,
-        fuel: 1,
-      },
+      counts: isMapPack()
+        ? {
+            'openfreemap-core': 1,
+            openfreemap: 2,
+            ...((packRequest.scopes as string[]).includes('places') ? { places: 1 } : {}),
+            ...((packRequest.scopes as string[]).includes('elevation') ? { elevation: 2 } : {}),
+          }
+        : {
+            'openfreemap-core': 1,
+            openfreemap: 2,
+            ...(options.elevationUnavailable ? {} : { elevation: 2 }),
+            'pois-fuel': 1,
+            'pois-water': 1,
+            'pois-camp': 1,
+            fuel: 1,
+          },
       blocked: [],
       scopes: {},
     })
   })
+  await page.route(/\/offline\/mode$/, async route => {
+    const request = route.request().postDataJSON() as { mode?: string }
+    offlineMode = request.mode === 'cache-only' ? 'cache-only' : 'auto'
+    if (offlineMode === 'cache-only') {
+      const pending = pendingVectorRoutes.splice(0)
+      await Promise.all(pending.map(vectorRoute => vectorRoute.fulfill({
+        status: 504,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'offline_cache_miss', detail: 'resource is not available in the offline cache' }),
+      })))
+    }
+    await json(route, { mode: offlineMode, changed: true })
+  })
+  await page.route(/\/offline\/status$/, route => json(route, {
+    mode: offlineMode,
+    writable: true,
+    bytes: started ? 24000 : 0,
+    maxBytes: 1000000,
+    entries: started ? 4 : 0,
+    scopes: {},
+    providers: {},
+    jobs: [],
+  }))
   await page.route(/\/offline\/packs$/, async route => {
     if (route.request().method() === 'POST') {
+      packRequest = route.request().postDataJSON() as Record<string, unknown>
       started = true
       await json(route, pack('queued'), 202)
       return
     }
     await json(route, started ? [pack('complete')] : [])
   })
-  await page.route(/\/offline\/packs\/[a-f0-9]{32}$/, route => route.fulfill({ status: 204 }))
+  await page.route(/\/offline\/packs\/[a-f0-9]{32}$/, route => {
+    started = false
+    return route.fulfill({ status: 204 })
+  })
 
   return {
+    getOsmRequests: () => osmRequests,
     getPackRequest: () => packRequest,
+    getPlaceRequests: () => placeRequests,
+    getOfflineMode: () => offlineMode,
+    getVectorRequests: () => vectorRequests,
   }
 }
 
@@ -141,6 +284,15 @@ async function expectStackedBelow(upper: ReturnType<Page['locator']>, lower: Ret
   expect(Math.abs((upperBox!.x + upperBox!.width) - (lowerBox!.x + lowerBox!.width))).toBeLessThan(4)
 }
 
+async function expectFloatingAbove(upper: ReturnType<Page['locator']>, lower: ReturnType<Page['locator']>) {
+  await expect.poll(async () => {
+    const upperBox = await upper.boundingBox()
+    const lowerBox = await lower.boundingBox()
+    if (!upperBox || !lowerBox) return -1
+    return lowerBox.y - upperBox.y - upperBox.height
+  }).toBeGreaterThanOrEqual(8)
+}
+
 test('creation mode renders the selected OFM vector layer', async ({ page }) => {
   await mockRuntime(page)
   await page.goto('/')
@@ -149,14 +301,241 @@ test('creation mode renders the selected OFM vector layer', async ({ page }) => 
   await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
 })
 
-test('a critical OFM source failure reports and renders the raster fallback', async ({ page }) => {
-  await mockRuntime(page, { style: BROKEN_SOURCE_STYLE })
+test('manual offline mode can be toggled while the server is connected', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('gpx-base-layer', 'satellite'))
+  const runtime = await mockRuntime(page)
+  await page.goto('/')
+
+  const toggle = page.getByTestId('offline-mode-toggle')
+  await expect(toggle).toContainText('Work offline')
+  const externalRequests: string[] = []
+  const appOrigin = new URL(page.url()).origin
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.origin !== appOrigin && url.protocol !== 'data:' && url.protocol !== 'blob:') {
+      externalRequests.push(request.url())
+    }
+  })
+  await toggle.click()
+  await expect(toggle).toContainText('Go online')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  expect(runtime.getOfflineMode()).toBe('cache-only')
+
+  await page.getByRole('button', { name: 'Explore map' }).click()
+  await expectVectorMap(page)
+  expect(externalRequests).toEqual([])
+
+  await toggle.click()
+  await expect(toggle).toContainText('Work offline')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  expect(runtime.getOfflineMode()).toBe('auto')
+})
+
+test('notifications stack at the bottom center', async ({ page }) => {
+  const runtime = await mockRuntime(page)
+  await page.goto('/')
+
+  const toggle = page.getByTestId('offline-mode-toggle')
+  await toggle.click()
+  await expect.poll(runtime.getOfflineMode).toBe('cache-only')
+  await toggle.click()
+  await expect.poll(runtime.getOfflineMode).toBe('auto')
+
+  const container = page.locator('.notification-container')
+  const notifications = container.locator('.notification')
+  await expect(notifications).toHaveCount(2)
+  const boxes = await notifications.evaluateAll(elements => elements.map(element => {
+    const box = element.getBoundingClientRect()
+    return { top: box.top, bottom: box.bottom }
+  }))
+  expect(boxes[1].top).toBeGreaterThanOrEqual(boxes[0].bottom + 9)
+
+  const containerBox = await container.boundingBox()
+  const viewport = page.viewportSize()
+  expect(containerBox).not.toBeNull()
+  expect(viewport).not.toBeNull()
+  expect(Math.abs(containerBox!.x + containerBox!.width / 2 - viewport!.width / 2)).toBeLessThan(2)
+  const bottomGap = viewport!.height - containerBox!.y - containerBox!.height
+  expect(bottomGap).toBeGreaterThanOrEqual(18)
+  expect(bottomGap).toBeLessThanOrEqual(32)
+})
+
+test('startup cache-only replaces a persisted online-only map without external traffic', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('gpx-base-layer', 'satellite'))
+  await mockRuntime(page, { startupCacheOnly: true })
+  const requests: string[] = []
+  page.on('request', request => requests.push(request.url()))
+  await page.goto('/')
+
+  const toggle = page.getByTestId('offline-mode-toggle')
+  await expect(toggle).toContainText('Offline')
+  await expect(toggle).toBeDisabled()
+  await page.getByRole('button', { name: 'Explore map' }).click()
+  await expectVectorMap(page)
+
+  const appOrigin = new URL(page.url()).origin
+  expect(requests.filter(raw => {
+    const url = new URL(raw)
+    return url.origin !== appOrigin && url.protocol !== 'data:' && url.protocol !== 'blob:'
+  })).toEqual([])
+})
+
+test('cache-only vector tile misses do not show an error diagnostic', async ({ page }) => {
+  const runtime = await mockRuntime(page, {
+    style: BROKEN_TILE_STYLE,
+    vectorMissDuringOfflineTransition: true,
+  })
   await page.goto('/')
   await page.getByRole('button', { name: 'Plan a route' }).click()
+
+  await expectVectorMap(page)
+  await expect.poll(runtime.getVectorRequests).toBeGreaterThan(0)
+  await page.getByTestId('offline-mode-toggle').click()
+  await expect.poll(runtime.getOfflineMode).toBe('cache-only')
+  await expect(page.getByTestId('vector-map-diagnostic')).toHaveCount(0)
+  await expect(page.locator('.notification-error')).toHaveCount(0)
+})
+
+test('server-relative OFM resources do not produce a false style failure', async ({ page }) => {
+  const vectorLogs: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error' && message.text().startsWith('[vector-map]')) vectorLogs.push(message.text())
+  })
+  await mockRuntime(page, { style: PROXIED_STYLE })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+
+  await expectVectorMap(page)
+  await page.waitForTimeout(500)
+  await expect(page.getByTestId('vector-map-diagnostic')).toHaveCount(0)
+  expect(vectorLogs).toEqual([])
+})
+
+test('Escape dismisses planner overlays', async ({ page }) => {
+  await mockRuntime(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+  await expectVectorMap(page)
+
+  const search = page.getByPlaceholder('Search village or place…')
+  await search.fill('Vitoria-Gasteiz')
+  await search.press('Enter')
+  await expect(page.locator('.place-results')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.place-results')).toHaveCount(0)
+
+  const addPlace = page.getByRole('button', { name: 'Add place' })
+  await addPlace.click()
+  await expect(page.getByRole('button', { name: 'Click the map…' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(addPlace).toBeVisible()
+
+  await page.locator('.terrain-fab').click()
+  await expect(page.locator('.terrain-controls')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.terrain-controls')).toHaveCount(0)
+
+  const fullMap = page.locator('.map-full-toggle')
+  await fullMap.click()
+  await expect(page.locator('.creation-screen')).toHaveClass(/creation-screen--full/)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.creation-screen')).not.toHaveClass(/creation-screen--full/)
+})
+
+test('a critical OFM source failure stays vector until raster is manually selected', async ({ page }) => {
+  const vectorLogs: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error' && message.text().startsWith('[vector-map]')) vectorLogs.push(message.text())
+  })
+  const runtime = await mockRuntime(page, { style: BROKEN_SOURCE_STYLE })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+
+  await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
+  await expect(page.locator('.maplibregl-canvas')).toBeVisible()
+  const diagnostic = page.getByTestId('vector-map-diagnostic')
+  await expect(diagnostic).toBeVisible()
+  await expect(diagnostic).toContainText('OpenFreeMap is incomplete')
+  await expect(diagnostic).toContainText('HTTP 503')
+  await expect(diagnostic).toContainText('roads')
+  await expect(diagnostic).toContainText(/choose another map layer manually/i)
+  await expect(page.locator('.leaflet-tile-pane img[src*="/e2e/osm/"]')).toHaveCount(0)
+  expect(runtime.getOsmRequests()).toBe(0)
+  await expect.poll(() => vectorLogs.some(message => message.includes('HTTP 503') && message.includes('roads'))).toBe(true)
+
+  await page.keyboard.press('Escape')
+  await expect(diagnostic).toHaveCount(0)
+  await page.waitForTimeout(500)
+  await expect(page.getByTestId('vector-map-diagnostic')).toHaveCount(0)
+
+  await page.locator('.terrain-fab').click()
+  await page.getByRole('button', { name: 'OSM', exact: true }).click()
+  await expect(page.locator('.leaflet-tile-pane img[src*="/e2e/osm/"]').first()).toBeVisible()
+  expect(runtime.getOsmRequests()).toBeGreaterThan(0)
+  expect(await page.evaluate(() => localStorage.getItem('gpx-base-layer'))).toBe('osm')
+  await expect(diagnostic).toHaveCount(0)
+
+  await page.reload()
+  await page.getByRole('button', { name: 'Plan a route' }).click()
   await expect(page.locator('.terrain-fab-label')).toHaveText('OSM')
-  await expect(page.getByText(/vector map style is unavailable/i)).toBeVisible()
   await expect(page.locator('.maplibregl-canvas')).toHaveCount(0)
   await expect(page.locator('.leaflet-tile-pane img[src*="/e2e/osm/"]').first()).toBeVisible()
+})
+
+test('an OFM style HTTP failure reports the backend reason without selecting raster', async ({ page }) => {
+  const vectorLogs: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error' && message.text().startsWith('[vector-map]')) vectorLogs.push(message.text())
+  })
+  const runtime = await mockRuntime(page, {
+    styleFailure: {
+      status: 503,
+      body: {
+        detail: 'Map proxy is unavailable',
+        code: 'upstream_http_status',
+        scope: 'maps-openfreemap',
+        stage: 'style',
+        upstreamStatus: 503,
+      },
+    },
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+
+  const diagnostic = page.getByTestId('vector-map-diagnostic')
+  await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
+  await expect(page.locator('.maplibregl-canvas')).toHaveCount(0)
+  await expect(diagnostic).toContainText('Map proxy is unavailable')
+  await expect(diagnostic).toContainText('OpenFreeMap could not load')
+  await expect(diagnostic).toContainText('HTTP 503')
+  await expect(diagnostic.locator('code')).toHaveText('/map/openfreemap/style.json')
+  expect(runtime.getOsmRequests()).toBe(0)
+  await expect.poll(() => vectorLogs.some(message => message.includes('Map proxy is unavailable') && message.includes('HTTP 503'))).toBe(true)
+})
+
+test('failed OFM vector tiles are diagnosed without replacing the vector canvas', async ({ page }) => {
+  const runtime = await mockRuntime(page, { style: BROKEN_TILE_STYLE })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+
+  const diagnostic = page.getByTestId('vector-map-diagnostic')
+  await expect(page.locator('.maplibregl-canvas')).toBeVisible()
+  await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
+  await expect(diagnostic).toContainText('OpenFreeMap tile "roads"')
+  await expect(diagnostic).toContainText('OpenFreeMap is incomplete')
+  await expect(diagnostic).toContainText('HTTP 503')
+  expect(runtime.getOsmRequests()).toBe(0)
+})
+
+test('missing WebGL2 leaves OFM selected and never starts raster tiles', async ({ page }) => {
+  const runtime = await mockRuntime(page, { webGL2Unavailable: true })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+
+  await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
+  await expect(page.locator('.maplibregl-canvas')).toHaveCount(0)
+  await expect(page.getByTestId('vector-map-diagnostic')).toContainText('WebGL2')
+  expect(runtime.getOsmRequests()).toBe(0)
 })
 
 test('unavailable elevation leaves other route resources prepared', async ({ page }) => {
@@ -189,6 +568,26 @@ test('loading a GPX automatically prepares and reports route resources', async (
   })
 
   await expectVectorMap(page)
+  const zoomControl = page.locator('.map-wrapper-with-elevation .leaflet-control-zoom')
+  const zoomIn = zoomControl.locator('.leaflet-control-zoom-in')
+  const profile = page.locator('.elevation-profile')
+  await expect(profile).toHaveClass(/collapsed/)
+  await expectFloatingAbove(zoomControl, profile)
+  const zoomBeforeHover = await zoomIn.boundingBox()
+  await zoomIn.hover()
+  const zoomAfterHover = await zoomIn.boundingBox()
+  expect(zoomBeforeHover).not.toBeNull()
+  expect(zoomAfterHover).not.toBeNull()
+  expect(Math.abs(zoomAfterHover!.width - zoomBeforeHover!.width)).toBeLessThan(1)
+  expect(Math.abs(zoomAfterHover!.height - zoomBeforeHover!.height)).toBeLessThan(1)
+
+  await profile.locator('.elevation-profile-header').click()
+  await expect(profile).not.toHaveClass(/collapsed/)
+  await expectFloatingAbove(zoomControl, profile)
+  await page.keyboard.press('Escape')
+  await expect(profile).toHaveClass(/collapsed/)
+  await expectFloatingAbove(zoomControl, profile)
+
   const terrainButton = page.locator('.terrain-fab')
   const offlineButton = page.getByTestId('offline-route-button')
   await expect(offlineButton).toContainText('Offline ready')
@@ -214,4 +613,184 @@ test('loading a GPX automatically prepares and reports route resources', async (
   const readyRing = panel.locator('.offline-progress-ring.is-ready')
   await expect(readyRing).toHaveCSS('border-radius', '50%')
   await expect(readyRing.locator('.offline-progress-ring-value')).toHaveCSS('filter', 'none')
+
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  await expect(page.locator('.terrain-controls')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.terrain-controls')).toHaveCount(0)
+
+  const tools = page.getByRole('button', { name: 'Tools' })
+  await tools.click()
+  const editTools = page.locator('.edit-toolbar')
+  await expect(editTools).toBeVisible()
+  await editTools.getByRole('button', { name: 'Select range' }).click()
+  await expect(profile).not.toHaveClass(/collapsed/)
+  await page.keyboard.press('Escape')
+  await expect(editTools.getByRole('button', { name: 'Select range' })).toBeVisible()
+  await expect(editTools).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(profile).toHaveClass(/collapsed/)
+  await expect(editTools).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(editTools).toHaveCount(0)
+
+  const waypoint = page.getByRole('button', { name: 'Waypoint' })
+  await waypoint.click()
+  await expect(page.getByRole('button', { name: 'Click the map…' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(waypoint).toBeVisible()
+})
+
+test('explore caches deliberate place searches and downloads a drawn map area', async ({ page }) => {
+  const runtime = await mockRuntime(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Explore map' }).click()
+
+  await expect(page.getByTestId('explore-screen')).toBeVisible()
+  await expectVectorMap(page)
+  expect(runtime.getPlaceRequests()).toBe(0)
+
+  const actions = page.locator('.explore-actions')
+  const topButtons = [
+    page.locator('.explore-home'),
+    actions.getByTestId('offline-area-button'),
+    actions.getByTestId('offline-areas-button'),
+    actions.locator('.offline-coverage-toggle'),
+    actions.getByTestId('offline-mode-toggle'),
+    actions.locator('.theme-toggle'),
+  ]
+  for (const button of topButtons) {
+    await expect(button).toBeVisible()
+    await expect(button).toHaveCSS('border-radius', '12px')
+  }
+  const topButtonHeights = await Promise.all(topButtons.map(button => button.evaluate(element => element.getBoundingClientRect().height)))
+  expect(new Set(topButtonHeights).size).toBe(1)
+
+  await page.locator('.terrain-fab').click()
+  await expect(page.locator('.terrain-controls')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.terrain-controls')).toHaveCount(0)
+
+  await page.getByTestId('offline-area-button').click()
+  await expect(page.getByTestId('offline-area-panel')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('offline-area-panel')).toHaveCount(0)
+
+  const search = page.getByRole('searchbox', { name: 'Search OpenStreetMap places' })
+  await search.fill('Vitoria-Gasteiz')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  const result = page.getByRole('option', { name: /Vitoria-Gasteiz/ })
+  await expect(result).toBeVisible()
+  await expect(page.locator('.explore-search-status em')).toHaveText('cached')
+  expect(runtime.getPlaceRequests()).toBe(1)
+
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox', { name: 'Place results' })).toHaveCount(0)
+
+  await search.fill('  vitoria-gasteiz  ')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  await expect(result).toBeVisible()
+  expect(runtime.getPlaceRequests()).toBe(1)
+  await result.click()
+  await expect(page.locator('.explore-place-card')).toContainText('Vitoria-Gasteiz')
+  expect(parseFloat(await page.locator('.explore-place-card strong').evaluate(element => getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(16)
+  await expect(page.getByRole('listbox', { name: 'Place results' })).toHaveCount(0)
+  await expect(page.locator('.leaflet-bottom.leaflet-right .leaflet-control-zoom')).toBeVisible()
+
+  await page.locator('.leaflet-marker-icon').click()
+  await expect(page.locator('.leaflet-popup')).toBeVisible()
+  await page.getByTestId('offline-area-button').click()
+  await expect(page.getByTestId('offline-area-panel')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.leaflet-popup')).toHaveCount(0)
+  await expect(page.getByTestId('offline-area-panel')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('offline-area-panel')).toHaveCount(0)
+
+  await page.getByTestId('offline-area-button').click()
+  const panel = page.getByTestId('offline-area-panel')
+  await expect(panel).toBeVisible()
+  await panel.getByRole('button', { name: 'Draw area' }).click()
+  await expect(panel).toHaveCount(0)
+
+  await expect(page.locator('.explore-selection-hint')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.explore-selection-hint')).toHaveCount(0)
+  await page.getByTestId('offline-area-button').click()
+  await page.getByTestId('offline-area-panel').getByRole('button', { name: 'Draw area' }).click()
+
+  const mapBox = await page.getByTestId('explore-map').boundingBox()
+  expect(mapBox).not.toBeNull()
+  await page.mouse.move(mapBox!.x + mapBox!.width * 0.18, mapBox!.y + mapBox!.height * 0.28)
+  await page.mouse.down()
+  await page.mouse.move(mapBox!.x + mapBox!.width * 0.54, mapBox!.y + mapBox!.height * 0.55, { steps: 8 })
+  await page.mouse.up()
+
+  const selectedPanel = page.getByTestId('offline-area-panel')
+  await expect(selectedPanel).toContainText('Area selected')
+  await expect(page.getByTestId('offline-area-estimate')).toBeVisible()
+  await expect(selectedPanel.getByRole('button', { name: /estimate/i })).toHaveCount(0)
+
+  const estimatedRequest = runtime.getPackRequest()
+  const bbox = estimatedRequest?.bbox as number[]
+  expect(bbox).toHaveLength(4)
+  expect(bbox.every(Number.isFinite)).toBe(true)
+  expect(bbox[0]).toBeLessThan(bbox[2])
+
+  await selectedPanel.getByRole('button', { name: 'Download area' }).click()
+  expect(runtime.getPackRequest()).toMatchObject({
+    name: 'Map: Vitoria-Gasteiz',
+    paddingKm: 0,
+    layers: ['openfreemap'],
+    scopes: ['places'],
+  })
+  await expect(page.getByTestId('offline-area-progress')).toContainText('Available offline')
+  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(1)
+  await expect(selectedPanel).toContainText('Exact place searches')
+  expect(runtime.getPlaceRequests()).toBe(1)
+
+  await page.keyboard.press('Escape')
+  await expect(selectedPanel).toHaveCount(0)
+  await expect(page.locator('.explore-place-card')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.explore-place-card')).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Hide downloaded areas' }).click()
+  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(0)
+  await page.getByTestId('offline-area-button').click()
+  await page.getByTestId('offline-area-button').click()
+  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(1)
+
+  await page.evaluate(() => localStorage.setItem('gpx-explore-view', JSON.stringify({ lat: 0, lon: 0, zoom: 3 })))
+  await page.reload()
+  await page.getByRole('button', { name: 'Explore map' }).click()
+  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(1)
+
+  const currentView = () => page.evaluate(() => JSON.parse(localStorage.getItem('gpx-explore-view') ?? '{}') as { lat?: number; lon?: number })
+  await expect.poll(async () => (await currentView()).lat).toBeCloseTo(0, 1)
+
+  await page.getByRole('button', { name: /Downloaded areas/ }).click()
+  const manager = page.getByRole('region', { name: 'Downloaded areas' })
+  await expect(manager).toContainText('Vitoria-Gasteiz')
+  await manager.getByRole('button', { name: 'View Vitoria-Gasteiz on map' }).click()
+  await expect(manager).toHaveCount(0)
+  await expect.poll(async () => (await currentView()).lat).toBeCloseTo((bbox[0] + bbox[2]) / 2, 1)
+  await expect.poll(async () => (await currentView()).lon).toBeCloseTo((bbox[1] + bbox[3]) / 2, 1)
+
+  await page.getByRole('button', { name: /Downloaded areas/ }).click()
+  await page.keyboard.press('Escape')
+  await expect(manager).toHaveCount(0)
+  await page.getByRole('button', { name: /Downloaded areas/ }).click()
+  const removeArea = manager.getByRole('button', { name: 'Remove Vitoria-Gasteiz' })
+  await expect(removeArea.locator('svg')).toBeVisible()
+  await expect(removeArea).toHaveText('')
+  await removeArea.click()
+  await expect(manager.getByRole('button', { name: 'Confirm removal' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(manager).toBeVisible()
+  await expect(manager.getByRole('button', { name: 'Confirm removal' })).toHaveCount(0)
+  await removeArea.click()
+  await manager.getByRole('button', { name: 'Confirm removal' }).click()
+  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(0)
 })

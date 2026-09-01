@@ -78,6 +78,74 @@ func TestDataServicesWarmRestartCacheOnlyScenario(t *testing.T) {
 	}
 }
 
+func TestRuntimeOfflineModeToggleGatesOutboundRequests(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `[{"place_id":1,"display_name":%q,"lat":"1","lon":"2"}]`, r.URL.Query().Get("q"))
+	}))
+	t.Cleanup(upstream.Close)
+	s, err := New(Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		NominatimURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+
+	config := do(t, s, http.MethodGet, "/config", nil)
+	if !strings.Contains(config.Body.String(), `"modeControl":"/offline/mode"`) {
+		t.Fatalf("config did not advertise runtime mode control: %s", config.Body)
+	}
+
+	setMode := func(mode string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/offline/mode", strings.NewReader(`{"mode":"`+mode+`"}`))
+		req.RemoteAddr = "127.0.0.1:1"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-GPX-Editor", "1")
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := setMode("cache-only"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"mode":"cache-only"`) {
+		t.Fatalf("enable cache-only = %d %s", rec.Code, rec.Body)
+	}
+	miss := do(t, s, http.MethodGet, "/places/search?q=uncached", nil)
+	if miss.Code != http.StatusGatewayTimeout || calls.Load() != 0 {
+		t.Fatalf("runtime cache-only miss = %d calls=%d body=%s", miss.Code, calls.Load(), miss.Body)
+	}
+	status := do(t, s, http.MethodGet, "/offline/status", nil)
+	if !strings.Contains(status.Body.String(), `"mode":"cache-only"`) {
+		t.Fatalf("status did not reflect runtime mode: %s", status.Body)
+	}
+
+	if rec := setMode("auto"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"mode":"auto"`) {
+		t.Fatalf("restore auto = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, s, http.MethodGet, "/places/search?q=online", nil); rec.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("restored online request = %d calls=%d body=%s", rec.Code, calls.Load(), rec.Body)
+	}
+}
+
+func TestStartupCacheOnlyModeCannotBeOverriddenOnline(t *testing.T) {
+	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineMode: "cache-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	if config := do(t, s, http.MethodGet, "/config", nil); strings.Contains(config.Body.String(), `"modeControl"`) {
+		t.Fatalf("startup cache-only mode advertised an online override: %s", config.Body)
+	}
+	rec := do(t, s, http.MethodPut, "/offline/mode", strings.NewReader(`{"mode":"auto"}`))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("startup cache-only override = %d, want %d (%s)", rec.Code, http.StatusConflict, rec.Body)
+	}
+}
+
 func TestPlaceCacheKeyPreservesTheForwardedQueryCase(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

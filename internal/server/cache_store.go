@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,6 +75,8 @@ type cacheStore struct {
 	now             func() time.Time
 	admissionWindow time.Time
 	admissions      int
+	getHits         atomic.Uint64
+	getMisses       atomic.Uint64
 }
 
 func (s *cacheStore) setReservedBytes(bytes int64) error {
@@ -435,12 +438,14 @@ func checksum(body []byte) string {
 
 func (s *cacheStore) get(scope, key string) (*cacheEntry, bool) {
 	if !s.writable {
+		s.getMisses.Add(1)
 		return nil, false
 	}
 	s.mu.Lock()
 	meta, ok := s.entries[key]
 	if !ok || meta.Scope != scope {
 		s.mu.Unlock()
+		s.getMisses.Add(1)
 		return nil, false
 	}
 	copyMeta := *meta
@@ -450,11 +455,13 @@ func (s *cacheStore) get(scope, key string) (*cacheEntry, bool) {
 
 	bodyPath, _, err := s.relativePaths(scope, key)
 	if err != nil {
+		s.getMisses.Add(1)
 		return nil, false
 	}
 	body, err := readFileLimitAt(s.root, bodyPath, copyMeta.Length)
 	if err != nil || int64(len(body)) != copyMeta.Length || checksum(body) != copyMeta.Checksum {
 		_ = s.remove(scope, key)
+		s.getMisses.Add(1)
 		return nil, false
 	}
 
@@ -463,6 +470,7 @@ func (s *cacheStore) get(scope, key string) (*cacheEntry, bool) {
 		current.LastAccess = s.now().UTC()
 	}
 	s.mu.Unlock()
+	s.getHits.Add(1)
 	return &cacheEntry{Meta: copyMeta, Body: body}, true
 }
 
@@ -909,6 +917,8 @@ type cacheStats struct {
 	Quota    int64                     `json:"quota"`
 	Reserved int64                     `json:"reservedBytes"`
 	Entries  int                       `json:"entries"`
+	Hits     uint64                    `json:"hits"`
+	Misses   uint64                    `json:"misses"`
 	Scopes   map[string]cacheScopeStat `json:"scopes"`
 }
 
@@ -921,7 +931,7 @@ type cacheScopeStat struct {
 func (s *cacheStore) stats() cacheStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stats := cacheStats{Writable: s.writable, Bytes: s.bytes, Quota: s.maxBytes, Reserved: s.reserved, Entries: len(s.entries), Scopes: map[string]cacheScopeStat{}}
+	stats := cacheStats{Writable: s.writable, Bytes: s.bytes, Quota: s.maxBytes, Reserved: s.reserved, Entries: len(s.entries), Hits: s.getHits.Load(), Misses: s.getMisses.Load(), Scopes: map[string]cacheScopeStat{}}
 	for _, meta := range s.entries {
 		scope := stats.Scopes[meta.Scope]
 		scope.Bytes += meta.Length + meta.metadataLength

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -570,6 +571,16 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
 		t.Errorf("index Cache-Control = %q, want no-cache", cc)
+	}
+	if !strings.Contains(rec.Body.String(), `name="gpx-editor-offline-mode" content="auto"`) {
+		t.Fatalf("index did not bootstrap auto policy: %s", rec.Body)
+	}
+	if _, err := s.modes.set(modeCacheOnly); err != nil {
+		t.Fatal(err)
+	}
+	rec = do(t, s, http.MethodGet, "/", nil)
+	if !strings.Contains(rec.Body.String(), `name="gpx-editor-offline-mode" content="cache-only"`) {
+		t.Fatalf("index did not bootstrap cache-only policy: %s", rec.Body)
 	}
 
 	rec = do(t, s, http.MethodGet, "/assets/index-abc.js", nil)

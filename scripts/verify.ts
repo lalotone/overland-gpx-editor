@@ -39,9 +39,11 @@ const {
   FUEL_PRICE_ENDPOINT,
 } = await import('../src/lib/fuel')
 const { createRateLimitedFetch } = await import('../src/lib/rateLimit')
-const { NOMINATIM_REQUEST_INTERVAL_MS } = await import('../src/lib/geocoding')
+const { resolveMapStyleResources } = await import('../src/lib/mapStyle')
+const { NOMINATIM_REQUEST_INTERVAL_MS, searchPlaces } = await import('../src/lib/geocoding')
 const { calculateRoute, FOSSGIS_REQUEST_INTERVAL_MS } = await import('../src/lib/routing')
 const {
+  getBaseLayerFrom,
   getThumbnailLayer,
   runtimeHillshadeLayer,
   runtimeTerrainLayers,
@@ -56,6 +58,7 @@ const { clearedRouteDerivedState, routeSequenceIsCurrent } = await import('../sr
 const {
   buildAutomaticPackRequest,
   buildPackEstimateRequest,
+  bootstrapRuntimeConfig,
   decodePacks,
   decodePackEstimate,
   decodeOfflineStatus,
@@ -64,12 +67,14 @@ const {
   formatBytes,
   formatCacheContext,
   loadRuntimeConfig,
+  normalizePackBounds,
   OfflineCacheMissError,
   packRequestSignature,
   parseCacheMetadata,
   resolveApiUrl,
   responseError,
   selectRuntimeTransport,
+  setRuntimeOfflineMode,
   syncPackLayers,
   validPackArea,
 } = await import('../src/lib/offline')
@@ -423,6 +428,10 @@ check('filename slug strips accents and spaces',
     `${arctic.widthKm.toFixed(0)} km vs ${equator.widthKm.toFixed(0)} km`)
   check('north-south span does not vary with latitude',
     Math.abs(arctic.heightKm - equator.heightKm) < 1e-9)
+  const antimeridian = boundingBoxSpanKm({ south: -0.5, west: 179, north: 0.5, east: -179 })
+  check('area dimensions use the short antimeridian span',
+    antimeridian.widthKm > 200 && antimeridian.widthKm < 230,
+    `${antimeridian.widthKm.toFixed(0)} km`)
 
   // boundsAround pads outwards; it must never come back inverted.
   const padded = boundsAround([{ lat: 41.6, lon: -0.9 }, { lat: 41.7, lon: -0.8 }], 5)!
@@ -593,6 +602,31 @@ console.log(`\nPublic-service policy checks\n${'='.repeat(78)}`)
 console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 
 {
+  const resolved = resolveMapStyleResources({
+    version: 8,
+    sprite: '/map/openfreemap/sprite',
+    glyphs: '/map/openfreemap/glyphs/{fontstack}/{range}.pbf',
+    sources: {
+      roads: { type: 'vector', url: './source.json', tiles: ['/tiles/{z}/{x}/{y}.pbf'] },
+      places: { type: 'geojson', data: './places.geojson' },
+    },
+    layers: [],
+  } as Parameters<typeof resolveMapStyleResources>[0], 'https://maps.example.test/styles/liberty.json')
+  const value = resolved as unknown as {
+    sprite: string
+    glyphs: string
+    sources: Record<string, { url?: string; tiles?: string[]; data?: string }>
+  }
+  check('fetched map styles resolve root-relative sprites and glyph templates',
+    value.sprite === 'https://maps.example.test/map/openfreemap/sprite' &&
+      value.glyphs === 'https://maps.example.test/map/openfreemap/glyphs/{fontstack}/{range}.pbf')
+  check('fetched map styles resolve source, tile, and GeoJSON resource URLs',
+    value.sources.roads.url === 'https://maps.example.test/styles/source.json' &&
+      value.sources.roads.tiles?.[0] === 'https://maps.example.test/tiles/{z}/{x}/{y}.pbf' &&
+      value.sources.places.data === 'https://maps.example.test/styles/places.geojson')
+}
+
+{
   const cleared = clearedRouteDerivedState()
   check('route reset removes geometry and route information',
     cleared.coordinates.length === 0 && cleared.durationSeconds === null &&
@@ -618,6 +652,7 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       mode: 'cache-only',
       status: '/offline/status',
       packs: '/offline/packs',
+      modeControl: '/offline/mode',
     },
     services: {
       fuel: '/fuel',
@@ -631,7 +666,7 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
         opentopo: '/map/raster/opentopo/{z}/{x}/{y}.png',
         cyclosm: null,
       },
-      openfreemap: { style: '/map/openfreemap/style.json' },
+      openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true },
     },
   }, 'https://backend.example.test/api')
 
@@ -647,12 +682,29 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       runtime.services.pois === undefined)
   check('config decoding keeps cache-only mode', runtime.offline?.mode === 'cache-only')
   check('config decoding resolves management routes',
-    runtime.offline?.packs === 'https://backend.example.test/api/offline/packs')
+    runtime.offline?.packs === 'https://backend.example.test/api/offline/packs' &&
+      runtime.offline.modeControl === 'https://backend.example.test/api/offline/mode')
+  let modeRequest: { url?: string; method?: string; body?: string } = {}
+  const changedMode = await setRuntimeOfflineMode(runtime, 'auto', async (input, init) => {
+    modeRequest = { url: String(input), method: init?.method, body: String(init?.body) }
+    return new Response('{"mode":"auto","changed":true}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  check('runtime offline changes use the protected advertised endpoint',
+    changedMode === 'auto' && modeRequest.url === 'https://backend.example.test/api/offline/mode' &&
+      modeRequest.method === 'PUT' && modeRequest.body === '{"mode":"auto"}')
 
   const standalone = decodeRuntimeConfig(null, '')
   const direct = selectRuntimeTransport(standalone, 'places', 'https://public.example.test/search')
   check('missing backend preserves direct provider fallback',
     direct.kind === 'direct' && direct.url === 'https://public.example.test/search')
+  const remoteBootstrap = bootstrapRuntimeConfig('https://backend.example.test/api')
+  check('a separately hosted frontend fails closed until backend config loads',
+    remoteBootstrap.offline?.mode === 'cache-only' &&
+      selectRuntimeTransport(remoteBootstrap, 'places', 'https://public.example.test/search').kind === 'unavailable' &&
+      runtimeTerrainLayers(remoteBootstrap).length === 0)
 
   const unreachable = await loadRuntimeConfig('/api', undefined, async () => {
     throw new TypeError('backend down')
@@ -660,6 +712,15 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('unreachable config decodes as standalone behavior',
     unreachable.offline === undefined &&
       selectRuntimeTransport(unreachable, 'places', 'https://public.example.test/search').kind === 'direct')
+
+  const embeddedCacheOnly = decodeRuntimeConfig({ offline: { enabled: true, mode: 'cache-only' } }, '/api')
+  const unavailableManaged = await loadRuntimeConfig('/api', undefined, async () => {
+    throw new TypeError('backend config unavailable')
+  }, embeddedCacheOnly)
+  check('server-rendered cache-only policy survives config failure',
+    unavailableManaged.offline?.mode === 'cache-only' &&
+      selectRuntimeTransport(unavailableManaged, 'places', 'https://public.example.test/search').kind === 'unavailable' &&
+      runtimeTerrainLayers(unavailableManaged).length === 0)
 
   const backend = selectRuntimeTransport(runtime, 'fuel', 'https://public.example.test/fuel')
   check('an advertised backend endpoint is selected first',
@@ -669,13 +730,16 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 
   const layers = runtimeTerrainLayers(runtime)
   const vector = layers.find(layer => layer.id === 'openfreemap')
+  const osm = layers.find(layer => layer.id === 'osm')
   const topo = layers.find(layer => layer.id === 'topo')
   const trails = layers.find(layer => layer.id === 'cyclosm')
   check('runtime OpenFreeMap style uses the advertised backend URL',
     vector?.kind === 'vector' && vector.styleUrl === 'https://backend.example.test/api/map/openfreemap/style.json')
-  check('runtime OSM thumbnail template is preserved and resolved',
-    vector?.kind === 'vector' &&
-      vector.fallback.url === 'https://backend.example.test/api/map/raster/osm/{z}/{x}/{y}.png')
+  check('runtime config preserves explicit OpenFreeMap bulk permission',
+    runtime.maps.openfreemap?.allowBulk === true)
+  check('runtime OSM is an explicit manual raster layer',
+    osm?.kind === 'raster' && osm.url === 'https://backend.example.test/api/map/raster/osm/{z}/{x}/{y}.png' &&
+      vector?.kind === 'vector' && vector.fallback.url === 'https://backend.example.test/api/map/raster/osm/{z}/{x}/{y}.png')
   check('cache-only omits unadvertised raster maps',
     topo?.kind === 'raster' && topo.url.includes('backend.example.test/api/map/raster/opentopo/') &&
       trails === undefined && !layers.some(layer => layer.id === 'satellite' || layer.id === 'relief'))
@@ -691,9 +755,11 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     offline: { enabled: true, mode: 'cache-only' },
     maps: { raster: { osm: '/map/osm/{z}/{x}/{y}.png' } },
   }, 'https://backend.example.test'))
-  check('cache-only uses advertised OSM when OpenFreeMap is absent',
-    osmOnly[0]?.id === 'openfreemap' && osmOnly[0].kind === 'raster' &&
+  check('cache-only offers advertised OSM without impersonating OpenFreeMap',
+    osmOnly[0]?.id === 'osm' && osmOnly[0].kind === 'raster' &&
       osmOnly[0].url.startsWith('https://backend.example.test/'))
+  check('an unavailable selected vector layer never silently resolves to raster',
+    getBaseLayerFrom(osmOnly, 'openfreemap').id === 'unavailable')
 
   const noMaps = runtimeTerrainLayers(decodeRuntimeConfig({
     offline: { enabled: true, mode: 'cache-only' },
@@ -701,6 +767,80 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('cache-only with no advertised maps exposes no network layer', noMaps.length === 0)
   check('an empty cache-only layer set has a non-network thumbnail fallback',
     getThumbnailLayer('openfreemap', noMaps).url.startsWith('data:'))
+}
+
+{
+  const runtime = decodeRuntimeConfig({
+    offline: { enabled: true, mode: 'auto' },
+    services: { places: '/places/search' },
+  }, 'https://backend.example.test')
+  const backendRequests: string[] = []
+  let replayedMetadata = ''
+  const backendFetch: typeof fetch = async input => {
+    backendRequests.push(String(input))
+    return new Response(JSON.stringify([
+      {
+        place_id: 987654,
+        display_name: 'Verification Place, Aragón, España',
+        lat: '41.654',
+        lon: '-0.877',
+        boundingbox: ['41.60', '41.70', '-0.95', '-0.80'],
+        class: 'place',
+        type: 'town',
+      },
+      { place_id: 2, display_name: 'Malformed result', lat: 'not-a-coordinate', lon: '-0.8' },
+    ]), {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GPX-Cache': 'hit',
+      },
+    })
+  }
+  const managed = await searchPlaces('Verification Place 987654', undefined, 'https://public.example.test', {
+    runtime,
+    fetcher: backendFetch,
+  })
+  const managedURL = new URL(backendRequests[0])
+  check('place search uses the advertised managed endpoint',
+    backendRequests.length === 1 && managedURL.origin === 'https://backend.example.test' &&
+      managedURL.pathname === '/places/search' && managedURL.searchParams.get('q') === 'Verification Place 987654')
+  check('place search validates coordinates and preserves useful result bounds',
+    managed.length === 1 && managed[0].lat === 41.654 && managed[0].lon === -0.877 &&
+      managed[0].bounds?.south === 41.6 && managed[0].bounds?.east === -0.8 &&
+      managed[0].category === 'place' && managed[0].type === 'town')
+
+  const cached = await searchPlaces('  verification   place 987654 ', undefined, 'https://public.example.test', {
+    runtime,
+    fetcher: backendFetch,
+    onCacheMetadata: metadata => { replayedMetadata = metadata.state },
+  })
+  check('equivalent place queries reuse their browser cache and cache metadata',
+    backendRequests.length === 1 && cached === managed && replayedMetadata === 'hit')
+
+  const directRequests: string[] = []
+  await searchPlaces('Verification Place 987654', undefined, 'https://public.example.test', {
+    runtime: decodeRuntimeConfig(null),
+    fetcher: async input => {
+      directRequests.push(String(input))
+      return new Response('[]', { headers: { 'Content-Type': 'application/json' } })
+    },
+  })
+  const directURL = new URL(directRequests[0])
+  check('managed and direct place transports never share browser cache entries',
+    directRequests.length === 1 && directURL.origin === 'https://public.example.test' &&
+      directURL.pathname === '/search' && directURL.searchParams.get('format') === 'jsonv2')
+
+  let overlongError = ''
+  try {
+    await searchPlaces('é'.repeat(101), undefined, 'https://public.example.test', {
+      runtime: decodeRuntimeConfig(null),
+      fetcher: backendFetch,
+    })
+  } catch (error) {
+    overlongError = (error as Error).message
+  }
+  check('place search applies the backend UTF-8 query limit before fetching',
+    overlongError.includes('200 bytes') && backendRequests.length === 1)
 }
 
 {
@@ -1002,6 +1142,23 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 }
 
 {
+  const ordinaryBounds = normalizePackBounds(
+    { lat: 42.2, lon: 1.4 },
+    { lat: 41.8, lon: -0.7 },
+  )
+  const crossingBounds = normalizePackBounds(
+    { lat: 10, lon: 170 },
+    { lat: 11, lon: 190 },
+  )
+  check('drawn map bounds are ordered and preserved in Web Mercator range',
+    ordinaryBounds?.south === 41.8 && Math.abs((ordinaryBounds?.west ?? 0) + 0.7) < 1e-10 &&
+      ordinaryBounds.north === 42.2 && Math.abs((ordinaryBounds?.east ?? 0) - 1.4) < 1e-10)
+  check('drawn map bounds preserve a short antimeridian crossing',
+    crossingBounds?.west === 170 && crossingBounds.east === -170)
+  check('degenerate and world-spanning map selections are rejected',
+    normalizePackBounds({ lat: 1, lon: 2 }, { lat: 1, lon: 3 }) === null &&
+      normalizePackBounds({ lat: -10, lon: -180 }, { lat: 10, lon: 180 }) === null)
+
   check('pack area follows delayed route availability until the user chooses',
     validPackArea(null, false) === 'bbox' && validPackArea(null, true) === 'route')
   check('pack area remains valid when a preferred route disappears',
@@ -1040,6 +1197,14 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('pack request building captures the selected area only',
     routeRequest?.route?.length === 2 && routeRequest.bbox === undefined &&
       bboxRequest?.bbox?.join(',') === '41,-1,42,0' && bboxRequest.route === undefined)
+  check('pack request building rejects invalid provider and coordinate inputs',
+    buildPackEstimateRequest({
+      name: 'Invalid layer', area: 'bbox', route: [], bbox: { south: 41, west: -1, north: 42, east: 0 },
+      paddingKm: 0, minZoom: 8, maxZoom: 14, layers: ['unknown'], scopes: [],
+    }) === null && buildPackEstimateRequest({
+      name: 'Invalid latitude', area: 'bbox', route: [], bbox: { south: -90, west: -1, north: 42, east: 0 },
+      paddingKm: 0, minZoom: 8, maxZoom: 14, layers: ['openfreemap'], scopes: ['places'],
+    }) === null)
   check('pack signatures invalidate estimates when the full area changes',
     packRequestSignature(routeRequest) !== packRequestSignature(bboxRequest))
   check('pack signatures treat layer and scope order as equivalent',
@@ -1072,11 +1237,19 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 
   const packs = decodePacks([{
     id: 'pack-1', state: 'complete', done: 1, total: 1,
+    bbox: { south: 41, west: 179, north: 42, east: -179 },
     resources: { water: { done: 1, total: 1, failed: 0, bytes: 42, items: 3 } },
   }])
   check('pack summaries preserve per-resource progress and item counts',
     packs[0]?.resources.water?.done === 1 && packs[0]?.resources.water?.bytes === 42 &&
       packs[0]?.resources.water?.items === 3)
+  check('pack summaries preserve validated antimeridian area bounds',
+    (packs[0] as { bbox?: { south: number; west: number; north: number; east: number } })?.bbox?.west === 179 &&
+      (packs[0] as { bbox?: { south: number; west: number; north: number; east: number } })?.bbox?.east === -179)
+  const malformedPack = decodePacks([{
+    id: 'pack-2', state: 'complete', bbox: { south: -90, west: -1, north: 42, east: 0 }, resources: {},
+  }])[0] as { bbox?: unknown }
+  check('pack summaries discard malformed area bounds', malformedPack.bbox === undefined)
 }
 
 /* -- Surface classification and chunking ---------------------------- */

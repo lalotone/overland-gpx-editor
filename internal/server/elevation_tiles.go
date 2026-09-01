@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,7 +89,7 @@ type tileStore struct {
 	client       *http.Client
 	userAgent    string
 	sem          chan struct{}
-	offline      bool
+	modes        *offlineModeController
 	ctx          context.Context
 	wg           *sync.WaitGroup
 
@@ -102,6 +103,39 @@ type tileStore struct {
 	diskMu    sync.Mutex
 	diskBytes int64
 	diskFiles map[string]tileDiskFile
+
+	memoryHits           atomic.Uint64
+	diskHits             atomic.Uint64
+	cacheMisses          atomic.Uint64
+	sharedLoads          atomic.Uint64
+	offlineMisses        atomic.Uint64
+	networkRequests      atomic.Uint64
+	networkFailures      atomic.Uint64
+	networkStatus2xx     atomic.Uint64
+	networkStatus4xx     atomic.Uint64
+	networkStatus5xx     atomic.Uint64
+	networkDurationNS    atomic.Int64
+	networkMaxDurationNS atomic.Int64
+}
+
+type tileCacheStats struct {
+	MemoryEntries      int
+	DiskEntries        int
+	DiskBytes          int64
+	DiskQuota          int64
+	InFlight           int
+	MemoryHits         uint64
+	DiskHits           uint64
+	CacheMisses        uint64
+	SharedLoads        uint64
+	OfflineMisses      uint64
+	NetworkRequests    uint64
+	NetworkFailures    uint64
+	NetworkStatus2xx   uint64
+	NetworkStatus4xx   uint64
+	NetworkStatus5xx   uint64
+	NetworkDuration    time.Duration
+	NetworkMaxDuration time.Duration
 }
 
 type tileDiskFile struct {
@@ -144,6 +178,7 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 		ctx:          context.Background(),
 		wg:           &sync.WaitGroup{},
 	}
+	store.modes = newOfflineModeController(store.ctx, modeAuto)
 	if cacheDir != "" {
 		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 			store.cacheErr = err
@@ -170,8 +205,8 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 	return store
 }
 
-func (s *tileStore) configureLifecycle(offline bool, ctx context.Context, wg *sync.WaitGroup) {
-	s.offline = offline
+func (s *tileStore) configureLifecycle(modes *offlineModeController, ctx context.Context, wg *sync.WaitGroup) {
+	s.modes = modes
 	s.ctx = ctx
 	s.wg = wg
 }
@@ -286,11 +321,13 @@ func (s *tileStore) grid(ctx context.Context, key tileKey) (*tileGrid, error) {
 		s.lru.MoveToFront(el)
 		grid := el.Value.(*lruEntry).grid
 		s.mu.Unlock()
+		s.memoryHits.Add(1)
 		s.touchDisk(key)
 		return grid, nil
 	}
 	if f, ok := s.inflight[key]; ok {
 		s.mu.Unlock()
+		s.sharedLoads.Add(1)
 		select {
 		case <-f.done:
 			return f.grid, f.err
@@ -322,17 +359,22 @@ func (s *tileStore) grid(ctx context.Context, key tileKey) (*tileGrid, error) {
 
 func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 	if raw, ok := s.readDisk(key); ok {
+		s.diskHits.Add(1)
 		return decodeTerrarium(raw)
 	}
-	if s.offline {
+	s.cacheMisses.Add(1)
+	networkCtx, release, online := s.modes.networkContext(ctx)
+	if !online {
+		s.offlineMisses.Add(1)
 		return nil, &offlineMissError{Scope: "elevation-tiles"}
 	}
+	defer release()
 
 	select {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-networkCtx.Done():
+		return nil, networkCtx.Err()
 	}
 
 	url := strings.NewReplacer(
@@ -341,7 +383,7 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 		"{y}", fmt.Sprint(key.y),
 	).Replace(s.url)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(networkCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +391,9 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 	req.Header.Set("Referer", "https://github.com/lalotone/overland-gpx-editor")
 	req.Header.Set("Accept-Encoding", "identity")
 
+	started := time.Now()
 	resp, err := s.client.Do(req)
+	s.recordNetwork(resp, err, time.Since(started))
 	if err != nil {
 		return nil, err
 	}
@@ -382,6 +426,46 @@ func (s *tileStore) load(ctx context.Context, key tileKey) (*tileGrid, error) {
 		return nil, err
 	}
 	return grid, nil
+}
+
+func (s *tileStore) recordNetwork(response *http.Response, err error, duration time.Duration) {
+	s.networkRequests.Add(1)
+	s.networkDurationNS.Add(duration.Nanoseconds())
+	for current := s.networkMaxDurationNS.Load(); duration.Nanoseconds() > current; current = s.networkMaxDurationNS.Load() {
+		if s.networkMaxDurationNS.CompareAndSwap(current, duration.Nanoseconds()) {
+			break
+		}
+	}
+	if err != nil {
+		s.networkFailures.Add(1)
+		return
+	}
+	switch response.StatusCode / 100 {
+	case 2:
+		s.networkStatus2xx.Add(1)
+	case 4:
+		s.networkStatus4xx.Add(1)
+	case 5:
+		s.networkStatus5xx.Add(1)
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusForbidden {
+		s.networkFailures.Add(1)
+	}
+}
+
+func (s *tileStore) stats() tileCacheStats {
+	s.mu.Lock()
+	memoryEntries, inFlight := s.lru.Len(), len(s.inflight)
+	s.mu.Unlock()
+	s.diskMu.Lock()
+	diskEntries, diskBytes := len(s.diskFiles), s.diskBytes
+	s.diskMu.Unlock()
+	return tileCacheStats{
+		MemoryEntries: memoryEntries, DiskEntries: diskEntries, DiskBytes: diskBytes, DiskQuota: s.maxDiskBytes, InFlight: inFlight,
+		MemoryHits: s.memoryHits.Load(), DiskHits: s.diskHits.Load(), CacheMisses: s.cacheMisses.Load(), SharedLoads: s.sharedLoads.Load(), OfflineMisses: s.offlineMisses.Load(),
+		NetworkRequests: s.networkRequests.Load(), NetworkFailures: s.networkFailures.Load(), NetworkStatus2xx: s.networkStatus2xx.Load(), NetworkStatus4xx: s.networkStatus4xx.Load(), NetworkStatus5xx: s.networkStatus5xx.Load(),
+		NetworkDuration: time.Duration(s.networkDurationNS.Load()), NetworkMaxDuration: time.Duration(s.networkMaxDurationNS.Load()),
+	}
 }
 
 // decodeTerrarium turns a terrain-RGB tile into metres:
@@ -639,14 +723,15 @@ type prefetchProgress struct {
 }
 
 type prefetchState struct {
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	running bool
-	done    int
-	total   int
-	skipped bool
-	clamped bool
-	reason  string
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	running    bool
+	done       int
+	total      int
+	skipped    bool
+	clamped    bool
+	reason     string
+	generation uint64
 }
 
 // tileRange returns the inclusive tile bounds covering a bounding box.
@@ -692,6 +777,8 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		s.prefetch.cancel()
 		s.prefetch.cancel = nil
 	}
+	s.prefetch.generation++
+	generation := s.prefetch.generation
 
 	// Zoomed out, the view runs to thousands of tiles — the planner opens at a
 	// whole-province zoom, where refusing outright would mean it never caches
@@ -728,7 +815,7 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		s.prefetch.running = false
 		return prefetchProgress{Running: false, Clamped: clamped, Reason: reason}
 	}
-	if s.offline {
+	if s.modes.mode() == modeCacheOnly {
 		s.prefetch.running = false
 		s.prefetch.skipped = true
 		s.prefetch.reason = "cache-only mode: uncached tiles were not fetched"
@@ -755,14 +842,18 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 				// for the same tile still only fetch it once.
 				s.grid(ctx, k)
 				s.prefetch.mu.Lock()
-				s.prefetch.done++
+				if s.prefetch.generation == generation {
+					s.prefetch.done++
+				}
 				s.prefetch.mu.Unlock()
 			}(key)
 		}
 		wg.Wait()
 		s.prefetch.mu.Lock()
-		s.prefetch.running = false
-		s.prefetch.cancel = nil
+		if s.prefetch.generation == generation {
+			s.prefetch.running = false
+			s.prefetch.cancel = nil
+		}
 		s.prefetch.mu.Unlock()
 		cancel()
 	}()

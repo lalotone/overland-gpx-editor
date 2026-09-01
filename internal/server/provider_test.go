@@ -34,6 +34,46 @@ func testPolicy(t *testing.T, rawURL string) *providerPolicy {
 	return newProviderPolicy("test", "places", base, time.Hour, 24*time.Hour, 7*24*time.Hour, true, 1<<20, []string{"application/json"}, nil, false)
 }
 
+func TestOfflineModeTransitionCancelsAndDrainsGeneration(t *testing.T) {
+	root, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	modes := newOfflineModeController(root, modeAuto)
+	network, release, online := modes.networkContext(context.Background())
+	if !online {
+		t.Fatal("auto mode refused a network generation")
+	}
+
+	transition := make(chan error, 1)
+	go func() {
+		_, err := modes.set(modeCacheOnly)
+		transition <- err
+	}()
+	select {
+	case <-network.Done():
+	case <-time.After(time.Second):
+		t.Fatal("cache-only transition did not cancel the active generation")
+	}
+	select {
+	case err := <-transition:
+		t.Fatalf("transition returned before the active generation drained: %v", err)
+	default:
+	}
+	if _, _, allowed := modes.networkContext(context.Background()); allowed {
+		t.Fatal("new network generation started while cache-only transition was draining")
+	}
+
+	release()
+	release()
+	select {
+	case err := <-transition:
+		if err != nil {
+			t.Fatalf("cache-only transition: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cache-only transition did not finish after the generation drained")
+	}
+}
+
 func TestCacheControlPrecedenceAndRevalidation(t *testing.T) {
 	tests := []struct {
 		value      string

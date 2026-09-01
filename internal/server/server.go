@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -76,8 +76,8 @@ type Config struct {
 	// StatsLogInterval controls privacy-safe aggregate operational logging.
 	// Zero disables it; the CLI enables it once per minute by default.
 	StatsLogInterval time.Duration
-	// StatsLogger receives aggregate operational logs. Nil uses slog.Default.
-	StatsLogger *slog.Logger
+	// StatsLogger receives the aggregate operational table. Nil uses log.Default.
+	StatsLogger *log.Logger
 	// AllowedOrigins lists exact browser origins allowed to call the API.
 	// Empty permits same-origin requests only when the request host is loopback.
 	AllowedOrigins []string
@@ -121,7 +121,7 @@ type Server struct {
 	assets          fs.FS
 	handler         http.Handler
 	statsInterval   time.Duration
-	statsLogger     *slog.Logger
+	statsLogger     *log.Logger
 }
 
 // New validates cfg, creates the GPX directory and returns the handler.
@@ -294,7 +294,7 @@ func New(cfg Config) (*Server, error) {
 		statsLogger:    cfg.StatsLogger,
 	}
 	if s.statsLogger == nil {
-		s.statsLogger = slog.Default()
+		s.statsLogger = log.Default()
 	}
 	// The tile store must join the server-owned lifecycle, not a detached
 	// prefetch WaitGroup.

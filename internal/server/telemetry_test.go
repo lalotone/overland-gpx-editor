@@ -3,7 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
-	"log/slog"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,7 +43,7 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 		OfflineCacheDir:  t.TempDir(),
 		NominatimURL:     upstream.URL,
 		StatsLogInterval: 5 * time.Millisecond,
-		StatsLogger:      slog.New(slog.NewTextHandler(&logs, nil)),
+		StatsLogger:      log.New(&logs, "", 0),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -68,42 +68,75 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if text := logs.String(); strings.Contains(text, "responses_hit=1") && strings.Contains(text, "packs_complete=1") {
+		if text := logs.String(); strings.Contains(text, "1 hit / 1 miss") && strings.Contains(text, "1 complete") {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 	text := logs.String()
-	for _, wanted := range []string{"cache_get_hits=1", "cache_get_misses=1", "responses_hit=1", "responses_miss=1", "outbound_requests=1", "packs_complete=1"} {
+	for _, wanted := range []string{
+		"OFFLINE STATISTICS (cumulative) - mode: auto",
+		"SECTION          METRIC            VALUE",
+		"Cache storage    Persistence       writable",
+		"Cache responses  Store gets        1 hit / 1 miss (50.0% hit rate)",
+		"Request outcomes  1 hit / 1 miss / 0 stale / 0 revalidated / 0 bypasses",
+		"Outbound         Requests          1 request / 0 failures / 0 offline misses",
+		"Packs            Total             1 pack",
+		"States            0 queued / 0 running / 1 complete / 0 incomplete",
+		"Elevation tiles  Status            disabled",
+	} {
 		if !strings.Contains(text, wanted) {
 			t.Errorf("stats log does not contain %q:\n%s", wanted, text)
 		}
 	}
-	sections := []string{
-		"Offline stats: runtime",
-		"Offline stats: cache storage",
-		"Offline stats: cache responses",
-		"Offline stats: outbound requests",
-		"Offline stats: outbound latency",
-		"Offline stats: packs",
-		"Offline stats: elevation tiles",
-	}
-	lines := strings.Split(strings.TrimSpace(text), "\n")
-	for _, section := range sections {
-		found := false
-		for _, line := range lines {
-			if strings.Contains(line, section) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("stats log does not contain its own %q line:\n%s", section, text)
+	for _, garbage := range []string{"cache_get_hits=", "responses_hit=", "packs_complete=", "level=INFO", `msg="`} {
+		if strings.Contains(text, garbage) {
+			t.Errorf("stats table contains structured-log garbage %q:\n%s", garbage, text)
 		}
 	}
 	for _, private := range []string{privateQuery, "private response", "private Pyrenees trip", "private-pack-id", upstream.URL} {
 		if strings.Contains(text, private) {
 			t.Errorf("stats log leaked %q:\n%s", private, text)
+		}
+	}
+}
+
+func TestOperationalStatsFormatting(t *testing.T) {
+	report := formatOperationalStats(
+		modeCacheOnly,
+		cacheStats{Writable: true, Entries: 1234, Bytes: 256 << 20, Quota: 1 << 30, Reserved: 16 << 20, Hits: 9, Misses: 1},
+		outboundStats{
+			CacheHits: 8, CacheMisses: 2, CacheStale: 1, CacheRevalidated: 3, CacheBypass: 4,
+			OfflineMisses: 5, QueueRejected: 3, NetworkRequests: 12, NetworkFailures: 2,
+			Status2xx: 9, Status3xx: 1, Status4xx: 1, Status5xx: 1,
+			Duration: 240 * time.Millisecond, MaxDuration: 80 * time.Millisecond, InFlight: 2, PeakInFlight: 4,
+		},
+		packOperationalStats{Total: 4, Queued: 1, Running: 1, Complete: 1, Incomplete: 1},
+		tileCacheStats{
+			MemoryEntries: 5, DiskEntries: 6, DiskBytes: 64 << 20, DiskQuota: 512 << 20, InFlight: 1,
+			MemoryHits: 7, DiskHits: 8, CacheMisses: 9, SharedLoads: 10, OfflineMisses: 2,
+			NetworkRequests: 1, NetworkFailures: 1, NetworkStatus2xx: 1,
+			NetworkDuration: 10 * time.Millisecond, NetworkMaxDuration: 20 * time.Millisecond,
+		},
+		true,
+		true,
+	)
+
+	for _, wanted := range []string{
+		"OFFLINE STATISTICS (cumulative) - mode: cache-only",
+		"Entries           1,234 entries",
+		"Usage             256 MiB / 1.0 GiB (25.0%)",
+		"Store gets        9 hits / 1 miss (90.0% hit rate)",
+		"Requests          13 requests / 3 failures / 7 offline misses",
+		"HTTP status       10 2xx / 1 3xx / 1 4xx / 1 5xx",
+		"Latency           19 ms avg / 80 ms max",
+		"Concurrency       2 current / 4 peak",
+		"In flight         1",
+		"Disk              6 entries / 64.0 MiB / 512 MiB (12.5%) / 8 hits",
+		"Cache             9 misses / 10 shared loads",
+	} {
+		if !strings.Contains(report, wanted) {
+			t.Errorf("stats table does not contain %q:\n%s", wanted, report)
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -92,19 +93,14 @@ func (s *cacheStore) setReservedBytes(bytes int64) error {
 		return fmt.Errorf("offline cache quota is smaller than required control storage")
 	}
 	s.reserved = bytes
-	for s.bytes > s.maxBytes-s.reserved {
-		evicted, err := s.evictLRULocked("")
-		if err != nil {
-			return err
-		}
-		if !evicted {
-			break
-		}
-	}
 	return nil
 }
 
 func newCacheStore(dir string, maxBytes int64, maxEntries int) (*cacheStore, error) {
+	return openCacheStore(dir, maxBytes, maxEntries, true)
+}
+
+func openCacheStore(dir string, maxBytes int64, maxEntries int, enforceLimits bool) (*cacheStore, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("offline cache max bytes must be positive")
 	}
@@ -154,6 +150,12 @@ func newCacheStore(dir string, maxBytes int64, maxEntries int) (*cacheStore, err
 	if err := s.load(); err != nil {
 		s.root.Close()
 		return nil, err
+	}
+	if enforceLimits {
+		if err := s.enforceLoadedLimits(); err != nil {
+			s.root.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -288,7 +290,7 @@ func (s *cacheStore) load() error {
 			_ = s.root.Remove(filepath.Join(s.tmpRel, entry.Name()))
 		}
 	}
-	return s.enforceLoadedLimits()
+	return nil
 }
 
 func (s *cacheStore) recoverBackups() {
@@ -367,63 +369,246 @@ func readFileLimitAt(root *os.Root, path string, max int64) ([]byte, error) {
 }
 
 func (s *cacheStore) enforceLoadedLimits() error {
+	if !s.writable {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for len(s.entries) > s.maxEntries || s.bytes > s.maxBytes-s.reserved {
-		evicted, err := s.evictLRULocked("")
-		if err != nil {
-			return err
+
+	if err := s.removeExpiredLoadedEntriesLocked(s.now().UTC()); err != nil {
+		return err
+	}
+	counts, candidates := s.loadedEvictionStateLocked()
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].LastAccess.Equal(candidates[j].LastAccess) {
+			return candidates[i].Key < candidates[j].Key
 		}
-		if !evicted {
-			break
+		return candidates[i].LastAccess.Before(candidates[j].LastAccess)
+	})
+	if err := s.evictLoadedGlobalLocked(candidates, counts); err != nil {
+		return err
+	}
+	return s.evictLoadedScopesLocked(candidates, counts)
+}
+
+func (s *cacheStore) removeExpiredLoadedEntriesLocked(now time.Time) error {
+	for key, meta := range s.entries {
+		hardExpired := !meta.DeleteNoLaterThan.IsZero() && !now.Before(meta.DeleteNoLaterThan)
+		staleExpired := len(meta.Pins) == 0 && !meta.StaleUntil.IsZero() && !now.Before(meta.StaleUntil)
+		if hardExpired || staleExpired {
+			if _, err := s.removeLocked(meta.Scope, key); err != nil {
+				return fmt.Errorf("remove expired cache entry: %w", err)
+			}
 		}
 	}
-	perScopeCap := max(1, s.maxEntries/4)
-	for {
-		overScope := ""
-		for _, meta := range s.entries {
-			if s.scopeCountLocked(meta.Scope) > perScopeCap {
-				overScope = meta.Scope
-				break
-			}
+	return nil
+}
+
+func (s *cacheStore) loadedEvictionStateLocked() (map[string]int, []*cacheMetadata) {
+	counts := make(map[string]int)
+	candidates := make([]*cacheMetadata, 0, len(s.entries))
+	for _, meta := range s.entries {
+		counts[meta.Scope]++
+		if len(meta.Pins) == 0 {
+			candidates = append(candidates, meta)
 		}
-		if overScope == "" {
+	}
+	return counts, candidates
+}
+
+func (s *cacheStore) evictLoadedGlobalLocked(candidates []*cacheMetadata, counts map[string]int) error {
+	for _, candidate := range candidates {
+		if len(s.entries) <= s.maxEntries && s.bytes <= s.maxBytes-s.reserved {
 			break
 		}
-		var candidate *cacheMetadata
-		for _, meta := range s.entries {
-			if meta.Scope == overScope && len(meta.Pins) == 0 && (candidate == nil || meta.LastAccess.Before(candidate.LastAccess)) {
-				candidate = meta
-			}
-		}
-		if candidate == nil {
-			break
-		}
-		if _, err := s.removeLocked(candidate.Scope, candidate.Key); err != nil {
+		if err := s.evictLoadedCandidateLocked(candidate, counts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *cacheStore) resetPins() error {
-	if !s.writable {
-		return nil
-	}
-	s.mu.Lock()
-	metas := make([]cacheMetadata, 0, len(s.entries))
-	for _, meta := range s.entries {
-		copyMeta := *meta
-		copyMeta.Pins = nil
-		metas = append(metas, copyMeta)
-	}
-	s.mu.Unlock()
-	for _, meta := range metas {
-		if err := s.updateMetadata(meta); err != nil {
+func (s *cacheStore) evictLoadedScopesLocked(candidates []*cacheMetadata, counts map[string]int) error {
+	perScopeCap := max(1, s.maxEntries/4)
+	for _, candidate := range candidates {
+		if counts[candidate.Scope] <= perScopeCap {
+			continue
+		}
+		if err := s.evictLoadedCandidateLocked(candidate, counts); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *cacheStore) evictLoadedCandidateLocked(candidate *cacheMetadata, counts map[string]int) error {
+	current := s.entries[candidate.Key]
+	if current == nil || len(current.Pins) != 0 {
+		return nil
+	}
+	removed, err := s.removeLocked(current.Scope, current.Key)
+	if removed {
+		counts[current.Scope]--
+	}
+	return err
+}
+
+// reconcilePins replaces authoritative pin state without exposing an
+// intermediate unpinned cache. Limit enforcement runs after reconciliation.
+func (s *cacheStore) reconcilePins(desired map[string][]string) (map[string]struct{}, int, error) {
+	unavailable := make(map[string]struct{})
+	if !s.writable {
+		return unavailable, 0, nil
+	}
+
+	normalized := make(map[string][]string, len(desired))
+	for key, pins := range desired {
+		if !validCacheKey(key) {
+			unavailable[key] = struct{}{}
+			continue
+		}
+		pins = normalizePins(pins)
+		if len(pins) != 0 {
+			normalized[key] = pins
+		}
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now().UTC()
+	for key := range normalized {
+		meta := s.entries[key]
+		if meta == nil || !staleAllowed(*meta, now) {
+			unavailable[key] = struct{}{}
+			delete(normalized, key)
+		}
+	}
+
+	keys := make([]string, 0, len(s.entries))
+	for key := range s.entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	changed := 0
+	for _, key := range keys {
+		current := s.entries[key]
+		pins := normalized[key]
+		updated, err := s.updatePinsLocked(current, pins)
+		if err != nil {
+			return unavailable, changed, err
+		}
+		if updated {
+			changed++
+		}
+	}
+	return unavailable, changed, nil
+}
+
+func (s *cacheStore) reconcilePinOwner(owner string, desiredKeys []string) (map[string]struct{}, int, error) {
+	return s.updatePinOwner(owner, desiredKeys, true)
+}
+
+func (s *cacheStore) addPinOwner(owner string, desiredKeys []string) (map[string]struct{}, int, error) {
+	return s.updatePinOwner(owner, desiredKeys, false)
+}
+
+func (s *cacheStore) updatePinOwner(owner string, desiredKeys []string, replace bool) (map[string]struct{}, int, error) {
+	unavailable := make(map[string]struct{})
+	if !s.writable {
+		return unavailable, 0, nil
+	}
+	if owner == "" {
+		return unavailable, 0, errors.New("cache pin owner is required")
+	}
+	desired := make(map[string]struct{}, len(desiredKeys))
+	for _, key := range desiredKeys {
+		if validCacheKey(key) {
+			desired[key] = struct{}{}
+		} else {
+			unavailable[key] = struct{}{}
+		}
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now().UTC()
+	for key := range desired {
+		meta := s.entries[key]
+		if meta == nil || !staleAllowed(*meta, now) {
+			unavailable[key] = struct{}{}
+			delete(desired, key)
+		}
+	}
+	keys := make([]string, 0, len(s.entries))
+	for key := range s.entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	changed := 0
+	for _, key := range keys {
+		current := s.entries[key]
+		pins := make([]string, 0, len(current.Pins)+1)
+		_, keep := desired[key]
+		for _, pin := range current.Pins {
+			if pin != owner || !replace || keep {
+				pins = append(pins, pin)
+			}
+		}
+		if keep {
+			pins = append(pins, owner)
+		}
+		updated, err := s.updatePinsLocked(current, normalizePins(pins))
+		if err != nil {
+			return unavailable, changed, err
+		}
+		if updated {
+			changed++
+		}
+	}
+	return unavailable, changed, nil
+}
+
+func normalizePins(pins []string) []string {
+	pins = append([]string(nil), pins...)
+	sort.Strings(pins)
+	unique := pins[:0]
+	for _, pin := range pins {
+		if pin != "" && (len(unique) == 0 || unique[len(unique)-1] != pin) {
+			unique = append(unique, pin)
+		}
+	}
+	return unique
+}
+
+func (s *cacheStore) updatePinsLocked(current *cacheMetadata, pins []string) (bool, error) {
+	if slices.Equal(current.Pins, pins) {
+		return false, nil
+	}
+	copyMeta := *current
+	copyMeta.Pins = append([]string(nil), pins...)
+	raw, err := json.Marshal(copyMeta)
+	if err != nil || len(raw) > maxMetadataBytes {
+		return false, errors.New("invalid cache pin metadata")
+	}
+	_, metaPath, err := s.relativePaths(copyMeta.Scope, copyMeta.Key)
+	if err != nil {
+		return false, err
+	}
+	if err := atomicWriteFileAt(s.root, s.tmpRel, metaPath, raw); err != nil {
+		return false, err
+	}
+	s.bytes -= current.metadataLength
+	copyMeta.metadataLength = int64(len(raw))
+	s.entries[current.Key] = &copyMeta
+	s.bytes += copyMeta.metadataLength
+	return true, nil
 }
 
 func (s *cacheStore) removePairByMetadataPath(metaPath string) {

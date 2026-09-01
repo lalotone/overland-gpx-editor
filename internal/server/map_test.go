@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +101,101 @@ func newFakeMapSource(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	}))
 	t.Cleanup(upstream.Close)
 	return upstream, &calls
+}
+
+func TestServerStartupDoesNotWaitForOpenFreeMapActivation(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int64
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		body := io.NopCloser(strings.NewReader(`{"version":8,"sources":{},"layers":[]}`))
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: body, Request: r}, nil
+	})}
+	type result struct {
+		server *Server
+		err    error
+	}
+	results := make(chan result, 1)
+	gpxDir, cacheDir := t.TempDir(), t.TempDir()
+	go func() {
+		s, err := New(Config{
+			GPXDir: gpxDir, ElevationHost: "http://elevation.invalid", HTTPClient: client,
+			OfflineCacheDir: cacheDir, OpenFreeMapURL: "https://maps.invalid", OpenFreeMapAllowBulk: true,
+		})
+		results <- result{server: s, err: err}
+	}()
+
+	var created result
+	activationStarted := false
+	select {
+	case created = <-results:
+	case <-started:
+		activationStarted = true
+		select {
+		case created = <-results:
+		case <-time.After(500 * time.Millisecond):
+			close(release)
+			created = <-results
+			if created.server != nil {
+				_ = created.server.Close()
+			}
+			t.Fatal("server startup waited for OpenFreeMap activation")
+		}
+	}
+	if created.err != nil {
+		close(release)
+		t.Fatal(created.err)
+	}
+	if !activationStarted {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			_ = created.server.Close()
+			t.Fatal("OpenFreeMap activation did not start")
+		}
+	}
+	type estimateResult struct {
+		estimate packEstimate
+		err      error
+	}
+	estimates := make(chan estimateResult, 1)
+	go func() {
+		estimate, err := created.server.packs.estimateContext(context.Background(), packInput{
+			Name: "map", BBox: &bbox{South: 0, West: 0, North: 1, East: 1}, Layers: []string{"openfreemap"},
+		})
+		estimates <- estimateResult{estimate: estimate, err: err}
+	}()
+	select {
+	case result := <-estimates:
+		close(release)
+		_ = created.server.Close()
+		t.Fatalf("pack estimate completed before map activation: estimate=%+v err=%v", result.estimate, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	estimate := <-estimates
+	if estimate.err != nil || len(estimate.estimate.Blocked) != 0 {
+		_ = created.server.Close()
+		t.Fatalf("pack estimate after map activation: estimate=%+v err=%v", estimate.estimate, estimate.err)
+	}
+	if rec := do(t, created.server, http.MethodGet, "/map/openfreemap/sprite.json", nil); rec.Code != http.StatusNotFound || calls.Load() != 1 {
+		_ = created.server.Close()
+		t.Fatalf("missing sprite: status=%d transport_calls=%d", rec.Code, calls.Load())
+	}
+	if err := created.server.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestConfiguredOpenFreeMapStyleGraphIsStructuredAndOfflineCapable(t *testing.T) {
@@ -284,6 +381,81 @@ func TestInterruptedMapRefreshPreservesLastCompleteGenerationAcrossRestart(t *te
 	}
 }
 
+func TestStartupLimitsRetainPersistedOpenFreeMapCore(t *testing.T) {
+	upstream, calls := newFakeMapSource(t)
+	cacheDir := t.TempDir()
+	config := Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		OfflineCacheMaxBytes: 32 << 20, OfflineCacheMaxEntries: 100,
+		OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true,
+	}
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, s, http.MethodGet, "/map/openfreemap/style.json", nil); rec.Code != http.StatusOK {
+		t.Fatalf("initial style = %d %s", rec.Code, rec.Body)
+	}
+	s.openFreeMap.mu.RLock()
+	coreKeys := append([]string(nil), s.openFreeMap.coreKeys...)
+	s.openFreeMap.mu.RUnlock()
+	if len(coreKeys) == 0 {
+		t.Fatal("test map generation has no cache-backed core")
+	}
+	if _, _, err := s.cache.reconcilePinOwner(openFreeMapGenerationPin, nil); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for i := range len(coreKeys) + 2 {
+		key := canonicalCacheKey("test", "source", http.MethodGet, fmt.Sprintf("unrelated-%d", i), "", nil)
+		if err := s.cache.put(testMetadata(key, "places", now.Add(time.Duration(i)*time.Second)), []byte("unrelated")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	warmedCalls := calls.Load()
+
+	config.OfflineMode = "cache-only"
+	config.OfflineCacheMaxEntries = len(coreKeys)
+	restarted, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if rec := do(t, restarted, http.MethodGet, "/map/openfreemap/style.json", nil); rec.Code != http.StatusOK {
+		t.Fatalf("retained style = %d %s", rec.Code, rec.Body)
+	}
+	restarted.cache.mu.Lock()
+	for _, key := range coreKeys {
+		meta := restarted.cache.entries[key]
+		if meta == nil || !containsString(meta.Pins, openFreeMapGenerationPin) {
+			restarted.cache.mu.Unlock()
+			t.Fatalf("core key %s was not retained", key)
+		}
+	}
+	restarted.cache.mu.Unlock()
+	if calls.Load() != warmedCalls {
+		t.Fatalf("cache-only restart made %d upstream calls", calls.Load()-warmedCalls)
+	}
+}
+
+func TestPackWaitsForInitialMapRefreshEvenWithCachedGeneration(t *testing.T) {
+	m := &openFreeMapManager{active: true, initialActivation: make(chan struct{})}
+	ready := make(chan bool, 1)
+	go func() { ready <- m.waitForInitialActivation(context.Background()) }()
+	select {
+	case <-ready:
+		t.Fatal("cached generation bypassed the initial refresh wait")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(m.initialActivation)
+	if !<-ready {
+		t.Fatal("completed initial refresh was not observed")
+	}
+}
+
 func TestPublicOpenFreeMapIsNotAdvertised(t *testing.T) {
 	s := newTestServer(t)
 	rec := do(t, s, http.MethodGet, "/config", nil)
@@ -335,6 +507,17 @@ func TestConfiguredOpenFreeMapFailureIsDiagnosable(t *testing.T) {
 	if payload.Code != "upstream_http_status" || payload.Scope != "maps-openfreemap" ||
 		payload.Stage != "style" || payload.UpstreamStatus != http.StatusServiceUnavailable {
 		t.Errorf("style diagnostic = %+v; body=%s", payload, rec.Body)
+	}
+	for _, target := range []string{
+		"/map/openfreemap/source.json",
+		"/map/openfreemap/tiles/vector-0/1/0/0.pbf",
+		"/map/openfreemap/glyphs/Test/0-255.pbf",
+		"/map/openfreemap/sprite.json",
+	} {
+		failed := do(t, s, http.MethodGet, target, nil)
+		if failed.Code != http.StatusServiceUnavailable || !strings.Contains(failed.Body.String(), `"code":"upstream_http_status"`) {
+			t.Errorf("%s diagnostic = %d %s", target, failed.Code, failed.Body)
+		}
 	}
 	if strings.Contains(rec.Body.String(), secret) || strings.Contains(logs.String(), secret) {
 		t.Fatalf("upstream body leaked: response=%s logs=%s", rec.Body, logs.String())

@@ -161,7 +161,9 @@ func New(cfg Config) (*Server, error) {
 		gpxRoot.Close()
 		return nil, errors.New("elevation tile cache max bytes must be positive")
 	}
-	cache, err := newCacheStore(cfg.OfflineCacheDir, cfg.OfflineCacheMaxBytes, cfg.OfflineCacheMaxEntries)
+	// Persisted pins are derived from pack manifests, so defer pin-aware
+	// eviction until the manifests have been reconciled below.
+	cache, err := openCacheStore(cfg.OfflineCacheDir, cfg.OfflineCacheMaxBytes, cfg.OfflineCacheMaxEntries, false)
 	if err != nil {
 		gpxRoot.Close()
 		return nil, err
@@ -330,6 +332,9 @@ func New(cfg Config) (*Server, error) {
 		}
 		s.elevation.policy = newProviderPolicy("elevation", "elevation", elevationBase, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, maxElevationBodyBytes, []string{"application/json", "text/plain"}, newConcurrentRateGroup(0, 2), true)
 	}
+	if openFreeMapURL != nil {
+		s.openFreeMap = newOpenFreeMapManager(s, openFreeMapURL, cfg.OpenFreeMapAllowBulk)
+	}
 	s.packs, err = newPackManager(s)
 	if err != nil {
 		cancel()
@@ -340,11 +345,23 @@ func New(cfg Config) (*Server, error) {
 		}
 		return nil, err
 	}
-	if openFreeMapURL != nil {
-		s.openFreeMap = newOpenFreeMapManager(s, openFreeMapURL, cfg.OpenFreeMapAllowBulk)
-		s.openFreeMap.activate(rootCtx)
+	if err := cache.enforceLoadedLimits(); err != nil {
+		cancel()
+		gpxRoot.Close()
+		cache.close()
+		if tiles != nil {
+			tiles.closeCache()
+		}
+		return nil, fmt.Errorf("enforce offline cache limits: %w", err)
 	}
 	s.handler = s.routes()
+	if s.openFreeMap != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.openFreeMap.activate(rootCtx)
+		}()
+	}
 	if s.statsInterval > 0 {
 		s.wg.Add(1)
 		go s.logOperationalStatsLoop()

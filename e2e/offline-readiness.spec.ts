@@ -58,6 +58,11 @@ const GPX = `<?xml version="1.0" encoding="UTF-8"?>
   </trkseg></trk>
 </gpx>`
 
+const GPX_WITH_WAYPOINT = GPX.replace(
+  '  <trk>',
+  '  <wpt lat="42.8700" lon="-2.6300"><name>Fuel stop</name><sym>Gas Station</sym></wpt>\n  <trk>',
+)
+
 const resourceProgress = {
   'vector-map': { done: 3, total: 3, failed: 0, bytes: 12000, items: 0 },
   elevation: { done: 2, total: 2, failed: 0, bytes: 8000, items: 0 },
@@ -69,6 +74,22 @@ const resourceProgress = {
 
 async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+}
+
+/**
+ * Serve the oldest unacknowledged command as an SSE frame, the way the broker
+ * does. The handler always fulfils immediately — awaiting inside a route
+ * handler queues every other intercepted request behind it — and asks for a
+ * slow reconnect so the mock's short-lived stream does not spin.
+ */
+async function fulfillCommandStream(route: Route, command?: Record<string, unknown>) {
+  const frames = ['retry: 1000\n\n']
+  if (command) frames.push(`id: ${String(command.id)}\ndata: ${JSON.stringify(command)}\n\n`)
+  await route.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' },
+    body: frames.join(''),
+  })
 }
 
 async function mockRuntime(page: Page, options: {
@@ -299,6 +320,200 @@ test('creation mode renders the selected OFM vector layer', async ({ page }) => 
   await page.getByRole('button', { name: 'Plan a route' }).click()
   await expectVectorMap(page)
   await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
+})
+
+test('MCP bridge draws planner routes and reports the active view', async ({ page }) => {
+  await mockRuntime(page)
+  const commands = [
+    { id: 'command-mode', name: 'switch_mode', arguments: { mode: 'planner' } },
+    {
+      id: 'command-1',
+      name: 'plan_route',
+      arguments: {
+        points: [{ lat: 42.82, lon: -2.75 }, { lat: 42.9, lon: -2.58 }],
+        mode: 'append',
+        profile: 'mixed',
+        fitView: true,
+      },
+    },
+  ]
+  const results: Record<string, unknown>[] = []
+  let commandIndex = 0
+  let resultAttempts = 0
+  let publishedPlannerRoute: { screen?: string; points?: number } | undefined
+
+  await page.route(/\/mcp\/browser\/session$/, route => json(route, { enabled: true }))
+  await page.route(/\/mcp\/browser\/view$/, async route => {
+    const candidate = route.request().postDataJSON() as Record<string, unknown>
+    const snapshot = candidate.snapshot as { screen?: string; planner?: { routePoints?: unknown[] } }
+    if (snapshot?.planner?.routePoints?.length === 2) {
+      publishedPlannerRoute = { screen: snapshot.screen, points: snapshot.planner.routePoints.length }
+    }
+    await route.fulfill({ status: 204 })
+  })
+  await page.route(/\/mcp\/browser\/events/, route =>
+    fulfillCommandStream(route, commands[commandIndex]))
+  await page.route(/\/mcp\/browser\/result$/, async route => {
+    resultAttempts++
+    if (resultAttempts === 1) {
+      await route.fulfill({ status: 503 })
+      return
+    }
+    results.push(route.request().postDataJSON() as Record<string, unknown>)
+    commandIndex++
+    await route.fulfill({ status: 204 })
+  })
+
+  await page.goto('/')
+  await expect(page.locator('.creation-screen')).toBeVisible()
+  await expect.poll(() => results.length).toBe(2)
+  expect(resultAttempts).toBe(3)
+  expect(results[0]).toMatchObject({
+    id: 'command-mode',
+    result: { ok: true, mode: 'planner', screen: 'creation' },
+  })
+  expect(results[1]).toMatchObject({
+    id: 'command-1',
+    result: { ok: true, screen: 'creation', routePointCount: 2 },
+  })
+  // The bridge guarantee is that the snapshot produced by a command is
+  // published before that command is acknowledged, so assert on what was
+  // published rather than on whichever heartbeat happens to land last.
+  await expect.poll(() => publishedPlannerRoute).toEqual({ screen: 'creation', points: 2 })
+})
+
+test('MCP session overlays survive map modes and semantic tools stay mode-specific', async ({ page }) => {
+  await mockRuntime(page)
+  const commands = [
+    { id: 'mode-explore', name: 'switch_mode', arguments: { mode: 'explore' } },
+    {
+      id: 'wrong-mode-route',
+      name: 'plan_route',
+      arguments: { points: [{ lat: 42.82, lon: -2.75 }, { lat: 42.9, lon: -2.58 }] },
+    },
+    {
+      id: 'map-track',
+      name: 'draw_map_track',
+      arguments: { points: [{ lat: 42.82, lon: -2.75 }, { lat: 42.9, lon: -2.58 }], fitView: false },
+    },
+    {
+      id: 'map-markers',
+      name: 'set_map_markers',
+      arguments: { markers: [{ lat: 42.85, lon: -2.67, marker: 'repair', name: 'Workshop' }], fitView: false },
+    },
+  ]
+  const results: Record<string, unknown>[] = []
+  let commandIndex = 0
+  let latestView: Record<string, unknown> | undefined
+  let latestViewSequence = 0
+
+  await page.route(/\/mcp\/browser\/session$/, route => json(route, { enabled: true }))
+  await page.route(/\/mcp\/browser\/view$/, async route => {
+    const candidate = route.request().postDataJSON() as Record<string, unknown>
+    const sequence = typeof candidate.sequence === 'number' ? candidate.sequence : 0
+    if (sequence > latestViewSequence) {
+      latestView = candidate
+      latestViewSequence = sequence
+    }
+    await route.fulfill({ status: 204 })
+  })
+  await page.route(/\/mcp\/browser\/events/, route =>
+    fulfillCommandStream(route, commands[commandIndex]))
+  await page.route(/\/mcp\/browser\/result$/, async route => {
+    results.push(route.request().postDataJSON() as Record<string, unknown>)
+    commandIndex++
+    await route.fulfill({ status: 204 })
+  })
+
+  await page.goto('/')
+  await expect.poll(() => results.length).toBe(commands.length)
+  expect(results[1]).toMatchObject({
+    id: 'wrong-mode-route',
+    error: 'plan_route requires planner mode; use switch_mode first',
+  })
+  await expect(page.getByTestId('explore-screen')).toBeVisible()
+  await expect(page.locator('.session-map-track')).toHaveCount(1)
+  await expect(page.locator('.waypoint-marker-repair')).toHaveCount(1)
+  await expect.poll(() => {
+    const state = latestView?.snapshot as {
+      screen?: string
+      markerCatalog?: unknown[]
+      mapOverlays?: { persisted?: boolean; track?: unknown[]; markers?: unknown[] }
+    } | undefined
+    return {
+      screen: state?.screen,
+      catalog: state?.markerCatalog?.length,
+      persisted: state?.mapOverlays?.persisted,
+      track: state?.mapOverlays?.track?.length,
+      markers: state?.mapOverlays?.markers?.length,
+    }
+  }).toEqual({ screen: 'explore', catalog: 17, persisted: false, track: 2, markers: 1 })
+
+  await page.getByRole('button', { name: 'Back to home' }).click()
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+  await expect(page.locator('.session-map-track')).toHaveCount(1)
+  await expect(page.locator('.waypoint-marker-repair')).toHaveCount(1)
+})
+
+test('MCP reports and moves the Explore map', async ({ page }) => {
+  await mockRuntime(page)
+  const command = {
+    id: 'command-explore-map',
+    name: 'set_map_view',
+    arguments: { lat: 42.85, lon: -2.67, zoom: 12 },
+  }
+  let deliverCommand = false
+  let commandAcknowledged = false
+  let latestView: Record<string, unknown> | undefined
+  let latestViewSequence = 0
+  let result: Record<string, unknown> | undefined
+
+  await page.route(/\/mcp\/browser\/session$/, route => json(route, { enabled: true }))
+  await page.route(/\/mcp\/browser\/view$/, async route => {
+    const candidate = route.request().postDataJSON() as Record<string, unknown>
+    const sequence = typeof candidate.sequence === 'number' ? candidate.sequence : 0
+    if (sequence > latestViewSequence) {
+      latestView = candidate
+      latestViewSequence = sequence
+    }
+    await route.fulfill({ status: 204 })
+  })
+  await page.route(/\/mcp\/browser\/events/, route =>
+    fulfillCommandStream(route, deliverCommand && !commandAcknowledged ? command : undefined))
+  await page.route(/\/mcp\/browser\/result$/, async route => {
+    result = route.request().postDataJSON() as Record<string, unknown>
+    commandAcknowledged = true
+    await route.fulfill({ status: 204 })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Explore map' }).click()
+  await expect(page.getByTestId('explore-map')).toBeVisible()
+  await expect.poll(() => {
+    const state = latestView?.snapshot as { screen?: string; map?: unknown } | undefined
+    return { screen: state?.screen, hasMap: state?.map != null }
+  }).toEqual({ screen: 'explore', hasMap: true })
+
+  deliverCommand = true
+  await expect.poll(() => commandAcknowledged).toBe(true)
+  expect(result).toMatchObject({
+    id: command.id,
+    result: { ok: true, center: { lat: 42.85, lon: -2.67 }, zoom: 12 },
+  })
+  await expect.poll(() => {
+    const state = latestView?.snapshot as {
+      screen?: string
+      map?: { center?: { lat?: number; lon?: number }; zoom?: number; bounds?: unknown }
+    } | undefined
+    return {
+      screen: state?.screen,
+      lat: state?.map?.center?.lat,
+      lon: state?.map?.center?.lon,
+      zoom: state?.map?.zoom,
+      hasBounds: state?.map?.bounds != null,
+    }
+  }).toEqual({ screen: 'explore', lat: 42.85, lon: -2.67, zoom: 12, hasBounds: true })
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('gpx-explore-view'))).toContain('42.85')
 })
 
 test('manual offline mode can be toggled while the server is connected', async ({ page }) => {
@@ -557,6 +772,26 @@ test('unavailable elevation leaves other route resources prepared', async ({ pag
   expect(runtime.getPackRequest()?.scopes).toEqual(['pois', 'fuel'])
 })
 
+test('GPX waypoint marker types render and remain editable', async ({ page }) => {
+  await mockRuntime(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Open a GPX file' }).click()
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'typed-waypoint.gpx',
+    mimeType: 'application/gpx+xml',
+    buffer: Buffer.from(GPX_WITH_WAYPOINT),
+  })
+
+  const fuelMarker = page.locator('.waypoint-marker-fuel')
+  await expect(fuelMarker).toHaveCount(1)
+  await fuelMarker.click()
+  const markerType = page.getByLabel('Waypoint marker type')
+  await expect(markerType).toHaveValue('fuel')
+  await markerType.selectOption('camp')
+  await expect(page.locator('.waypoint-marker-camp')).toHaveCount(1)
+  await expect(page.locator('.waypoint-marker-fuel')).toHaveCount(0)
+})
+
 test('loading a GPX automatically prepares and reports route resources', async ({ page }) => {
   const runtime = await mockRuntime(page)
   await page.goto('/')
@@ -793,4 +1028,53 @@ test('explore caches deliberate place searches and downloads a drawn map area', 
   await removeArea.click()
   await manager.getByRole('button', { name: 'Confirm removal' }).click()
   await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(0)
+})
+
+test('MCP agents can see errors caused by their own commands', async ({ page }) => {
+  await mockRuntime(page)
+  // Routing fails after plan_route has already returned, so the only way an
+  // agent can learn about it is through the snapshot.
+  await page.route(/valhalla1\.openstreetmap\.de/, route => route.fulfill({ status: 503, body: 'upstream unavailable' }))
+  await page.route(/router\.project-osrm\.org/, route => route.fulfill({ status: 503, body: 'upstream unavailable' }))
+
+  const commands = [
+    { id: 'command-mode', name: 'switch_mode', arguments: { mode: 'planner' } },
+    {
+      id: 'command-route',
+      name: 'plan_route',
+      arguments: { points: [{ lat: 42.82, lon: -2.75 }, { lat: 42.9, lon: -2.58 }], fitView: false },
+    },
+  ]
+  const results: Record<string, unknown>[] = []
+  let commandIndex = 0
+  let latestView: Record<string, unknown> | undefined
+
+  await page.route(/\/mcp\/browser\/session$/, route => json(route, { enabled: true }))
+  await page.route(/\/mcp\/browser\/view$/, async route => {
+    latestView = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({ status: 204 })
+  })
+  await page.route(/\/mcp\/browser\/events/, route =>
+    fulfillCommandStream(route, commands[commandIndex]))
+  await page.route(/\/mcp\/browser\/result$/, async route => {
+    results.push(route.request().postDataJSON() as Record<string, unknown>)
+    commandIndex++
+    await route.fulfill({ status: 204 })
+  })
+
+  await page.goto('/')
+  await expect.poll(() => results.length).toBe(2)
+  // The command itself reported success: the failure had not happened yet.
+  expect(results[1]).toMatchObject({ id: 'command-route', result: { ok: true, routePointCount: 2 } })
+
+  await expect.poll(() => {
+    const state = latestView?.snapshot as {
+      planner?: { routeError?: string | null; loading?: boolean }
+      notifications?: { type?: string; message?: string }[]
+    } | undefined
+    return {
+      routeFailed: typeof state?.planner?.routeError === 'string' && state.planner.routeError.length > 0,
+      reportedError: (state?.notifications ?? []).some(entry => entry.type === 'error'),
+    }
+  }, { timeout: 25000 }).toEqual({ routeFailed: true, reportedError: true })
 })

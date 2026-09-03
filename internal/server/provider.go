@@ -25,6 +25,7 @@ const (
 	defaultMaxPendingOutbound            = 64
 	defaultMaxPendingOutboundPerProvider = 16
 	defaultOutboundFetchTimeout          = 30 * time.Second
+	routeOutboundFetchTimeout            = 2 * time.Minute
 )
 
 // offlineModeController linearizes runtime mode changes with transport starts.
@@ -147,6 +148,7 @@ type providerPolicy struct {
 	packEligible      bool
 	applicationData   bool
 	approvedHosts     map[string]struct{}
+	fetchTimeout      time.Duration
 }
 
 type cachedRequest struct {
@@ -319,7 +321,11 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 		if request.cancelWithCaller {
 			fetchParent = ctx
 		}
-		fetchCtx, cancel := context.WithTimeout(fetchParent, o.fetchTimeout)
+		fetchTimeout := o.fetchTimeout
+		if request.policy.fetchTimeout > 0 {
+			fetchTimeout = request.policy.fetchTimeout
+		}
+		fetchCtx, cancel := context.WithTimeout(fetchParent, fetchTimeout)
 		defer cancel()
 		networkCtx, release, online := o.modes.networkContext(fetchCtx)
 		if !online {

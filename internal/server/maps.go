@@ -110,7 +110,7 @@ func (s *Server) protectOutboundResource(next http.HandlerFunc) http.HandlerFunc
 			writeError(w, http.StatusForbidden, "Cross-site resource relay refused")
 			return
 		}
-		if !remoteIsLoopback(r.RemoteAddr) && (site != "same-origin" || !s.isAllowedResourceHost(r.Host)) {
+		if !s.peerIsLoopback(r) && (site != "same-origin" || !s.isAllowedResourceHost(r.Host)) {
 			writeError(w, http.StatusForbidden, "Resource requests require a same-origin or loopback client")
 			return
 		}

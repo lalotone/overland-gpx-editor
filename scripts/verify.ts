@@ -55,6 +55,12 @@ const {
   fetchGroundElevation,
 } = await import('../src/lib/elevation')
 const { clearedRouteDerivedState, routeSequenceIsCurrent } = await import('../src/lib/planner')
+const { parseMcpCommand } = await import('../src/lib/mcp')
+const {
+  WAYPOINT_MARKERS,
+  waypointMarkerDefinition,
+  waypointMarkerIdFromSymbol,
+} = await import('../src/lib/waypointMarkers')
 const {
   buildAutomaticPackRequest,
   buildPackEstimateRequest,
@@ -642,6 +648,104 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     routeSequenceIsCurrent(7, 7, false) &&
       !routeSequenceIsCurrent(6, 7, false) &&
       !routeSequenceIsCurrent(7, 7, true))
+}
+
+{
+  const route = parseMcpCommand({
+    id: 'command-1',
+    name: 'plan_route',
+    arguments: { points: [{ lat: 42.8467, lon: -2.6726 }, { lat: 42.9, lon: -2.5 }], profile: 'mixed' },
+  })
+  check('MCP route commands preserve points and apply safe defaults',
+    route.name === 'plan_route' && route.arguments.points.length === 2 &&
+      route.arguments.mode === 'replace' && route.arguments.fitView)
+  const noFit = parseMcpCommand({
+    id: 'command-no-fit', name: 'plan_route', arguments: { points: [], fitView: false },
+  })
+  check('MCP preserves an explicit fitView=false',
+    noFit.name === 'plan_route' && !noFit.arguments.fitView)
+
+  const waypoints = parseMcpCommand({
+    id: 'command-2',
+    name: 'set_waypoints',
+    arguments: { target: 'track', mode: 'append', waypoints: [{ lat: 42.85, lon: -2.67, name: 'Fuel' }] },
+  })
+  check('MCP GPX waypoints remain separate from route controls',
+    waypoints.name === 'set_waypoints' && waypoints.arguments.target === 'track' &&
+      waypoints.arguments.waypoints[0].name === 'Fuel')
+
+  const typedWaypoints = parseMcpCommand({
+    id: 'command-marker',
+    name: 'set_waypoints',
+    arguments: { target: 'planner', waypoints: [{ lat: 42.85, lon: -2.67, marker: 'fuel' }] },
+  })
+  check('MCP catalog markers map to stable GPX symbols',
+    typedWaypoints.name === 'set_waypoints' &&
+      typedWaypoints.arguments.waypoints[0].sym === waypointMarkerDefinition('fuel').gpxSymbol)
+
+  const mapMarkers = parseMcpCommand({
+    id: 'command-map-markers',
+    name: 'set_map_markers',
+    arguments: { markers: [{ lat: 42.85, lon: -2.67, marker: 'camp', name: 'Tonight' }], fitView: false },
+  })
+  const mapTrack = parseMcpCommand({
+    id: 'command-map-track', name: 'draw_map_track', arguments: { points: [] },
+  })
+  const switchMode = parseMcpCommand({
+    id: 'command-switch-mode', name: 'switch_mode', arguments: { mode: 'explore' },
+  })
+  check('MCP session markers preserve catalog IDs without becoming GPX waypoints',
+    mapMarkers.name === 'set_map_markers' && mapMarkers.arguments.markers[0].marker === 'camp' &&
+      !mapMarkers.arguments.fitView)
+  check('MCP session tracks accept an empty replacement for clearing',
+    mapTrack.name === 'draw_map_track' && mapTrack.arguments.points.length === 0)
+  check('MCP mode switching uses public map-mode names',
+    switchMode.name === 'switch_mode' && switchMode.arguments.mode === 'explore')
+  check('waypoint marker catalog exposes the expected stable set',
+    WAYPOINT_MARKERS.map(marker => marker.id).join(',') ===
+      'generic,fuel,water,camp,food,lodging,parking,repair,medical,viewpoint,hazard,roadblock,ferry,border,restroom,information,picnic' &&
+      waypointMarkerIdFromSymbol('Gas Station') === 'fuel' &&
+      waypointMarkerIdFromSymbol('unrecognised device symbol') === undefined)
+
+  const mapView = parseMcpCommand({
+    id: 'command-map', name: 'set_map_view', arguments: { lat: 42.85, lon: -2.67, zoom: 12 },
+  })
+  const mapViewWithoutZoom = parseMcpCommand({
+    id: 'command-map-no-zoom', name: 'set_map_view', arguments: { lat: 42.85, lon: -2.67 },
+  })
+  check('MCP map commands preserve valid coordinates and zoom',
+    mapView.name === 'set_map_view' && mapView.arguments.zoom === 12)
+  check('MCP map commands leave an omitted zoom unchanged',
+    mapViewWithoutZoom.name === 'set_map_view' && mapViewWithoutZoom.arguments.zoom === undefined)
+
+  let rejectedCoordinate = false
+  let rejectedFilename = false
+  let rejectedZoom = false
+  let rejectedMarker = false
+  let rejectedMarkerAndSymbol = false
+  try {
+    parseMcpCommand({ id: 'bad-1', name: 'draw_track', arguments: { points: [{ lat: 142, lon: 0 }] } })
+  } catch { rejectedCoordinate = true }
+  try {
+    parseMcpCommand({ id: 'bad-2', name: 'open_track', arguments: { filename: '../private.gpx' } })
+  } catch { rejectedFilename = true }
+  try {
+    parseMcpCommand({ id: 'bad-3', name: 'set_map_view', arguments: { lat: 42, lon: -2, zoom: 21 } })
+  } catch { rejectedZoom = true }
+  try {
+    parseMcpCommand({ id: 'bad-4', name: 'set_map_markers', arguments: { markers: [{ lat: 42, lon: -2, marker: '<svg>' }] } })
+  } catch { rejectedMarker = true }
+  try {
+    parseMcpCommand({
+      id: 'bad-5', name: 'set_waypoints',
+      arguments: { target: 'track', waypoints: [{ lat: 42, lon: -2, marker: 'fuel', sym: 'Custom' }] },
+    })
+  } catch { rejectedMarkerAndSymbol = true }
+  check('MCP rejects out-of-range coordinates before editing', rejectedCoordinate)
+  check('MCP rejects filenames with directory components', rejectedFilename)
+  check('MCP rejects out-of-range map zoom', rejectedZoom)
+  check('MCP rejects marker values outside the fixed catalog', rejectedMarker)
+  check('MCP rejects ambiguous waypoint marker and symbol input', rejectedMarkerAndSymbol)
 }
 
 {

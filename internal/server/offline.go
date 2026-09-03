@@ -9,6 +9,14 @@ import (
 	"strings"
 )
 
+// peerIsLoopback reports whether the request came from this machine. Behind a
+// reverse proxy every request arrives from the proxy, so a loopback peer
+// address proves nothing: implicit trust is withdrawn entirely and callers
+// must present an admin token or an explicitly trusted origin instead.
+func (s *Server) peerIsLoopback(r *http.Request) bool {
+	return !s.behindProxy && remoteIsLoopback(r.RemoteAddr)
+}
+
 func remoteIsLoopback(remoteAddr string) bool {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -36,7 +44,7 @@ func (s *Server) isTrustedResourceOrigin(origin string, r *http.Request) bool {
 		return true
 	}
 	_, allowed := s.allowedOrigins[normalized]
-	return allowed || (remoteIsLoopback(r.RemoteAddr) && loopbackOrigin(normalized))
+	return allowed || (s.peerIsLoopback(r) && loopbackOrigin(normalized))
 }
 
 func (s *Server) isAllowedResourceHost(host string) bool {
@@ -57,7 +65,7 @@ func (s *Server) isTrustedManagementOrigin(origin string, r *http.Request) bool 
 	if s.trustedUIOrigin != "" {
 		return normalized == s.trustedUIOrigin
 	}
-	return remoteIsLoopback(r.RemoteAddr) && loopbackOrigin(normalized)
+	return s.peerIsLoopback(r) && loopbackOrigin(normalized)
 }
 
 func (s *Server) authorizedOfflineControl(r *http.Request, requireHeader bool) bool {
@@ -66,7 +74,7 @@ func (s *Server) authorizedOfflineControl(r *http.Request, requireHeader bool) b
 	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return remoteIsLoopback(r.RemoteAddr)
+		return s.peerIsLoopback(r)
 	}
 	if requireHeader && r.Header.Get("X-GPX-Editor") == "" {
 		return false

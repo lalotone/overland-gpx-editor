@@ -2652,15 +2652,40 @@ html.dark .loading-overlay {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   border: 2px solid #fff;
-  background: var(--accent);
   color: #fff;
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   font-weight: 700;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.wpt-marker-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.wpt-marker-select select {
+  min-width: 128px;
+  max-width: 190px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.session-overlay-note {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
 }
 
 /* -- Toolbars -------------------------------------------------------- */

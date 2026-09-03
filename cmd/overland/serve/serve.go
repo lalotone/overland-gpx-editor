@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/lalotone/overland-gpx-editor/cmd/overland/util"
+	"github.com/lalotone/overland-gpx-editor/internal/mcp"
 	"github.com/lalotone/overland-gpx-editor/internal/server"
 	"github.com/lalotone/overland-gpx-editor/web"
 	"github.com/urfave/cli/v3"
@@ -36,6 +38,22 @@ func Flags() []cli.Flag {
 			Usage:   "address to listen on",
 			Value:   "127.0.0.1:8000",
 			Sources: util.NonEmptyEnv("ADDR"),
+		},
+		&cli.BoolFlag{
+			Name:    "mcp",
+			Usage:   "enable the loopback-only Streamable HTTP MCP endpoint",
+			Sources: util.BoolEnv("MCP"),
+		},
+		&cli.StringFlag{
+			Name:    "mcp-addr",
+			Usage:   "loopback address for the MCP endpoint; kept off the main listener so a reverse proxy cannot reach it",
+			Value:   "127.0.0.1:8009",
+			Sources: util.NonEmptyEnv("MCP_ADDR"),
+		},
+		&cli.BoolFlag{
+			Name:    "behind-proxy",
+			Usage:   "the server sits behind a reverse proxy; withdraws implicit loopback trust so management needs --offline-admin-token",
+			Sources: util.BoolEnv("BEHIND_PROXY"),
 		},
 		util.GPXDirFlag(),
 		&cli.StringFlag{
@@ -118,6 +136,12 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return fmt.Errorf("elevation-tile-cache-max-bytes: %w", err)
 	}
+
+	behindProxy := cmd.Bool("behind-proxy")
+	bridge, mcpServer, mcpListener, err := startMCP(cmd, behindProxy)
+	if err != nil {
+		return err
+	}
 	srv, err := server.New(server.Config{
 		GPXDir:                     cmd.String("gpx-dir"),
 		ElevationHost:              elevationHost,
@@ -142,9 +166,12 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		OpenFreeMapURL:             cmd.String("openfreemap-url"),
 		OpenFreeMapAllowBulk:       cmd.Bool("openfreemap-allow-bulk"),
 		AllowedOrigins:             cmd.StringSlice("allowed-origin"),
+		MCPBrowserHandler:          browserBridge(bridge),
+		BehindProxy:                behindProxy,
 		Assets:                     assets,
 	})
 	if err != nil {
+		closeMCP(bridge, mcpListener)
 		return err
 	}
 	defer srv.Close()
@@ -156,6 +183,11 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    32 << 10,
+	}
+	httpListener, err := net.Listen("tcp", httpServer.Addr)
+	if err != nil {
+		closeMCP(bridge, mcpListener)
+		return err
 	}
 
 	elevationSource := "Open-Meteo (free non-commercial API, Copernicus 90 m)"
@@ -175,30 +207,84 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 
 	log.Printf("%s %s listening on %s (library: %s, elevation: %s)",
 		util.AppName, cmd.Root().Version, cmd.String("addr"), cmd.String("gpx-dir"), elevationSource)
+	if bridge != nil {
+		log.Printf("MCP available at http://%s/mcp (Streamable HTTP, loopback clients only)", mcpListener.Addr())
+	}
+	if behindProxy {
+		log.Printf("behind a reverse proxy: loopback trust withdrawn, offline management requires an admin token")
+		// Without a declared origin the relay refuses the proxied frontend's
+		// own requests, which looks like routing and tiles quietly breaking.
+		if len(cmd.StringSlice("allowed-origin")) == 0 && strings.TrimSpace(cmd.String("trusted-ui-origin")) == "" {
+			log.Printf("warning: --behind-proxy without --allowed-origin or --trusted-ui-origin will refuse " +
+				"the proxied frontend's routing, elevation and map requests")
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	errCh := make(chan error, 1)
-	go func() { errCh <- httpServer.ListenAndServe() }()
-
-	select {
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
-		}
-		if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		log.Printf("%s stopped", util.AppName)
-		return nil
+	type serviceResult struct {
+		name string
+		err  error
 	}
+	serviceCount := 1
+	if mcpServer != nil {
+		serviceCount++
+	}
+	errCh := make(chan serviceResult, serviceCount)
+	go func() { errCh <- serviceResult{"HTTP server", httpServer.Serve(httpListener)} }()
+	if mcpServer != nil {
+		go func() { errCh <- serviceResult{"MCP server", mcpServer.Serve(mcpListener)} }()
+	}
+
+	var first serviceResult
+	firstReceived := false
+	select {
+	case first = <-errCh:
+		firstReceived = true
+	case <-ctx.Done():
+	}
+
+	if bridge != nil {
+		bridge.Close()
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownErr := httpServer.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		_ = httpServer.Close()
+	}
+	if mcpServer != nil {
+		if err := mcpServer.Shutdown(shutdownCtx); err != nil {
+			_ = mcpServer.Close()
+		}
+	}
+
+	remaining := serviceCount
+	if firstReceived {
+		remaining--
+	}
+	failure := serviceResult{}
+	if firstReceived && !expectedServiceStop(first.err) {
+		failure = first
+	}
+	for range remaining {
+		result := <-errCh
+		if failure.err == nil && !expectedServiceStop(result.err) {
+			failure = result
+		}
+	}
+	if failure.err != nil {
+		return fmt.Errorf("%s: %w", failure.name, failure.err)
+	}
+	if shutdownErr != nil {
+		return fmt.Errorf("shutdown: %w", shutdownErr)
+	}
+	log.Printf("%s stopped", util.AppName)
+	return nil
+}
+
+func expectedServiceStop(err error) bool {
+	return errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)
 }
 
 func parseByteSize(value string) (int64, error) {
@@ -230,11 +316,23 @@ func logRequests(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		if rec.status >= 400 || !strings.HasPrefix(r.URL.Path, "/assets/") {
+		if !routineMCPBrowserSuccess(r, rec.status) && (rec.status >= 400 || !strings.HasPrefix(r.URL.Path, "/assets/")) {
 			log.Printf("%s %s %d %s", r.Method, r.URL.Path, rec.status,
 				time.Since(start).Round(time.Millisecond))
 		}
 	})
+}
+
+func routineMCPBrowserSuccess(r *http.Request, status int) bool {
+	switch {
+	case r.Method == http.MethodPut && r.URL.Path == "/mcp/browser/view":
+		return status == http.StatusNoContent
+	// One line per opened stream would otherwise be logged on every reconnect.
+	case r.Method == http.MethodGet && r.URL.Path == "/mcp/browser/events":
+		return status == http.StatusOK
+	default:
+		return false
+	}
 }
 
 type statusRecorder struct {
@@ -245,4 +343,89 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+// Unwrap lets http.ResponseController reach the real writer.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+// Flush keeps the MCP browser event stream working. Chi's middleware decides
+// whether its own wrapper supports flushing by type-asserting for
+// http.Flusher, so a recorder that only implements Unwrap makes the whole
+// chain non-flushing and commands sit in a buffer until the tab closes.
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// browserBridge returns the private bridge handler, or a nil interface when
+// MCP is disabled so no MCP route is registered at all.
+func browserBridge(bridge *mcp.Bridge) http.Handler {
+	if bridge == nil {
+		return nil
+	}
+	return bridge
+}
+
+func closeMCP(bridge *mcp.Bridge, listener net.Listener) {
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if bridge != nil {
+		bridge.Close()
+	}
+}
+
+// requireLoopbackAddr refuses to expose the agent endpoint beyond this
+// machine. It is the guarantee a reverse proxy cannot undo with a header.
+func requireLoopbackAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("must be host:port")
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("must be a loopback address")
+	}
+	return nil
+}
+
+// startMCP prepares the agent-facing MCP endpoint on its own loopback
+// listener. It returns nils when --mcp is not set.
+func startMCP(cmd *cli.Command, behindProxy bool) (*mcp.Bridge, *http.Server, net.Listener, error) {
+	if !cmd.Bool("mcp") {
+		return nil, nil, nil, nil
+	}
+	// A proxied deployment serves remote browsers, so the tab an agent would
+	// drive is not on this machine and the loopback guarantees the bridge
+	// depends on no longer hold. Refuse rather than half-enable it.
+	if behindProxy {
+		return nil, nil, nil, errors.New("--mcp cannot be combined with --behind-proxy: MCP controls a browser on this machine only")
+	}
+	addr := cmd.String("mcp-addr")
+	if err := requireLoopbackAddr(addr); err != nil {
+		return nil, nil, nil, fmt.Errorf("mcp-addr: %w", err)
+	}
+	bridge, err := mcp.NewBridge()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create MCP bridge: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", http.StripPrefix("/mcp", mcp.NewHandler(bridge, cmd.Root().Version)))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		bridge.Close()
+		return nil, nil, nil, err
+	}
+	return bridge, &http.Server{
+		Handler:           logRequests(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}, listener, nil
 }

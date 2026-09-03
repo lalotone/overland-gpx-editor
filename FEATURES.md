@@ -178,6 +178,13 @@ the service is down, the OSM fuel layer answers as before.
   cancel/delete actions. Coverage returns after a reload.
 - **Editing tools behind a Tools toggle**, grouped by what they do; the POI
   layers and undo stay on the always-visible strip.
+- **Typed waypoint markers** for fuel, water, camps, food, lodging, parking,
+  repairs, medical help, viewpoints, hazards, roadblocks, ferries, borders,
+  restrooms, information and picnic areas. Unknown imported GPX symbols remain
+  intact and use a safe generic icon.
+- **Agent map annotations** can place a session-only track and typed markers on
+  the planner, editor, or Explore map without modifying the open GPX. They stay
+  visible across map-mode switches and disappear on reload.
 
 ## File handling
 

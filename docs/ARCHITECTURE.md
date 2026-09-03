@@ -35,6 +35,7 @@ Two consequences worth knowing:
 ```
 src/
 ├── App.tsx                     Screens, state, wiring
+├── useMcpBridge.ts             Optional MCP browser broker client
 ├── components/                 Presentational React components
 │   ├── ColoredTrack.tsx        Full-resolution track, run-length coloured
 │   ├── ElevationProfile.tsx    Profile chart, hover, range selection
@@ -56,7 +57,9 @@ src/
     ├── routing.ts              Valhalla costing and fallbacks
     ├── surface.ts              Per-segment surface via trace_attributes
     ├── terrain.ts              Map layers and colour scales
-    └── poi.ts                  Overpass fuel / water / campsite lookups
+    ├── poi.ts                  Overpass fuel / water / campsite lookups
+    ├── mcp.ts                  MCP command decoding and validation
+    └── waypointMarkers.ts      Typed marker catalog and GPX-symbol mapping
 
 cmd/overland/
 ├── main.go                     Minimal urfave/cli entry point
@@ -75,6 +78,10 @@ internal/server/
 ├── packs.go                    Trip-pack estimates, manifests and workers
 ├── offline.go                  Capabilities, status and management security
 └── telemetry.go                Privacy-safe aggregate operational logs
+internal/mcp/
+├── bridge.go                   Capability-protected active-browser broker
+├── server.go                   Official SDK Streamable HTTP server and MCP methods
+└── tools.go                    Tool schemas and boundary validation
 web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
 
@@ -89,7 +96,8 @@ gpx/                            Local track library (gitignored)
 
 ## Backend
 
-The CLI uses `urfave/cli`; the HTTP backend uses Chi for routing and middleware.
+The CLI uses `urfave/cli`; the HTTP backend uses Chi for routing and middleware,
+and the optional MCP endpoint uses the official MCP Go SDK.
 The global stack assigns request IDs, recovers panics, compresses eligible
 responses, caps concurrent work, supplies security headers and handles explicit
 CORS origins. Go 1.25 is the minimum because the library uses the
@@ -162,6 +170,28 @@ does not inspect or emit request identities, URLs, provider payloads or pack
 identities. The loop belongs to the server context and exits before `Close`
 returns.
 
+**`internal/mcp`** is optional and constructed by the `serve` command only when
+`--mcp` is set. The official SDK serves standard Streamable HTTP at `/mcp` on a
+dedicated loopback listener (`--mcp-addr`) and rejects non-loopback peers. It is
+kept off the main listener so a reverse proxy cannot reach it by construction;
+only the browser bridge stays there, because the page needs it same-origin. A bounded broker passes
+allowlisted commands to the focused browser over private `/mcp/browser/*`
+routes and retains its latest state snapshot. Commands are pushed on a
+server-sent event stream rather than polled, so an idle tab costs one open
+connection instead of several requests a second. The browser half requires a
+random per-process capability and loopback Host, Origin and peer checks. The
+generic backend receives only an injected `http.Handler`, so disabled runs have
+no MCP route or detached MCP lifecycle.
+
+The capability reaches the page as an HttpOnly cookie scoped to
+`/mcp/browser`, because `EventSource` cannot send an Authorization header. It
+is never readable by page scripts and is never attached to ordinary API calls.
+The stream is exempt from the global request throttle: it is held open for the
+lifetime of a tab, and a few tabs would otherwise consume the in-flight budget
+shared with the rest of the API. Anything wrapping the response writer must
+implement `Unwrap`, or `http.ResponseController` cannot flush and commands sit
+in a buffer until the connection closes.
+
 Coordinates are parsed and range-checked before they reach an upstream URL, and
 requests are chunked to the 100-point limit both services impose, then stitched
 back in order. A point the service has no value for comes back `null`, never
@@ -196,6 +226,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `/offline/packs` | Estimate, create, inspect, cancel and delete trip packs |
 | `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope |
 | `GET /healthz` | Lightweight liveness check; returns 204 |
+| `/mcp/browser/*` | Private browser broker, mounted only with `--mcp`. The agent-facing `/mcp` endpoint is **not** here: it is served by a separate loopback listener so a reverse proxy in front of this one cannot reach it |
 | `GET /*` | The React app; unknown paths fall through to it |
 
 Application errors come back as `{"detail": "…"}` with a matching status.
@@ -215,6 +246,20 @@ be visible.
 
 `App.tsx` owns screens and state; everything under `components/` is
 presentational.
+
+`useMcpBridge.ts` probes the optional same-origin browser broker. When enabled,
+it publishes a bounded state snapshot once per second, receives commands on an
+`EventSource` stream, applies them through `App.tsx`'s existing planner/edit
+paths, and publishes again before acknowledging. That pre-acknowledgement
+publish is retried, unlike the heartbeat: it is what lets an agent read the
+state its own tool call produced, so dropping it silently would break the
+contract. Commands are applied one at a time, and a redelivered command replays
+its stored result rather than running the edit twice — a reconnect can deliver
+a duplicate while the original is still in flight. Pure command decoding and
+coordinate validation stay in `lib/mcp.ts`. Agent map tracks and markers live in
+separate App-level session state: every map renders them, but GPX building,
+dirty state, undo history, saves, and downloads never read them. Mode-specific
+commands check the active screen; navigation is explicit through `switch_mode`.
 
 Explore owns its area-pack polling and downloaded-coverage visibility. Opening
 the area tool enables completed coverage, estimates are aborted and regenerated

@@ -367,3 +367,61 @@ func TestConfigurationValidation(t *testing.T) {
 		}
 	}
 }
+
+// Behind a reverse proxy every request arrives from the proxy's loopback
+// address, so trusting the peer would hand offline management and the resource
+// relay to any remote client that simply omits an Origin header.
+func TestBehindProxyWithdrawsLoopbackTrust(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		behindProxy bool
+		wantStatus  int
+	}{
+		{name: "direct loopback deployment", behindProxy: false, wantStatus: http.StatusOK},
+		{name: "proxied deployment", behindProxy: true, wantStatus: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv, err := New(Config{
+				GPXDir:        t.TempDir(),
+				ElevationHost: "http://elevation.invalid",
+				BehindProxy:   test.behindProxy,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { srv.Close() })
+
+			// A remote client reaching a proxied server looks exactly like
+			// this: loopback peer, no Origin, no browser headers.
+			request := httptest.NewRequest(http.MethodGet, "/offline/packs", nil)
+			request.RemoteAddr = "127.0.0.1:32000"
+			recorder := httptest.NewRecorder()
+			srv.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("offline management status = %d, want %d", recorder.Code, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestBehindProxyStillHonoursTheAdminToken(t *testing.T) {
+	srv, err := New(Config{
+		GPXDir:            t.TempDir(),
+		ElevationHost:     "http://elevation.invalid",
+		BehindProxy:       true,
+		OfflineAdminToken: "s3cret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	request := httptest.NewRequest(http.MethodGet, "/offline/packs", nil)
+	request.RemoteAddr = "203.0.113.10:32000"
+	request.Header.Set("Authorization", "Bearer s3cret")
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("token-authorized management status = %d, want 200", recorder.Code)
+	}
+}

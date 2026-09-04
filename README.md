@@ -9,7 +9,7 @@ shipped as one self-contained binary.
 
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
-[![Go dependencies](https://img.shields.io/badge/Go%20dependencies-3-brightgreen)](go.mod)
+[![Go dependencies](https://img.shields.io/badge/Go%20dependencies-4-brightgreen)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -108,6 +108,28 @@ Run `./overland serve --help` for server and elevation options, or
 `./overland import --help` for import usage. Both commands read `GPX_DIR` and
 default to `$XDG_DATA_HOME/overland/gpx` (normally
 `~/.local/share/overland/gpx`).
+
+Agents can control the open planner and track editor through an optional local
+MCP Streamable HTTP endpoint:
+
+```bash
+./overland serve --mcp                        # http://127.0.0.1:8009/mcp
+./overland serve --mcp --mcp-addr 127.0.0.1:9009
+```
+
+The MCP endpoint listens on its own loopback address rather than on `--addr`,
+so a reverse proxy in front of the app cannot reach it. Behind a proxy, run the
+server with `--behind-proxy`: it withdraws the implicit loopback trust that a
+proxy would otherwise hand to every remote client, and offline management then
+requires `OFFLINE_ADMIN_TOKEN`.
+
+It exposes route controls, typed GPX waypoints, editable track geometry,
+explicit planner/editor/Explore switching, and session-only map annotations,
+plus library opening, POI loading, and an `overland://view` resource containing
+the current map and planning context. The endpoint uses the standard MCP
+Streamable HTTP transport, rejects non-loopback clients, and never saves an
+edit automatically. See **[docs/MCP.md](docs/MCP.md)** for setup, tools and the
+local trust boundary.
 
 `make cross` writes Linux, macOS and Windows binaries to `build/`, and
 `make dist` archives them with `.deb`/`.rpm` packages and checksums the way a
@@ -220,6 +242,9 @@ bundle at build time.
 | Variable | Side | Default | Purpose |
 | --- | --- | --- | --- |
 | `ADDR` | backend | `127.0.0.1:8000` | Listen address; use a public interface only behind authentication |
+| `MCP` | backend | `off` | Enable local Streamable HTTP MCP control on its own loopback listener |
+| `MCP_ADDR` | backend | `127.0.0.1:8009` | Address for the MCP endpoint; refuses anything but loopback, and is never behind the proxy |
+| `BEHIND_PROXY` | backend | `off` | The server runs behind a reverse proxy; withdraws implicit loopback trust, so management needs `OFFLINE_ADMIN_TOKEN` and the relay needs `ALLOWED_ORIGINS` |
 | `GPX_DIR` | backend | `$XDG_DATA_HOME/overland/gpx` (`~/.local/share/overland/gpx`) | Track library directory |
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ALLOWED_ORIGINS` | backend | *(empty)* | Comma-separated exact browser origins allowed to call the API |
@@ -379,6 +404,7 @@ Issues and pull requests are welcome. Before opening one:
 | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How it fits together, file tree, HTTP API |
 | [docs/ACCURACY.md](docs/ACCURACY.md) | How distance, elevation and slope are computed |
+| [docs/MCP.md](docs/MCP.md) | MCP setup, tools, view resource and security |
 | [FEATURES.md](FEATURES.md) | Complete feature reference |
 | [AGENTS.md](AGENTS.md) | Conventions and workflow for coding agents |
 | [.env.example](.env.example) | Every configuration variable |

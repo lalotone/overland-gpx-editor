@@ -81,6 +81,15 @@ type Config struct {
 	// AllowedOrigins lists exact browser origins allowed to call the API.
 	// Empty permits same-origin requests only when the request host is loopback.
 	AllowedOrigins []string
+	// MCPBrowserHandler serves the private MCP browser bridge. It lives on the
+	// main listener because the page must reach it same-origin; the agent-facing
+	// MCP endpoint is served from a separate loopback listener instead.
+	// Nil keeps all MCP HTTP routes absent.
+	MCPBrowserHandler http.Handler
+	// BehindProxy withdraws implicit loopback trust. Behind a reverse proxy
+	// every request arrives from the proxy, so a loopback peer address proves
+	// nothing and management must be authorized explicitly.
+	BehindProxy bool
 	// Assets is the built frontend. When nil the server is API-only.
 	Assets fs.FS
 }
@@ -118,6 +127,8 @@ type Server struct {
 	rasterMaps      map[string]*rasterAdapter
 	packs           *packManager
 	allowedOrigins  map[string]struct{}
+	mcpBrowser      http.Handler
+	behindProxy     bool
 	assets          fs.FS
 	handler         http.Handler
 	statsInterval   time.Duration
@@ -253,6 +264,8 @@ func New(cfg Config) (*Server, error) {
 		"osrm-route":     newProviderPolicy("osrm-route", "routing", parsedURLs["osrm"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
 		"surface":        newProviderPolicy("valhalla-surface", "surface", parsedURLs["valhalla"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
 	}
+	providers["valhalla-route"].fetchTimeout = routeOutboundFetchTimeout
+	providers["osrm-route"].fetchTimeout = routeOutboundFetchTimeout
 	providers["fuel"].maxFresh = 24 * time.Hour
 	providers["fuel"].applicationData = true
 
@@ -289,6 +302,8 @@ func New(cfg Config) (*Server, error) {
 		},
 		nominatimURL:   nominatimURL,
 		allowedOrigins: allowedOrigins,
+		mcpBrowser:     cfg.MCPBrowserHandler,
+		behindProxy:    cfg.BehindProxy,
 		assets:         cfg.Assets,
 		statsInterval:  cfg.StatsLogInterval,
 		statsLogger:    cfg.StatsLogger,
@@ -302,7 +317,14 @@ func New(cfg Config) (*Server, error) {
 		tiles.configureLifecycle(modes, rootCtx, &s.wg)
 		tiles.userAgent = ua
 	}
-	s.outbound = newOutboundClientWithModes(modes, cache, client, rootCtx, &s.wg, ua)
+	// Provider requests carry operation-specific context deadlines. Keep the
+	// shared client's shorter ceiling for elevation tiles and direct DEM calls.
+	outboundHTTPClient := *client
+	outboundHTTPClient.Timeout = 0
+	s.outbound = newOutboundClientWithModes(modes, cache, &outboundHTTPClient, rootCtx, &s.wg, ua)
+	if client.Timeout > 0 && client.Timeout < s.outbound.fetchTimeout {
+		s.outbound.fetchTimeout = client.Timeout
+	}
 	s.rasterMaps, err = newRasterAdapters()
 	if err != nil {
 		cancel()
@@ -403,12 +425,31 @@ func newProviderPolicy(name, scope string, base *url.URL, fresh, stale, retentio
 	return &providerPolicy{name: name, scope: scope, baseURL: base, sourceFingerprint: sourceFingerprint(base), fallbackFresh: fresh, maxStale: stale, allowStale: allowStale, retention: retention, staleOnError: staleOnError, maxBody: maxBody, contentTypes: contentTypes, group: group, packEligible: packEligible, approvedHosts: map[string]struct{}{strings.ToLower(base.Host): {}}}
 }
 
+// mcpBrowserEventsPath is the long-lived MCP browser command stream. It is
+// held open for the lifetime of a tab, so it must not occupy a slot in the
+// request throttle shared with the rest of the API.
+const mcpBrowserEventsPath = "/mcp/browser/events"
+
+// skipPath applies middleware to every request except one exact path.
+func skipPath(path string, mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		wrapped := mw(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == path {
+				next.ServeHTTP(w, r)
+				return
+			}
+			wrapped.ServeHTTP(w, r)
+		})
+	}
+}
+
 func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
-	r.Use(middleware.ThrottleBacklog(maxInFlightRequests, maxQueuedRequests, 5*time.Second))
+	r.Use(skipPath(mcpBrowserEventsPath, middleware.ThrottleBacklog(maxInFlightRequests, maxQueuedRequests, 5*time.Second)))
 	r.Use(middleware.Compress(5))
 	r.Use(middleware.GetHead)
 	r.Use(s.protectBrowserWrites)
@@ -511,6 +552,9 @@ func (s *Server) routes() http.Handler {
 	r.Delete("/offline/cache", s.requireOfflineControl(s.handleClearCache))
 	r.Options("/offline/*", s.handleOfflineOptions)
 	r.Get("/config", s.handleConfig)
+	if s.mcpBrowser != nil {
+		r.Mount("/mcp/browser", http.StripPrefix("/mcp/browser", s.mcpBrowser))
+	}
 	r.Options("/*", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})

@@ -13,6 +13,7 @@ import { SplashScreen } from './components/SplashScreen'
 import { TrackCard } from './components/TrackCard'
 import type { TrackPreview } from './components/TrackCard'
 import { ESCAPE_PRIORITY, useEscapeDismiss } from './components/useEscapeDismiss'
+import { useMcpBridge } from './useMcpBridge'
 
 import {
   attachElevations,
@@ -55,6 +56,7 @@ import { availableFuels, DEFAULT_FUEL_REFERENCE, fuelBandColors, FUEL_PRICE_BAND
 import { fetchRouteSurface, summarizeSurface, surfaceDefinition } from './lib/surface'
 import type { SurfaceClass } from './lib/surface'
 import { clearedRouteDerivedState, routeSequenceIsCurrent } from './lib/planner'
+import type { McpCommand, McpMapMarker } from './lib/mcp'
 import {
   altitudeColor,
   getSegmentColor,
@@ -64,6 +66,12 @@ import {
 } from './lib/terrain'
 import type { ColorMode } from './lib/terrain'
 import type { Coordinate, GpxWaypoint, Track } from './lib/types'
+import {
+  WAYPOINT_MARKERS,
+  waypointMarkerDefinition,
+  waypointMarkerIdFromSymbol,
+} from './lib/waypointMarkers'
+import type { WaypointMarkerId } from './lib/waypointMarkers'
 import {
   bootstrapRuntimeConfig,
   formatCacheContext,
@@ -110,6 +118,25 @@ function expectedOfflineVectorMiss(issue: VectorMapIssue, mode?: OfflineMode): b
 }
 
 type ViewMode = 'welcome' | 'upload' | 'creation' | 'explore' | 'view'
+
+function hasInteractiveMap(viewMode: ViewMode): boolean {
+  return viewMode === 'creation' || viewMode === 'explore' || viewMode === 'view'
+}
+
+function readMapViewport(map: L.Map) {
+  const center = map.getCenter()
+  const bounds = map.getBounds()
+  return {
+    center: { lat: center.lat, lon: center.lng },
+    zoom: map.getZoom(),
+    bounds: {
+      south: bounds.getSouth(),
+      west: bounds.getWest(),
+      north: bounds.getNorth(),
+      east: bounds.getEast(),
+    },
+  }
+}
 
 interface TilePrefetch {
   running: boolean
@@ -358,19 +385,85 @@ function PoiPopupBody({ poi, fallbackLabel }: { poi: Poi; fallbackLabel: string 
   )
 }
 
-function waypointIcon(label: string): L.DivIcon {
-  const key = `wpt:${label}`
+function waypointIcon(markerId: WaypointMarkerId): L.DivIcon {
+  const key = `wpt:${markerId}`
   let icon = iconCache.get(key)
   if (!icon) {
+    const marker = waypointMarkerDefinition(markerId)
     icon = L.divIcon({
-      className: 'gpx-waypoint-marker',
-      html: `<span class="gpx-waypoint-inner">${label}</span>`,
-      iconSize: [20, 20],
-      iconAnchor: [10, 10],
+      className: `gpx-waypoint-marker waypoint-marker-${marker.id}`,
+      // Glyph and colour come only from the fixed catalog, never GPX or MCP text.
+      html: `<span class="gpx-waypoint-inner" style="background:${marker.color}">${marker.glyph}</span>`,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
     })
     iconCache.set(key, icon)
   }
   return icon
+}
+
+function WaypointMarkerSelect({
+  symbol,
+  onChange,
+}: {
+  symbol?: string
+  onChange: (marker: WaypointMarkerId) => void
+}) {
+  const markerId = waypointMarkerIdFromSymbol(symbol)
+  const imported = markerId === undefined
+  return (
+    <label className="wpt-marker-select">
+      <span>Marker</span>
+      <select
+        value={markerId ?? '__imported__'}
+        onChange={event => {
+          if (event.target.value !== '__imported__') onChange(event.target.value as WaypointMarkerId)
+        }}
+        aria-label="Waypoint marker type"
+      >
+        {imported && <option value="__imported__" disabled>Imported: {symbol}</option>}
+        {WAYPOINT_MARKERS.map(marker => (
+          <option key={marker.id} value={marker.id}>{marker.glyph} {marker.label}</option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function SessionMapOverlays({
+  track,
+  markers,
+}: {
+  track: Coordinate[]
+  markers: McpMapMarker[]
+}) {
+  return (
+    <>
+      {track.length > 1 && (
+        <Polyline
+          positions={track.map(point => [point.lat, point.lon] as [number, number])}
+          pathOptions={{ color: '#d946ef', weight: 5, opacity: 0.9, dashArray: '10 7', className: 'session-map-track' }}
+          interactive={false}
+        />
+      )}
+      {markers.map((marker, index) => {
+        const definition = waypointMarkerDefinition(marker.marker)
+        return (
+          <Marker
+            key={`${marker.lat}:${marker.lon}:${marker.marker}:${index}`}
+            position={[marker.lat, marker.lon]}
+            icon={waypointIcon(marker.marker)}
+          >
+            <Popup>
+              <strong>{marker.name ?? definition.label}</strong>
+              {marker.desc && <><br />{marker.desc}</>}
+              <span className="session-overlay-note">Session map marker</span>
+            </Popup>
+          </Marker>
+        )
+      })}
+    </>
+  )
 }
 
 /* ------------------------------------------------------------------ */
@@ -383,6 +476,16 @@ interface Notification {
   id: number
   message: string
   type: NotificationType
+}
+
+/** How many recent messages the snapshot carries for MCP clients. */
+const MAX_RETAINED_MESSAGES = 20
+
+interface RetainedMessage {
+  seq: number
+  at: string
+  type: NotificationType
+  message: string
 }
 
 function NotificationBar({
@@ -514,6 +617,8 @@ function App() {
   const [colorMode, setColorMode] = useState<ColorMode>(
     () => (localStorage.getItem('gpx-color-mode') as ColorMode) ?? 'slope',
   )
+  const [sessionMapTrack, setSessionMapTrack] = useState<Coordinate[]>([])
+  const [sessionMapMarkers, setSessionMapMarkers] = useState<McpMapMarker[]>([])
   const [vectorMapIssue, setVectorMapIssue] = useState<VectorMapIssue | null>(null)
   const [offlineModeBusy, setOfflineModeBusy] = useState(false)
 
@@ -546,6 +651,8 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('')
   const [notifications, setNotifications] = useState<Notification[]>([])
+  /** Retained copy of every notification, for agents reading the snapshot. */
+  const [recentMessages, setRecentMessages] = useState<RetainedMessage[]>([])
   const [dragOver, setDragOver] = useState(false)
   const [savedFiles, setSavedFiles] = useState<TrackPreview[]>([])
   const [trackFilter, setTrackFilter] = useState('')
@@ -590,6 +697,7 @@ function App() {
   const [routeCache, setRouteCache] = useState<CacheMetadata | undefined>()
   const [routedLoading, setRoutedLoading] = useState(false)
   const [routeStatus, setRouteStatus] = useState('')
+  const [routeError, setRouteError] = useState<string | null>(null)
   const [elevationApiError, setElevationApiError] = useState(false)
   const [elevationInterpolated, setElevationInterpolated] = useState(false)
   const [routingProfile, setRoutingProfile] = useState<RoutingProfile>('mixed')
@@ -617,10 +725,14 @@ function App() {
   const [nominatimApi, setNominatimApi] = useState(DEFAULT_NOMINATIM_API)
 
   const mapRef = useRef<L.Map | null>(null)
+  const registerActiveMap = useCallback((map: L.Map | null) => {
+    mapRef.current = map
+  }, [])
   const notifIdRef = useRef(0)
   const vectorIssueNotifiedRef = useRef('')
   const staleNotifiedRef = useRef(false)
   const routeSeqRef = useRef(0)
+  const routePointIDRef = useRef(Date.now())
   const placeSearchSeqRef = useRef(0)
   const placeSearchAbortRef = useRef<AbortController | null>(null)
   const offlineRouteKeyRef = useRef(0)
@@ -640,13 +752,19 @@ function App() {
     setElevationApiError(cleared.elevationApiError)
     setRouteStatus(cleared.routeStatus)
     setRoutedLoading(cleared.routedLoading)
+    setRouteError(null)
   }, [])
 
   /* -- Notifications ------------------------------------------------ */
 
   const notify = useCallback((message: string, type: NotificationType = 'info') => {
     const id = ++notifIdRef.current
+    const at = new Date().toISOString()
     setNotifications(prev => [...prev, { id, message, type }])
+    // Toasts vanish after five seconds, which is far too short for an agent
+    // polling the snapshot. Anything the user was told is retained here so an
+    // MCP client can see the failure its own command caused.
+    setRecentMessages(prev => [...prev, { seq: id, at, type, message }].slice(-MAX_RETAINED_MESSAGES))
     setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), 5000)
   }, [])
 
@@ -1096,18 +1214,18 @@ function App() {
   const loadCreationPois = useCallback(
     async (kinds: PoiKind[]) => {
       const bbox = viewportBounds()
-      if (!bbox) return
+      if (!bbox) return { loaded: 0, errors: ['The planning map is not available'] }
 
       const { widthKm, heightKm } = boundingBoxSpanKm(bbox)
       const span = Math.max(widthKm, heightKm)
       if (span > MAX_SEARCH_SPAN_KM) {
-        notify(
-          `This view spans about ${span.toFixed(0)} km — zoom in to under ${MAX_SEARCH_SPAN_KM} km to search it`,
-          'info',
-        )
-        return
+        const message = `This view spans about ${span.toFixed(0)} km — zoom in to under ${MAX_SEARCH_SPAN_KM} km to search it`
+        notify(message, 'info')
+        return { loaded: 0, errors: [message] }
       }
 
+      let loaded = 0
+      const errors: string[] = []
       // One kind at a time: a refresh asks for three layers at once, and
       // Overpass is a shared free service.
       for (const kind of kinds) {
@@ -1120,6 +1238,7 @@ function App() {
           })
           setCreationPois(prev => ({ ...prev, [kind]: pois }))
           setCreationPoiCache(prev => ({ ...prev, [kind]: cache }))
+          loaded += pois.length
           const label = POI_KINDS.find(k => k.id === kind)?.label.toLowerCase() ?? kind
           if (pois.length === 0) {
             notify(`No ${label} points in this view`, 'info')
@@ -1129,11 +1248,14 @@ function App() {
             notify(`${pois.length} fuel stations with ${source}`, 'info')
           }
         } catch (err) {
-          notify(`Could not load ${kind} points: ${(err as Error).message}`, 'error')
+          const message = `Could not load ${kind} points: ${(err as Error).message}`
+          errors.push(message)
+          notify(message, 'error')
         } finally {
           setCreationPoiLoading(null)
         }
       }
+      return { loaded, errors }
     },
     [handleCacheMetadata, notify, runtime, viewportBounds],
   )
@@ -1221,9 +1343,17 @@ function App() {
    */
   const addWaypoint = useCallback(
     (lat: number, lon: number) => {
-      applyEdit('Waypoint added', t => ({
-        ...t,
-        waypoints: [...t.waypoints, { lat, lon, name: `Waypoint ${t.waypoints.length + 1}` }],
+      applyEdit('Waypoint added', track => ({
+        ...track,
+        waypoints: [
+          ...track.waypoints,
+          {
+            lat,
+            lon,
+            name: `Waypoint ${track.waypoints.length + 1}`,
+            sym: waypointMarkerDefinition('generic').gpxSymbol,
+          },
+        ],
       }))
     },
     [applyEdit],
@@ -1234,9 +1364,9 @@ function App() {
       const current = tracks[selectedTrackIndex]?.waypoints[index]
       const name = prompt('Waypoint name', current?.name ?? '')?.trim()
       if (!name) return
-      applyEdit('Waypoint renamed', t => ({
-        ...t,
-        waypoints: t.waypoints.map((w, i) => (i === index ? { ...w, name } : w)),
+      applyEdit('Waypoint renamed', track => ({
+        ...track,
+        waypoints: track.waypoints.map((waypoint, i) => (i === index ? { ...waypoint, name } : waypoint)),
       }))
     },
     [applyEdit, tracks, selectedTrackIndex],
@@ -1244,9 +1374,21 @@ function App() {
 
   const removeWaypoint = useCallback(
     (index: number) => {
-      applyEdit('Waypoint removed', t => ({
-        ...t,
-        waypoints: t.waypoints.filter((_, i) => i !== index),
+      applyEdit('Waypoint removed', track => ({
+        ...track,
+        waypoints: track.waypoints.filter((_, i) => i !== index),
+      }))
+    },
+    [applyEdit],
+  )
+
+  const changeWaypointMarker = useCallback(
+    (index: number, markerId: WaypointMarkerId) => {
+      applyEdit('Waypoint marker changed', track => ({
+        ...track,
+        waypoints: track.waypoints.map((waypoint, i) => i === index
+          ? { ...waypoint, sym: waypointMarkerDefinition(markerId).gpxSymbol }
+          : waypoint),
       }))
     },
     [applyEdit],
@@ -1460,12 +1602,17 @@ function App() {
       if (waypointMode) {
         setCreationPins(prev => [
           ...prev,
-          { lat: e.latlng.lat, lon: e.latlng.lng, name: `Point of interest ${prev.length + 1}` },
+          {
+            lat: e.latlng.lat,
+            lon: e.latlng.lng,
+            name: `Point of interest ${prev.length + 1}`,
+            sym: waypointMarkerDefinition('generic').gpxSymbol,
+          },
         ])
         return
       }
 
-      const waypoint: Waypoint = { id: Date.now(), lat: e.latlng.lat, lon: e.latlng.lng }
+      const waypoint: Waypoint = { id: ++routePointIDRef.current, lat: e.latlng.lat, lon: e.latlng.lng }
       setCreationWaypoints(prev => [...prev, waypoint])
       fetchWaypointElevation(waypoint)
     },
@@ -1485,6 +1632,12 @@ function App() {
 
   const removeCreationPin = useCallback((index: number) => {
     setCreationPins(prev => prev.filter((_, i) => i !== index))
+  }, [])
+
+  const changeCreationPinMarker = useCallback((index: number, markerId: WaypointMarkerId) => {
+    setCreationPins(prev => prev.map((pin, i) => i === index
+      ? { ...pin, sym: waypointMarkerDefinition(markerId).gpxSymbol }
+      : pin))
   }, [])
 
   const deleteWaypoint = useCallback((id: number) => {
@@ -1673,7 +1826,9 @@ function App() {
         if ((err as Error).name === 'AbortError' || !isCurrent()) return
         if (!routingComplete) {
           clearRouteDerived()
-          notify((err as Error).message || 'Could not calculate route', 'error')
+          const message = (err as Error).message || 'Could not calculate route'
+          setRouteError(message)
+          notify(message, 'error')
         } else if (err instanceof ElevationUnavailableError) {
           setElevationInterpolated(false)
           setElevationApiError(true)
@@ -1821,6 +1976,305 @@ function App() {
     setViewMode('welcome')
   }, [clearRouteDerived, loadSavedFiles])
 
+  const fitMcpPoints = (points: Coordinate[]) => {
+    if (points.length === 0) return
+    window.setTimeout(() => {
+      const map = mapRef.current
+      if (!map) return
+      if (points.length === 1) {
+        map.flyTo([points[0].lat, points[0].lon], Math.max(map.getZoom(), 13), { duration: 0.4 })
+        return
+      }
+      map.fitBounds(L.latLngBounds(points.map(point => [point.lat, point.lon])), { padding: [40, 40] })
+    }, 100)
+  }
+
+  async function handleMcpCommand(command: McpCommand): Promise<unknown> {
+    switch (command.name) {
+      case 'plan_route': {
+        if (viewMode !== 'creation') throw new Error('plan_route requires planner mode; use switch_mode first')
+        const controls = command.arguments.points.map(point => ({
+          id: ++routePointIDRef.current,
+          lat: point.lat,
+          lon: point.lon,
+          elevation: point.elevation,
+        }))
+        const next = command.arguments.mode === 'append'
+          ? [...creationWaypoints, ...controls]
+          : controls
+        if (next.length > 100) throw new Error('The planner cannot contain more than 100 route controls')
+        routeSeqRef.current++
+        clearRouteDerived()
+        if (command.arguments.profile) setRoutingProfile(command.arguments.profile)
+        setWaypointMode(false)
+        setCreationWaypoints(next)
+        if (command.arguments.fitView) fitMcpPoints(next)
+        return { ok: true, screen: 'creation', routePointCount: next.length }
+      }
+      case 'draw_track': {
+        if (viewMode !== 'view') throw new Error('draw_track requires editor mode; use open_track or switch_mode first')
+        if (!currentTrack) throw new Error('Open a track before editing its geometry')
+        const nextCoordinates = command.arguments.mode === 'append'
+          ? [...currentTrack.coordinates, ...command.arguments.points]
+          : command.arguments.points
+        if (nextCoordinates.length > 6000) throw new Error('The track cannot contain more than 6000 points')
+        applyEdit('Track geometry updated by MCP', track => ({
+          ...track,
+          coordinates: nextCoordinates,
+          elevations: command.arguments.mode === 'append'
+            ? [...track.elevations, ...command.arguments.points.map(point => point.elevation ?? null)]
+            : nextCoordinates.map(point => point.elevation ?? null),
+        }))
+        if (command.arguments.fitView) fitMcpPoints(nextCoordinates)
+        return { ok: true, screen: 'view', pointCount: nextCoordinates.length, dirty: true }
+      }
+      case 'set_waypoints': {
+        if (command.arguments.target === 'planner') {
+          if (viewMode !== 'creation') throw new Error('Planner waypoints require planner mode; use switch_mode first')
+          const next = command.arguments.mode === 'append'
+            ? [...creationPins, ...command.arguments.waypoints]
+            : command.arguments.waypoints
+          if (next.length > 1000) throw new Error('The planner cannot contain more than 1000 waypoints')
+          setCreationPins(next)
+          return { ok: true, target: 'planner', waypointCount: next.length }
+        }
+        if (viewMode !== 'view') throw new Error('Track waypoints require editor mode; use open_track or switch_mode first')
+        if (!currentTrack) throw new Error('Open a track before editing its waypoints')
+        const next = command.arguments.mode === 'append'
+          ? [...currentTrack.waypoints, ...command.arguments.waypoints]
+          : command.arguments.waypoints
+        if (next.length > 1000) throw new Error('The track cannot contain more than 1000 waypoints')
+        applyEdit('Waypoints updated by MCP', track => ({ ...track, waypoints: next }))
+        return { ok: true, target: 'track', waypointCount: next.length, dirty: true }
+      }
+      case 'draw_map_track': {
+        if (!hasInteractiveMap(viewMode)) {
+          throw new Error('Open the planner, a track, or Explore before drawing a session map track')
+        }
+        const next = command.arguments.mode === 'append'
+          ? [...sessionMapTrack, ...command.arguments.points]
+          : command.arguments.points
+        if (next.length > 6000) throw new Error('The session map track cannot contain more than 6000 points')
+        setSessionMapTrack(next)
+        if (command.arguments.fitView) fitMcpPoints(next)
+        return { ok: true, screen: viewMode, pointCount: next.length, persisted: false }
+      }
+      case 'set_map_markers': {
+        if (!hasInteractiveMap(viewMode)) {
+          throw new Error('Open the planner, a track, or Explore before adding session map markers')
+        }
+        const next = command.arguments.mode === 'append'
+          ? [...sessionMapMarkers, ...command.arguments.markers]
+          : command.arguments.markers
+        if (next.length > 1000) throw new Error('The session map cannot contain more than 1000 markers')
+        setSessionMapMarkers(next)
+        if (command.arguments.fitView) fitMcpPoints(next)
+        return { ok: true, screen: viewMode, markerCount: next.length, persisted: false }
+      }
+      case 'switch_mode': {
+        if (command.arguments.mode === 'editor' && !currentTrack) {
+          throw new Error('Open a track before switching to editor mode')
+        }
+        const screen: ViewMode = command.arguments.mode === 'planner'
+          ? 'creation'
+          : command.arguments.mode === 'editor'
+            ? 'view'
+            : 'explore'
+        setWaypointMode(false)
+        setSelectionMode(false)
+        setCursorPos(null)
+        setViewMode(screen)
+        return { ok: true, mode: command.arguments.mode, screen }
+      }
+      case 'set_map_view': {
+        if (!hasInteractiveMap(viewMode)) {
+          throw new Error('Open the planner, a track, or Explore before moving the map')
+        }
+        const map = mapRef.current
+        if (!map) throw new Error('The active map is not ready')
+        map.setView(
+          [command.arguments.lat, command.arguments.lon],
+          command.arguments.zoom ?? map.getZoom(),
+          { animate: false },
+        )
+        return { ok: true, ...readMapViewport(map) }
+      }
+      case 'open_track': {
+        if (dirty) {
+          throw new Error('The current track has unsaved edits; save or discard them in Overland before opening another track')
+        }
+        const response = await fetch(`${API_BASE}/gpx/${encodeURIComponent(command.arguments.filename)}`)
+        if (!response.ok) throw new Error(`Could not open ${command.arguments.filename}: server returned ${response.status}`)
+        const parsed = parseGPX(await response.text())
+        if (parsed.length === 0) throw new Error(`${command.arguments.filename} contains no tracks or routes`)
+        openTracks(parsed, command.arguments.filename)
+        return { ok: true, filename: command.arguments.filename, trackCount: parsed.length, selectedTrackIndex: 0 }
+      }
+      case 'select_track': {
+        if (viewMode !== 'view') throw new Error('select_track requires editor mode; use open_track or switch_mode first')
+        if (command.arguments.index >= tracks.length) {
+          throw new Error(`Track index ${command.arguments.index} is out of range`)
+        }
+        selectTrack(command.arguments.index)
+        return { ok: true, selectedTrackIndex: command.arguments.index }
+      }
+      case 'load_pois': {
+        if (command.arguments.scope === 'current_view') {
+          if (viewMode !== 'creation') throw new Error('Current-view POIs require the route planner')
+          const outcome = await loadCreationPois(command.arguments.kinds)
+          if (outcome.errors.length > 0) throw new Error(outcome.errors.join('; '))
+          return { ok: true, scope: command.arguments.scope, loaded: outcome.loaded }
+        }
+        if (viewMode !== 'view') throw new Error('Current-track POIs require editor mode; use open_track or switch_mode first')
+        if (!currentTrack) throw new Error('Current-track POIs require an open track')
+        const bbox = boundsAround(currentTrack.coordinates, 5)
+        if (!bbox) throw new Error('The current track has no searchable bounds')
+        let loaded = 0
+        for (const kind of command.arguments.kinds) {
+          setPoiLoading(kind)
+          try {
+            const result = await fetchPoisForArea(kind, bbox, undefined, {
+              runtime,
+              onCacheMetadata: handleCacheMetadata,
+            })
+            setActivePois(previous => ({ ...previous, [kind]: result.pois }))
+            setActivePoiCache(previous => ({ ...previous, [kind]: result.cache }))
+            loaded += result.pois.length
+          } finally {
+            setPoiLoading(null)
+          }
+        }
+        return { ok: true, scope: command.arguments.scope, loaded }
+      }
+    }
+  }
+
+  function getMcpSnapshot() {
+    const map = hasInteractiveMap(viewMode) ? mapRef.current : null
+    const bounds = map?.getBounds()
+    const displayedPois = viewMode === 'creation'
+      ? creationPois
+      : viewMode === 'view'
+        ? activePois
+        : { fuel: [], water: [], camp: [] }
+    const loadedPois = POI_KINDS.flatMap(kind =>
+      displayedPois[kind.id].map(poi => ({ ...poi, kind: kind.id })),
+    )
+    const visiblePois = bounds
+      ? loadedPois.filter(poi => bounds.contains([poi.lat, poi.lon]))
+      : []
+    const displayedWaypoints = viewMode === 'creation'
+      ? creationPins
+      : viewMode === 'view'
+        ? currentTrack?.waypoints ?? []
+        : []
+    const visibleWaypoints = bounds
+      ? displayedWaypoints.filter(waypoint => bounds.contains([waypoint.lat, waypoint.lon]))
+      : []
+    const visibleSessionMarkers = bounds
+      ? sessionMapMarkers.filter(marker => bounds.contains([marker.lat, marker.lon]))
+      : []
+
+    return {
+      version: 1,
+      screen: viewMode,
+      splashVisible: showSplash,
+      theme,
+      mapOnly,
+      map: map ? readMapViewport(map) : null,
+      mapPresentation: {
+        baseLayer: activeBaseLayer,
+        availableLayers: terrainLayers.map(layer => ({ id: layer.id, label: layer.label, title: layer.title, kind: layer.kind })),
+        hillshade,
+        hillshadeOpacity,
+        colorMode,
+        vectorIssue: vectorMapIssue,
+        tilePrefetch,
+        offlineMode: runtime.offline?.mode,
+      },
+      markerCatalog: WAYPOINT_MARKERS.map(({ id, label, glyph, color, gpxSymbol }) => ({
+        id,
+        label,
+        glyph,
+        color,
+        gpxSymbol,
+      })),
+      mapOverlays: {
+        persisted: false,
+        track: sessionMapTrack,
+        markers: sessionMapMarkers,
+      },
+      library: savedFiles.map(file => ({
+        filename: file.filename,
+        name: file.name,
+        distanceKm: file.distance,
+        elevation: file.elevStats,
+        hasTime: file.hasTime,
+      })),
+      planner: {
+        routePoints: creationWaypoints,
+        waypoints: creationPins,
+        profile: routingProfile,
+        displayCoordinates: creationCoordinates,
+        routedCoordinates,
+        distanceKm: creationDistance,
+        durationSeconds: routedDuration,
+        engine: routedEngine,
+        loading: routedLoading,
+        status: routeStatus,
+        routeError,
+        routeCache,
+        elevationInterpolated,
+        elevationError: elevationApiError,
+        surface: surfaceSummary,
+        surfaceLoading,
+        surfaceError,
+        surfaceCache,
+        pois: POI_KINDS.flatMap(kind => creationPois[kind.id].map(poi => ({ ...poi, kind: kind.id }))),
+        poiCache: creationPoiCache,
+      },
+      editor: {
+        tracks: tracks.map((track, index) => ({
+          index,
+          name: track.name,
+          filename: track.filename,
+          pointCount: track.coordinates.length,
+          waypointCount: track.waypoints.length,
+        })),
+        selectedTrackIndex: currentTrack ? selectedTrackIndex : null,
+        currentTrack: currentTrack ?? null,
+        dirty,
+        undoDepth: editHistory.length,
+        toolsVisible: showTools,
+        selectionMode,
+        selection,
+        distanceKm: trackDistance,
+        elevation: elevationStats,
+        time: timeStats,
+        pois: POI_KINDS.flatMap(kind => activePois[kind.id].map(poi => ({ ...poi, kind: kind.id }))),
+        poiCache: activePoiCache,
+      },
+      visibleFeatures: {
+        loadedPois,
+        visiblePois,
+        loadedWaypoints: displayedWaypoints,
+        visibleWaypoints,
+        loadedMapMarkers: sessionMapMarkers,
+        visibleMapMarkers: visibleSessionMarkers,
+      },
+      placeSearch: {
+        query: placeSearch,
+        results: placeResults,
+        searching: placeSearching,
+        cache: placeCache,
+      },
+      cursor: cursorPos ? { ...cursorPos, groundElevation: cursorElevation } : null,
+      // Everything the user was told, newest last. Agents should check this
+      // after a command: work started by a command can fail after it returns.
+      notifications: recentMessages,
+    }
+  }
+
   /* -- Ground elevation under the cursor ---------------------------- */
 
   useEffect(() => {
@@ -1844,6 +2298,8 @@ function App() {
     }, 220)
     return () => { clearTimeout(timer); controller.abort() }
   }, [cursorPos, handleCacheMetadata, runtime])
+
+  useMcpBridge(API_BASE, getMcpSnapshot, handleMcpCommand)
 
   /* -- Render ------------------------------------------------------- */
 
@@ -2037,6 +2493,8 @@ function App() {
           onHome={() => setViewMode('welcome')}
           onCacheMetadata={handleCacheMetadata}
           onNotify={notify}
+          onMapInstance={registerActiveMap}
+          mapOverlays={<SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />}
         />
       )}
 
@@ -2391,7 +2849,7 @@ function App() {
                 style={{ width: '100%', height: '100%' }}
                 scrollWheelZoom
                 zoomControl={false}
-                ref={map => { if (map) mapRef.current = map }}
+                ref={registerActiveMap}
               >
                 <MapTiles
                   baseLayerId={activeBaseLayer}
@@ -2421,9 +2879,14 @@ function App() {
 
                 {/* Places of interest: marked, saved, but never routed through. */}
                 {creationPins.map((pin, i) => (
-                  <Marker key={`pin-${i}`} position={[pin.lat, pin.lon]} icon={waypointIcon('★')}>
+                  <Marker
+                    key={`pin-${i}`}
+                    position={[pin.lat, pin.lon]}
+                    icon={waypointIcon(waypointMarkerIdFromSymbol(pin.sym) ?? 'generic')}
+                  >
                     <Popup>
                       <strong>{pin.name}</strong>
+                      <WaypointMarkerSelect symbol={pin.sym} onChange={marker => changeCreationPinMarker(i, marker)} />
                       <span className="wpt-popup-actions">
                         <button className="btn btn-ghost btn-xs" onClick={() => renameCreationPin(i)}>Rename</button>
                         <button className="btn btn-danger btn-xs" onClick={() => removeCreationPin(i)}>Delete</button>
@@ -2465,6 +2928,7 @@ function App() {
                     </Marker>
                   )),
                 )}
+                <SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />
 
                 <MapClickHandler onClick={handleMapClick} />
                 <MapMouseTracker onMove={setCursorPos} />
@@ -2868,7 +3332,7 @@ function App() {
               minZoom={1}
               style={{ width: '100%', flex: 1 }}
               zoomControl={false}
-              ref={map => { if (map) mapRef.current = map }}
+              ref={registerActiveMap}
             >
               <MapTiles
                 baseLayerId={activeBaseLayer}
@@ -2908,12 +3372,13 @@ function App() {
                 <Marker
                   key={`wpt-${i}`}
                   position={[w.lat, w.lon]}
-                  icon={waypointIcon(String(i + 1))}
+                  icon={waypointIcon(waypointMarkerIdFromSymbol(w.sym) ?? 'generic')}
                 >
                   <Popup>
                     <strong>{w.name ?? `Waypoint ${i + 1}`}</strong>
                     {w.desc && <><br />{w.desc}</>}
                     {w.elevation !== undefined && <><br />{w.elevation.toFixed(0)} m</>}
+                    <WaypointMarkerSelect symbol={w.sym} onChange={marker => changeWaypointMarker(i, marker)} />
                     <span className="wpt-popup-actions">
                       <button className="btn btn-ghost btn-xs" onClick={() => renameWaypoint(i)}>Rename</button>
                       <button className="btn btn-danger btn-xs" onClick={() => removeWaypoint(i)}>Delete</button>
@@ -2935,6 +3400,7 @@ function App() {
                   </Marker>
                 )),
               )}
+              <SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />
 
               <MapJump target={jumpTarget} />
               <MapFitBounds coordinates={currentTrack.coordinates} />

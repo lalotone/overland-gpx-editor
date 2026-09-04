@@ -82,6 +82,18 @@ Two rules it is worth repeating here:
 - **The frontend must keep working with no backend.** Library, upload and
   elevation calls are all best-effort; a dropped GPX file still parses and
   displays. Do not turn a backend failure into a dead screen.
+- **Session map overlays are not GPX edits.** Keep agent-only map tracks and
+  markers out of planner/editor documents, dirty state, undo history, saves,
+  and downloads.
+- **A loopback peer address proves nothing behind a proxy.** Every request then
+  arrives from the proxy, so `remoteIsLoopback` is gated by `--behind-proxy`
+  and MCP is confined to its own loopback listener rather than a `Host` check.
+  Grant privilege from an admin token or a declared origin, never from
+  `RemoteAddr` alone.
+- **A tool result means the command was accepted, not that the work
+  succeeded.** Anything a command starts asynchronously — routing, elevation,
+  surface — must report failure through the snapshot (`planner.routeError`,
+  `notifications`), because the agent has already been told `ok`.
 - **Treat every filename from the network as hostile.** Anything touching the
   library goes through `safeGPXFilename`, which refuses directory components
   and non-`.gpx` names, then through `os.Root` so symlinks cannot escape

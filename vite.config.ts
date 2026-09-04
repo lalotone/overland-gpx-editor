@@ -16,6 +16,7 @@ const API_PATHS = [
   '/pois',
   '/fuel',
   '/offline',
+  '/mcp',
 ]
 
 export default defineConfig(({ mode }) => {

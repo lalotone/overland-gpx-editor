@@ -331,6 +331,63 @@ func TestProviderFetchHasDeadlineAndStopsOnShutdown(t *testing.T) {
 	}
 }
 
+func TestProviderPolicyCanExtendFetchDeadline(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-time.After(50 * time.Millisecond):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Request:    r,
+			}, nil
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	})}
+	outbound, _, cancel, wg := testOutbound(t, modeAuto, t.TempDir(), client)
+	defer func() { cancel(); wg.Wait() }()
+	outbound.fetchTimeout = 20 * time.Millisecond
+
+	extended := testPolicy(t, "http://example.test")
+	extended.fetchTimeout = 100 * time.Millisecond
+	if _, err := outbound.do(context.Background(), cachedRequest{policy: extended, url: "http://example.test/extended", params: "extended"}); err != nil {
+		t.Fatal(err)
+	}
+
+	standard := testPolicy(t, "http://example.test")
+	standard.name = "standard"
+	if _, err := outbound.do(context.Background(), cachedRequest{policy: standard, url: "http://example.test/standard", params: "standard"}); err == nil {
+		t.Fatal("standard request outlived its default deadline")
+	}
+}
+
+func TestServerUsesContextDeadlinesForOutboundProviders(t *testing.T) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	srv, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	if srv.outbound.client.Timeout != 0 {
+		t.Fatalf("outbound HTTP client timeout = %s, want context-only", srv.outbound.client.Timeout)
+	}
+	if srv.elevation.client.Timeout != client.Timeout {
+		t.Fatalf("elevation HTTP client timeout = %s, want %s", srv.elevation.client.Timeout, client.Timeout)
+	}
+	if srv.outbound.fetchTimeout != client.Timeout {
+		t.Fatalf("default outbound timeout = %s, want injected %s", srv.outbound.fetchTimeout, client.Timeout)
+	}
+	for _, name := range []string{"valhalla-route", "osrm-route"} {
+		if got := srv.providers[name].fetchTimeout; got != routeOutboundFetchTimeout {
+			t.Errorf("%s timeout = %s, want %s", name, got, routeOutboundFetchTimeout)
+		}
+	}
+	if got := srv.providers["surface"].fetchTimeout; got != 0 {
+		t.Errorf("surface timeout override = %s, want default", got)
+	}
+}
+
 func TestProviderForcesIdentityAndRejectsEncodedResponses(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if got := r.Header.Get("Accept-Encoding"); got != "identity" {

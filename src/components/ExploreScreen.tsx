@@ -337,6 +337,8 @@ export function ExploreScreen({
   onHome,
   onCacheMetadata,
   onNotify,
+  onMapInstance,
+  mapOverlays,
 }: {
   runtime: RuntimeConfig
   nominatimApi: string
@@ -354,6 +356,8 @@ export function ExploreScreen({
   onHome: () => void
   onCacheMetadata: (metadata: CacheMetadata) => void
   onNotify: (message: string, type?: 'info' | 'success' | 'error') => void
+  onMapInstance: (map: L.Map | null) => void
+  mapOverlays: ReactNode
 }) {
   const initial = useRef(initialExploreView()).current
   const [map, setMap] = useState<L.Map | null>(null)
@@ -366,6 +370,10 @@ export function ExploreScreen({
   const [packs, setPacks] = useState<PackSummary[]>([])
   const [offlineError, setOfflineError] = useState('')
   const [coverageVisible, setCoverageVisible] = useState(true)
+  const captureMap = useCallback((instance: L.Map | null) => {
+    if (instance) setMap(instance)
+    onMapInstance(instance)
+  }, [onMapInstance])
   useEscapeDismiss(selectedPlace !== null, () => setSelectedPlace(null), ESCAPE_PRIORITY.passive)
 
   const downloadedAreas = useMemo(
@@ -479,7 +487,7 @@ export function ExploreScreen({
           scrollWheelZoom
           zoomControl={false}
           style={{ width: '100%', height: '100%' }}
-          ref={instance => { if (instance) setMap(instance) }}
+          ref={captureMap}
         >
           <MapTiles
             baseLayerId={baseLayerId}
@@ -520,6 +528,7 @@ export function ExploreScreen({
               </Popup>
             </Marker>
           )}
+          {mapOverlays}
         </MapContainer>
 
         <div className="explore-toolbar">

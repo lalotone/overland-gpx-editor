@@ -1,7 +1,7 @@
 BINARY  := overland
 DIST    := gpx-editor
 # node_modules contains a stray Go package, so ./... is not usable here.
-PKGS    := ./cmd/... ./internal/... ./web/...
+PKGS    := . ./cmd/... ./internal/... ./web/...
 # Stamped into the binary and reported by --version. Falls back to "dev" outside
 # a git checkout, so a tarball build still says something honest.
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)

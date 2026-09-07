@@ -324,6 +324,7 @@ make dist      # all of the above, archived with SHA256SUMS
 npm run dev    # frontend dev server with HMR (needs ./overland serve running)
 npx playwright install chromium  # once, for browser tests
 npm run test:e2e                 # desktop/mobile map and offline UI flows
+make -C overlandx                # native system-WebView desktop executable
 ```
 
 Pushing a `v*` tag builds and publishes a release; every push and pull request

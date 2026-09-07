@@ -32,4 +32,3 @@ tiles/
 .venv/
 __pycache__/
 .kata.local.toml
-/overlandx

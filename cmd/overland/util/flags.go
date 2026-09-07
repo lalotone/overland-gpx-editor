@@ -3,10 +3,10 @@ package util
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/lalotone/overland-gpx-editor"
 	"github.com/urfave/cli/v3"
 )
 
@@ -81,34 +81,13 @@ func (s *environmentSource) GoString() string {
 }
 
 func DefaultGPXDir() string {
-	if base := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "overland", "gpx")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "gpx"
-	}
-	return filepath.Join(home, ".local", "share", "overland", "gpx")
+	return overland.DefaultGPXDir()
 }
 
 func DefaultTileCacheDir() string {
-	if base := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "overland", "tiles")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "tiles"
-	}
-	return filepath.Join(home, ".cache", "overland", "tiles")
+	return overland.DefaultTileCacheDir()
 }
 
 func DefaultOfflineCacheDir() string {
-	if base := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "overland", "responses")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "responses"
-	}
-	return filepath.Join(home, ".cache", "overland", "responses")
+	return overland.DefaultOfflineCacheDir()
 }

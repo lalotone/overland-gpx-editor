@@ -28,6 +28,28 @@ Two consequences worth knowing:
   wherever it was served. In `npm run dev` those paths are proxied to `:8000`
   by `vite.config.ts`, so the URLs are identical in both modes.
 
+### Embedding
+
+The module root exposes the complete application as an `http.Handler`:
+
+```go
+cfg := overland.DefaultConfig()
+app, err := overland.New(cfg)
+if err != nil {
+	return err
+}
+defer app.Close()
+
+return http.ListenAndServe("127.0.0.1:0", app)
+```
+
+`npm run build` must run in the Overland module before the host binary is
+compiled, because Go embeds the frontend present at compile time. `Config.Assets`
+can supply a different frontend for tests or custom hosts. The returned `App`
+implements `http.Handler`; the host owns its listener and must call `Close` after
+it stops serving requests. The separate `overlandx/` module uses this boundary
+to place the same frontend and API in a native system WebView.
+
 ---
 
 ## Layout
@@ -66,6 +88,7 @@ cmd/overland/
 ├── serve/                      HTTP server flags and graceful shutdown
 ├── import/                     Create-only GPX library import
 └── util/                       Shared CLI flags
+overland.go                     Public handler embedding API and shared defaults
 internal/server/
 ├── server.go                   Chi routes, middleware, embedded-frontend handler
 ├── files.go                    Track library: list/read/write/upload/delete
@@ -84,6 +107,7 @@ internal/mcp/
 └── tools.go                    Tool schemas and boundary validation
 web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
+overlandx/                      Native system-WebView host (separate Go module)
 
 packaging/                      nfpm config and the example systemd unit
 scripts/verify.ts               Logic harness (npm run verify)

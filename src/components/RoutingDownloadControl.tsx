@@ -7,9 +7,11 @@ import './RoutingDownloadControl.css'
 import { useEscapeDismiss, ESCAPE_PRIORITY } from './useEscapeDismiss'
 
 interface Suggestion { regionId: string; name: string; installed: boolean; active: boolean; coversView?: boolean }
+interface AcquisitionPlan { pbfBytes: number | null; estimatedBytes: number | null; tilesKnown: boolean; tilesTotal: number; tilesCached: number; tilesMissing: number }
 
 const stages = [
   { id: 'pbf', label: 'Road data' },
+  { id: 'planning', label: 'Select terrain tiles' },
   { id: 'elevation', label: 'Terrain tiles' },
   { id: 'build', label: 'Build routing graph' },
   { id: 'warmup', label: 'Prepare riding profiles' },
@@ -30,6 +32,8 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [checking, setChecking] = useState(true)
+  const [plan, setPlan] = useState<AcquisitionPlan | null>(null)
+  const [planning, setPlanning] = useState(false)
   useEscapeDismiss(open, () => setOpen(false), ESCAPE_PRIORITY.panel)
   const element = useRef<HTMLDivElement>(null)
   const map = useMapEvents({
@@ -38,6 +42,24 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
     resize: () => setRevision(value => value + 1),
   })
   const running = status?.job?.state === 'queued' || status?.job?.state === 'running'
+  useEffect(() => {
+    setPlan(null)
+    setPlanning(false)
+    if (!open || !region || running || !runtime.offline?.routing) return
+    const controller = new AbortController()
+    setPlanning(true)
+    void fetch(`${runtime.offline.routing}/plan`, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+      body: JSON.stringify({ regionId: region.regionId }),
+    }).then(async response => {
+      if (!response.ok) throw await responseError(response, 'Could not estimate routing download')
+      const value = await response.json() as AcquisitionPlan
+      if (!controller.signal.aborted) setPlan(value)
+    }).catch(() => { /* Estimates are advisory; preparation still reports failures. */ })
+      .finally(() => { if (!controller.signal.aborted) setPlanning(false) })
+    return () => controller.abort()
+  }, [open, region, running, runtime])
   useEffect(() => {
     if (!runtime.offline?.routing) return
     const controller = new AbortController()
@@ -118,14 +140,21 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
         <ol className="routing-download-stages">{stages.map((stage, i) => <li key={stage.id} className={i < stageIndex ? 'complete' : i === stageIndex ? 'current' : ''}><span>{i < stageIndex ? '✓' : i + 1}</span>{stage.label}</li>)}</ol>
         <div className="routing-download-transfer" role="status">
           <strong>{job?.retrying ? `Retrying · attempt ${job.attempt ?? 1}` : phaseLabel}</strong>
-          {job?.phase === 'elevation' && <span>{tiles} terrain {tiles === 1 ? 'tile' : 'tiles'} ready</span>}
+          {job?.phase === 'elevation' && <>
+            <span>{tiles}{job.itemsTotal ? ` of ${job.itemsTotal}` : ''} terrain tiles ready</span>
+            <small>{job.itemsDownloaded ?? 0} downloaded · {job.itemsReused ?? 0} reused</small>
+          </>}
           <span className="routing-download-item" title={job?.item}>{job?.item}</span>
+          {!!job?.elapsedSeconds && <small>{Math.floor(job.elapsedSeconds / 60)}m {Math.floor(job.elapsedSeconds % 60)}s in this step{job.retrying && job.retrySeconds ? ` · retry in ${Math.ceil(job.retrySeconds)}s` : ''}</small>}
           <progress max={100} value={percent ?? undefined} aria-label="Routing download progress" />
           <small>{job?.phase === 'pbf' || job?.phase === 'elevation' ? `${formatBytes(job?.done ?? 0)}${job?.total ? ` of ${formatBytes(job.total)}` : ''} · current file` : percent !== null ? `${percent}% of current step` : 'Working…'}</small>
         </div>
         <button className="routing-download-secondary" disabled={busy} onClick={() => void act(true)}>Cancel download</button>
       </> : <>
         <p>{checking ? 'Finding routing data for this view…' : active ? 'Downloaded and ready to ride offline.' : region ? region.coversView === false ? 'Local extract for the map centre. It does not cover every edge of this view; neighbouring areas may need another download.' : 'Smallest available extract covering this view.' : 'No local routing extract found. Zoom in or move towards the area you want to ride.'}</p>
+        {!active && <p className="routing-download-estimate">{planning ? 'Checking cached routing data…' : plan?.tilesKnown ? `${plan.tilesTotal} terrain tiles · ${plan.tilesCached} cached · ${plan.tilesMissing} to fetch` : 'Terrain requirements will be known after the road data is downloaded.'}
+          {plan?.estimatedBytes != null && <><br />{formatBytes(plan.estimatedBytes)} remaining source downloads</>}
+        </p>}
         {region && !active && <button className="routing-download-primary" disabled={busy || checking || (!region.installed && runtime.offline.mode === 'cache-only')} onClick={() => void act(false)}>
           {region.installed ? 'Use downloaded region' : `Download ${region.name}`}
         </button>}
@@ -135,7 +164,7 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
       {!!status?.cacheBytes && <small>{formatBytes(status.cacheBytes)} cached for routing</small>}
     </section>}
     <button className="routing-download-pill" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-      {running ? `${phaseLabel}${job?.phase === 'elevation' ? ` · ${tiles} tiles ready` : '…'}` : job?.state === 'failed' ? 'Routing download failed' : active ? 'Routing ready' : 'Offline routing'}
+      {running ? `${phaseLabel}${job?.phase === 'elevation' ? ` · ${tiles}${job.itemsTotal ? `/${job.itemsTotal}` : ''} tiles` : '…'}` : job?.state === 'failed' ? 'Routing download failed' : active ? 'Routing ready' : 'Offline routing'}
       {!running && region && !active && <span> · {region.name} ↓</span>}
     </button>
   </div>

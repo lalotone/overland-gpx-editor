@@ -334,7 +334,7 @@ test('planner suggests viewport routing downloads and reveals progress', async (
     enabled: true,
     ready,
     ...(ready ? { regionId: 'spain/aragon', generationId: 'generation-1', name: 'Aragon' } : {}),
-    ...(running ? { job: { id: 'routing-1', regionId: 'spain/aragon', state: 'running', phase: 'build', done: 1, total: 2 } } : {}),
+    ...(running ? { job: { id: 'routing-1', regionId: 'spain/aragon', state: 'running', phase: 'elevation', item: 'N41E002', done: 1, total: 2, completedItems: 12, itemsTotal: 55, itemsDownloaded: 8, itemsReused: 4 } } : {}),
     cached: ready ? [{ regionId: 'spain/aragon', generationId: 'generation-1', name: 'Aragon', selected: true, pinned: false }] : [],
     cacheBytes: ready ? 4096 : 0,
     pinnedBytes: 0,
@@ -358,6 +358,9 @@ test('planner suggests viewport routing downloads and reveals progress', async (
     running = true
     await json(route, status(), 202)
   })
+  await page.route(/\/offline\/routing\/plan$/, route => json(route, {
+    pbfBytes: 1000, estimatedBytes: null, tilesKnown: true, tilesTotal: 55, tilesCached: 4, tilesMissing: 51,
+  }))
   await page.route(/\/offline\/routing\/suggest$/, async route => {
     suggestedBounds = (route.request().postDataJSON() as { bbox: unknown }).bbox
     await json(route, { region: { regionId: 'spain/aragon', name: 'Aragon', installed: ready, active: ready } })
@@ -397,14 +400,16 @@ test('planner suggests viewport routing downloads and reveals progress', async (
   expect(requestedRegion).toBeUndefined()
   await expect(page.getByRole('region', { name: 'Offline routing download' })).toHaveCount(0)
   await pill.click()
+  await expect(page.locator('.routing-download-estimate')).toContainText('55 terrain tiles · 4 cached · 51 to fetch')
   await page.getByRole('button', { name: 'Download Aragon' }).click()
   expect(requestedRegion).toBe('spain/aragon')
   await expect(page.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '50')
   await pill.click()
   await expect(page.getByRole('progressbar')).toHaveCount(0)
-  await expect(pill).toContainText('Build routing graph')
+  await expect(pill).toContainText('12/55 tiles')
   await pill.click()
   await expect(page.getByRole('button', { name: 'Cancel download' })).toBeVisible()
+  await expect(page.locator('.routing-download-transfer')).toContainText('8 downloaded · 4 reused')
   await page.screenshot({ path: testInfo.outputPath('routing-progress.png') })
   await pill.click()
   await page.locator('.leaflet-container').click({ position: { x: 170, y: 150 } })

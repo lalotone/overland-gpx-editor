@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -20,7 +21,7 @@ import (
 )
 
 const (
-	broomVersion        = "0.4.0"
+	broomVersion        = "0.5.0"
 	broomProfileName    = "overland-motorcycle"
 	maxBroomRouteBody   = 64 << 10
 	defaultRouteJobs    = 2
@@ -35,6 +36,7 @@ var errRoutingNotReady = errors.New("local routing data is not ready")
 var errRoutingPreparationRunning = errors.New("routing data preparation is already running")
 
 type broomRoutingConfig struct {
+	IndexCache       *outboundClient
 	CacheDir         string
 	Region           string
 	Graph            string
@@ -67,21 +69,27 @@ type broomDataset struct {
 }
 
 type broomPreparation struct {
-	ID             string `json:"id"`
-	RegionID       string `json:"regionId"`
-	State          string `json:"state"`
-	Phase          string `json:"phase,omitempty"`
-	Item           string `json:"item,omitempty"`
-	Done           int64  `json:"done,omitempty"`
-	Total          int64  `json:"total,omitempty"`
-	Detail         string `json:"detail,omitempty"`
-	StartedAt      string `json:"startedAt"`
-	UpdatedAt      string `json:"updatedAt"`
-	CompletedItems int    `json:"completedItems"`
-	Attempt        int    `json:"attempt,omitempty"`
-	Retrying       bool   `json:"retrying,omitempty"`
-	completed      map[string]bool
-	cancel         context.CancelFunc
+	Diagnostics     []broom.Diagnostic `json:"diagnostics,omitempty"`
+	ID              string             `json:"id"`
+	RegionID        string             `json:"regionId"`
+	State           string             `json:"state"`
+	Phase           string             `json:"phase,omitempty"`
+	Item            string             `json:"item,omitempty"`
+	Done            int64              `json:"done,omitempty"`
+	Total           int64              `json:"total,omitempty"`
+	Detail          string             `json:"detail,omitempty"`
+	StartedAt       string             `json:"startedAt"`
+	UpdatedAt       string             `json:"updatedAt"`
+	CompletedItems  int                `json:"completedItems"`
+	Attempt         int                `json:"attempt,omitempty"`
+	Retrying        bool               `json:"retrying,omitempty"`
+	ItemsTotal      int64              `json:"itemsTotal,omitempty"`
+	ItemsDownloaded int64              `json:"itemsDownloaded,omitempty"`
+	ItemsReused     int64              `json:"itemsReused,omitempty"`
+	Stage           string             `json:"stage,omitempty"`
+	ElapsedSeconds  float64            `json:"elapsedSeconds,omitempty"`
+	RetrySeconds    float64            `json:"retrySeconds,omitempty"`
+	cancel          context.CancelFunc
 }
 
 type broomCachedRegion struct {
@@ -110,7 +118,6 @@ type broomRoutingStatus struct {
 
 type broomRoutingService struct {
 	selectionPath string
-	indexURL      string
 	manager       *broom.Manager
 	profiles      map[string]broomProfileSpec
 	warmup        []*broom.Profile
@@ -203,6 +210,13 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		base = http.DefaultTransport
 	}
 	httpClient.Transport = modeBoundTransport{base: base, modes: modes}
+	if cfg.IndexCache != nil {
+		indexURL, err := url.Parse(valueOrDefault(cfg.IndexURL, "https://download.geofabrik.de/index-v1.json"))
+		if err != nil {
+			return nil, err
+		}
+		httpClient.Transport = broomIndexTransport{base: httpClient.Transport, outbound: cfg.IndexCache, policy: newProviderPolicy("routing-index", "routing-index", indexURL, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json", "application/geo+json"}, newRateGroup(0), true)}
+	}
 	zeroDistance := 0.0
 	manager, err := broom.New(broom.Options{
 		CacheDir:   cfg.CacheDir,
@@ -223,7 +237,6 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 	}
 	service := &broomRoutingService{
 		selectionPath: filepath.Join(cfg.CacheDir, "overland-active-region"),
-		indexURL:      valueOrDefault(cfg.IndexURL, "https://download.geofabrik.de/index-v1.json"),
 		manager:       manager, profiles: profiles, warmup: warmup, modes: modes,
 		ctx: ctx, wg: wg, jobs: cfg.Jobs, timeout: cfg.Timeout,
 		slots: make(chan struct{}, cfg.Concurrency),
@@ -422,6 +435,12 @@ func (s *broomRoutingService) runPreparation(ctx context.Context, job *broomPrep
 		Update: update,
 		Setup: broom.SetupOptions{Jobs: s.jobs, Elevation: broom.Auto, WarmupProfiles: s.warmup, Progress: func(event broom.ProgressEvent) {
 			s.updateJob(job, func(j *broomPreparation) { j.recordProgress(event) })
+		}, Diagnostic: func(diagnostic broom.Diagnostic) {
+			s.updateJob(job, func(j *broomPreparation) {
+				if len(j.Diagnostics) < 32 {
+					j.Diagnostics = append(slices.Clone(j.Diagnostics), diagnostic)
+				}
+			})
 		}},
 	})
 	if err != nil {
@@ -448,19 +467,10 @@ func (s *broomRoutingService) runPreparation(ctx context.Context, job *broomPrep
 }
 
 func (j *broomPreparation) recordProgress(event broom.ProgressEvent) {
-	phase := string(event.Phase)
-	if j.Phase != phase {
-		j.completed = make(map[string]bool)
-		j.CompletedItems = 0
-	}
-	if (event.State == broom.StateCompleted || event.State == broom.StateReused) && event.Err == nil && event.Item != "" {
-		if j.completed == nil {
-			j.completed = make(map[string]bool)
-		}
-		j.completed[event.Item] = true
-		j.CompletedItems = len(j.completed)
-	}
-	j.Phase, j.Item = phase, path.Base(event.Item)
+	j.Phase, j.Item = string(event.Phase), valueOrDefault(event.ItemLabel, path.Base(event.Item))
+	j.CompletedItems, j.ItemsTotal = int(event.ItemsDone), event.ItemsTotal
+	j.ItemsDownloaded, j.ItemsReused = event.ItemsDownloaded, event.ItemsReused
+	j.Stage, j.ElapsedSeconds, j.RetrySeconds = event.Stage, event.Elapsed.Seconds(), event.RetryIn.Seconds()
 	j.Done, j.Total = event.Done, event.Total
 	j.Attempt, j.Retrying = event.Attempt, event.State == broom.StateRetrying
 }

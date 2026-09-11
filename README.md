@@ -219,12 +219,11 @@ cannot reach the Go server itself.
 Routing is separate from response-cache trip packs. Broom stores OSM extracts,
 elevation sources, prepared graphs and profile metrics in
 `$XDG_CACHE_HOME/overland/routing` (normally `~/.cache/overland/routing`).
-Planner and Explore automatically find the smallest available routing region
-covering the visible map. When coastal edges would require a whole continent,
-it offers the local extract at the map centre and explicitly labels the partial
-coverage. Open the **Offline routing** map pill to download the
+Planner and Explore use Broom's region suggestions to find local routing data
+for the visible map, explicitly labelling partial coverage. Open the
+**Offline routing** map pill to see available acquisition estimates and download the
 suggested region or use an installed copy. The same pill reveals preparation
-progress and cancellation; it keeps showing progress when collapsed. Preparation
+progress and cancellation; it keeps showing tile totals and progress when collapsed. Preparation
 runs in the background, and completed route queries are entirely local. Updates,
 pinning and pruning remain available through the management API. A strict
 cache-only server can open installed regions but never downloads missing data.

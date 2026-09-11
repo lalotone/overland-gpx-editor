@@ -108,16 +108,16 @@ func TestBroomProfileVariantsCompile(t *testing.T) {
 
 func TestRoutingProgressDistinguishesTilesAndRetries(t *testing.T) {
 	job := &broomPreparation{}
-	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateCompleted, Item: "N41E001.hgt.gz", Done: 100, Total: 100})
-	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateStarted, Item: "N41E002.hgt.gz", Attempt: 1})
+	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateCompleted, Item: "N41E001.hgt.gz", Done: 100, Total: 100, ItemsDone: 1, ItemsTotal: 2, ItemsReused: 1})
+	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateStarted, Item: "N41E002.hgt.gz", Attempt: 1, ItemsDone: 1, ItemsTotal: 2, ItemsReused: 1})
 	if job.CompletedItems != 1 || job.Retrying {
 		t.Fatalf("next tile: %+v", job)
 	}
-	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateRetrying, Item: "N41E002.hgt.gz", Attempt: 2})
+	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateRetrying, Item: "N41E002.hgt.gz", Attempt: 2, ItemsDone: 1, ItemsTotal: 2, ItemsReused: 1})
 	if !job.Retrying || job.CompletedItems != 1 {
 		t.Fatalf("retry: %+v", job)
 	}
-	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateCompleted, Item: "N41E002.hgt.gz"})
+	job.recordProgress(broom.ProgressEvent{Phase: broom.PhaseElevation, State: broom.StateCompleted, Item: "N41E002.hgt.gz", ItemsDone: 2, ItemsTotal: 2, ItemsReused: 1, ItemsDownloaded: 1})
 	if job.CompletedItems != 2 {
 		t.Fatalf("completed: %+v", job)
 	}

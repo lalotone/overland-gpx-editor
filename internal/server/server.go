@@ -390,7 +390,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	if strings.TrimSpace(cfg.RoutingCacheDir) != "" {
 		s.broom, err = newBroomRoutingService(rootCtx, &s.wg, modes, broomRoutingConfig{
-			CacheDir: strings.TrimSpace(cfg.RoutingCacheDir), Region: strings.TrimSpace(cfg.RoutingRegion),
+			IndexCache: s.outbound,
+			CacheDir:   strings.TrimSpace(cfg.RoutingCacheDir), Region: strings.TrimSpace(cfg.RoutingRegion),
 			Graph: strings.TrimSpace(cfg.RoutingGraph), Prepare: cfg.RoutingPrepare, Update: cfg.RoutingUpdate,
 			Jobs: cfg.RoutingJobs, Concurrency: cfg.RoutingConcurrency, Timeout: cfg.RoutingTimeout,
 			IndexURL: strings.TrimSpace(cfg.RoutingIndexURL), MetadataIndexURL: strings.TrimSpace(cfg.RoutingMetadataIndexURL),
@@ -589,6 +590,7 @@ func (s *Server) routes() http.Handler {
 	if s.broom != nil {
 		r.Get("/offline/routing", s.requireOfflineRead(s.handleBroomStatus))
 		r.Post("/offline/routing/suggest", s.requireOfflineRead(s.handleBroomSuggest))
+		r.Post("/offline/routing/plan", s.requireOfflineControl(s.handleBroomPlan))
 		r.Post("/offline/routing/prepare", s.requireOfflineControl(s.handleBroomPrepare))
 		r.Post("/offline/routing/cancel", s.requireOfflineControl(s.handleBroomCancel))
 		r.Post("/offline/routing/pin", s.requireOfflineControl(s.handleBroomPin))

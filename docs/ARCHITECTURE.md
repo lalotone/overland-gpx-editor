@@ -225,6 +225,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /offline/status` | Aggregate cache, provider and job state |
 | `GET /offline/routing` | Broom readiness, preparation progress, installed generations and cache inventory |
 | `POST /offline/routing/suggest` | Smallest downloadable region covering a viewport bbox; catalogue lookup only |
+| `POST /offline/routing/plan` | Broom acquisition estimate; no PBF or terrain downloads |
 | `POST /offline/routing/prepare` / `cancel` | Protected routing-data preparation lifecycle |
 | `POST /offline/routing/pin` / `prune` | Protected Broom generation retention and cache cleanup |
 | `PUT /offline/mode` | Protected runtime transition between `auto` and `cache-only` when startup policy permits |

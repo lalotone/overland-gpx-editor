@@ -1,104 +1,43 @@
 package server
 
 import (
-	"math"
+	"bytes"
+	"io"
 	"net/http"
-	"net/url"
-	"time"
 
+	broom "code.rbel.co/rubiojr/broom/pkg/routing"
 	"github.com/paulmach/orb"
-	"github.com/paulmach/orb/clip"
-	"github.com/paulmach/orb/geo"
 	"github.com/paulmach/orb/geojson"
-	"github.com/paulmach/orb/planar"
 )
 
+// Let Broom own catalogue decoding/selection while retaining the application's
+// persistent cache and strict offline policy for catalogue requests.
+type broomIndexTransport struct {
+	base     http.RoundTripper
+	outbound *outboundClient
+	policy   *providerPolicy
+}
+
+func (t broomIndexTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method != http.MethodGet || r.URL.String() != t.policy.baseURL.String() {
+		return t.base.RoundTrip(r)
+	}
+	result, err := t.outbound.do(r.Context(), cachedRequest{policy: t.policy, method: http.MethodGet, url: r.URL.String(), params: "region-index", cacheable: true,
+		validate: func(body []byte) error { _, err := geojson.UnmarshalFeatureCollection(body); return err },
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: result.Status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(result.Body)), ContentLength: int64(len(result.Body)), Request: r}, nil
+}
+
 type routingSuggestion struct {
-	RegionID   string `json:"regionId"`
-	Name       string `json:"name"`
-	Installed  bool   `json:"installed"`
-	Active     bool   `json:"active"`
-	CoversView bool   `json:"coversView"`
-}
-
-// Corners alone are insufficient: a concave boundary or a hole may cross the
-// viewport between them. Reject any polygon boundary entering its interior.
-func regionCoversView(polygons orb.MultiPolygon, view orb.Bound) bool {
-	for _, corner := range view.ToRing() {
-		if !planar.MultiPolygonContains(polygons, corner) {
-			return false
-		}
-	}
-	inner := orb.Bound{
-		Min: orb.Point{math.Nextafter(view.Min[0], view.Max[0]), math.Nextafter(view.Min[1], view.Max[1])},
-		Max: orb.Point{math.Nextafter(view.Max[0], view.Min[0]), math.Nextafter(view.Max[1], view.Min[1])},
-	}
-	for _, polygon := range polygons {
-		for _, ring := range polygon {
-			if len(clip.LineString(inner, orb.LineString(ring))) != 0 {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func smallestRoutingRegion(index *geojson.FeatureCollection, views []orb.Bound) *routingSuggestion {
-	var best *routingSuggestion
-	var focused *routingSuggestion
-	focusArea := math.Inf(1)
-	bestParent := ""
-	area := math.Inf(1)
-	for _, feature := range index.Features {
-		if feature == nil {
-			continue
-		}
-		id, _ := feature.Properties["id"].(string)
-		urls, _ := feature.Properties["urls"].(map[string]any)
-		pbf, _ := urls["pbf"].(string)
-		if id == "" || pbf == "" {
-			continue
-		}
-		parent, _ := feature.Properties["parent"].(string)
-		var polygons orb.MultiPolygon
-		switch geometry := feature.Geometry.(type) {
-		case orb.Polygon:
-			polygons = orb.MultiPolygon{geometry}
-		case orb.MultiPolygon:
-			polygons = geometry
-		default:
-			continue
-		}
-		size := math.Abs(geo.Area(polygons))
-		name, _ := feature.Properties["name"].(string)
-		// A coastal view may extend beyond every country's offshore polygon.
-		// Offer the local extract rather than escalating to an entire continent,
-		// but explicitly report that it does not cover every viewport edge.
-		if len(views) == 1 && parent != "" && planar.MultiPolygonContains(polygons, views[0].Center()) && size < focusArea && size >= math.Abs(geo.Area(views[0].ToPolygon()))/4 {
-			focused = &routingSuggestion{RegionID: id, Name: valueOrDefault(name, id)}
-			focusArea = size
-		}
-		covers := true
-		for _, view := range views {
-			if !regionCoversView(polygons, view) {
-				covers = false
-				break
-			}
-		}
-		if !covers {
-			continue
-		}
-		if size > area || (size == area && best != nil && id >= best.RegionID) {
-			continue
-		}
-		best = &routingSuggestion{RegionID: id, Name: valueOrDefault(name, id), CoversView: true}
-		bestParent = parent
-		area = size
-	}
-	if focused != nil && (best == nil || bestParent == "") {
-		return focused
-	}
-	return best
+	RegionID         string  `json:"regionId"`
+	Name             string  `json:"name"`
+	Installed        bool    `json:"installed"`
+	Active           bool    `json:"active"`
+	CoversView       bool    `json:"coversView"`
+	CoverageFraction float64 `json:"coverageFraction"`
 }
 
 func (s *Server) handleBroomSuggest(w http.ResponseWriter, r *http.Request) {
@@ -114,29 +53,25 @@ func (s *Server) handleBroomSuggest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid viewport bbox")
 		return
 	}
-	views := []orb.Bound{{Min: orb.Point{b.West, b.South}, Max: orb.Point{b.East, b.North}}}
+	var coverage orb.Geometry = orb.Bound{Min: orb.Point{b.West, b.South}, Max: orb.Point{b.East, b.North}}
 	if b.West > b.East {
-		views = []orb.Bound{{Min: orb.Point{b.West, b.South}, Max: orb.Point{180, b.North}}, {Min: orb.Point{-180, b.South}, Max: orb.Point{b.East, b.North}}}
+		coverage = orb.MultiPolygon{
+			(orb.Bound{Min: orb.Point{b.West, b.South}, Max: orb.Point{180, b.North}}).ToPolygon(),
+			(orb.Bound{Min: orb.Point{-180, b.South}, Max: orb.Point{b.East, b.North}}).ToPolygon(),
+		}
 	}
-	endpoint, _ := url.Parse(s.broom.indexURL) // Validated by Broom at startup.
-	policy := newProviderPolicy("routing-index", "routing-index", endpoint, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json", "application/geo+json"}, newRateGroup(0), true)
-	response, err := s.outbound.do(r.Context(), cachedRequest{policy: policy, method: http.MethodGet, url: endpoint.String(), params: "region-index", cacheable: true,
-		validate: func(body []byte) error { _, err := geojson.UnmarshalFeatureCollection(body); return err },
-	})
+	candidates, err := s.broom.manager.SuggestRegions(r.Context(), coverage)
 	if err != nil {
-		writeOutboundError(w, err, policy.scope)
+		writeBroomError(w, err)
 		return
 	}
-	index, err := geojson.UnmarshalFeatureCollection(response.Body)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Invalid routing catalogue")
-		return
-	}
-	suggestion := smallestRoutingRegion(index, views)
-	if suggestion != nil {
+	var suggestion *routingSuggestion
+	if len(candidates) > 0 {
+		candidate := candidates[0]
+		suggestion = &routingSuggestion{RegionID: candidate.Region.ID, Name: candidate.Region.Name, CoversView: candidate.CoversEntireArea, CoverageFraction: candidate.CoverageFraction}
 		regions, _ := s.broom.manager.CachedRegions(r.Context())
 		for _, region := range regions {
-			if region.RegionID == suggestion.RegionID && region.Selected {
+			if region.RegionID == suggestion.RegionID && region.Selected && !region.Slim && region.Elevation == broom.Auto {
 				suggestion.Installed = true
 			}
 		}
@@ -145,4 +80,20 @@ func (s *Server) handleBroomSuggest(w http.ResponseWriter, r *http.Request) {
 		s.broom.mu.RUnlock()
 	}
 	noStoreJSON(w, http.StatusOK, map[string]any{"region": suggestion})
+}
+
+func (s *Server) handleBroomPlan(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		RegionID string `json:"regionId"`
+	}
+	if err := decodeJSONBody(w, r, 4096, &request); err != nil || request.RegionID == "" {
+		writeError(w, http.StatusBadRequest, "regionId is required")
+		return
+	}
+	plan, err := s.broom.manager.PlanRegion(r.Context(), request.RegionID, broom.PlanOptions{Setup: broom.SetupOptions{Jobs: s.broom.jobs, Elevation: broom.Auto}})
+	if err != nil {
+		writeBroomError(w, err)
+		return
+	}
+	noStoreJSON(w, http.StatusOK, map[string]any{"pbfBytes": plan.PBFBytes, "estimatedBytes": plan.EstimatedBytes, "tilesKnown": plan.DEMTilesKnown, "tilesTotal": len(plan.DEMTiles), "tilesCached": len(plan.CachedDEMTiles), "tilesMissing": len(plan.MissingDEMTiles), "installed": plan.Installed})
 }

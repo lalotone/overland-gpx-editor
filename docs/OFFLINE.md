@@ -91,10 +91,9 @@ is opened and warmed for all three motorcycle profiles before it becomes active,
 so interactive route requests never trigger graph building or profile
 customization.
 
-Planner and Explore suggest the smallest downloadable extract whose polygon
-covers the complete viewport. A coastal view that would otherwise select a
-continent instead offers a local centre-containing extract, explicitly marked
-as partial coverage. The region catalogue is cached through the backend;
+Planner and Explore use Broom's region suggestions, prioritizing local extracts
+containing the viewport centre and explicitly marking partial coverage.
+The region catalogue is cached through the backend;
 viewport suggestions fetch no PBFs or DEMs and start no preparation jobs. Open the
 compact **Offline routing** map pill to accept a download and reveal progress.
 The selected generation and explicit pins survive pruning. Protected pin and
@@ -102,15 +101,26 @@ prune API operations expose Broom's application-level cache policy.
 The last active managed region is persisted and reopened on restart. Older
 caches without that selection reopen the newest installed region.
 
-Progress reports road data, terrain tiles, graph building and profile preparation
-separately. Transfer percentages are per file; completed terrain tile counts do
-not reset between files. Only an open graph is reported as ready.
+Opening the download panel asks Broom for an acquisition plan without downloading
+PBFs or terrain. Exact terrain counts require a local PBF; unknown sizes remain
+unknown until it is available. Plans report cached and missing tiles and remaining
+source transfer bytes when known, excluding graph and temporary build space.
 
-Broom 0.4 determines terrain acquisition from all PBF node bounds, including
-distant relation members. Some extracts therefore acquire substantially more
-terrain than their advertised coverage; a live Catalonia preparation required
-180 HGT tiles. This is a remaining upstream acquisition limitation, not a retry
-loop, and the UI reports the tile count rather than a misleading overall percent.
+Progress reports road data, terrain selection, terrain tiles, graph building and
+profile preparation separately. Broom supplies aggregate tile totals, downloaded
+and reused counts, retries, elapsed stage time and activity updates. Transfer
+percentages are per file; diagnostics don't replace current work. Only an open
+graph is reported as ready.
+
+Broom 0.5 selects sparse terrain tiles intersecting retained highway/ferry
+geometry. A real Catalonia plan and rebuild selected 55 tiles, versus 180 with
+0.4's all-node rectangle. Retained distant roads and ferries still require terrain;
+the extract polygon is not used to discard their elevations.
+
+Installed graphs remain usable after upgrading. To apply sparse acquisition to
+an existing region, explicitly rebuild with `--routing-region cataluna
+--routing-update` (or the prepare API's `update: true`). Old generations and
+source tiles remain until explicitly pruned; an upgrade doesn't erase the cache.
 Entering `cache-only` cancels active acquisition and prevents new downloads, but
 installed graphs remain routable. A custom `--routing-graph` is opened directly
 and is not owned or pruned by the managed routing cache.

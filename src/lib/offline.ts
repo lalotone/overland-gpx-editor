@@ -97,6 +97,12 @@ export interface RoutingDataJob {
   total?: number
   detail?: string
   completedItems?: number
+  itemsTotal?: number
+  itemsDownloaded?: number
+  itemsReused?: number
+  stage?: string
+  elapsedSeconds?: number
+  retrySeconds?: number
   attempt?: number
   retrying?: boolean
 }
@@ -531,6 +537,12 @@ function decodeRoutingDataStatus(value: unknown): RoutingDataStatus {
       total: number(job?.total),
       detail: text(job?.detail),
       completedItems: number(job?.completedItems),
+      itemsTotal: number(job?.itemsTotal),
+      itemsDownloaded: number(job?.itemsDownloaded),
+      itemsReused: number(job?.itemsReused),
+      stage: text(job?.stage),
+      elapsedSeconds: number(job?.elapsedSeconds),
+      retrySeconds: number(job?.retrySeconds),
       attempt: number(job?.attempt),
       retrying: job?.retrying === true,
     } : undefined,

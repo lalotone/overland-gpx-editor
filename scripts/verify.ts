@@ -25,8 +25,8 @@ const {
   slopePercent,
   longestGapKm,
 } = await import('../src/lib/geo')
-const { simplifyToMaxPoints, trimTrack, reverseTrack, splitIntoStages } = await import('../src/lib/edit')
-const { chunkShape, classifySurface, summarizeSurface } = await import('../src/lib/surface')
+const { simplifyToMaxPoints, trimTrack, reverseTrack, splitIntoStages, withElevations } = await import('../src/lib/edit')
+const { classifySurface, summarizeSurface } = await import('../src/lib/surface')
 const { boundingBoxSpanKm, boundsAround, MAX_SEARCH_SPAN_KM } = await import('../src/lib/poi')
 const {
   parseFuelStations,
@@ -41,7 +41,7 @@ const {
 const { createRateLimitedFetch } = await import('../src/lib/rateLimit')
 const { resolveMapStyleResources } = await import('../src/lib/mapStyle')
 const { NOMINATIM_REQUEST_INTERVAL_MS, searchPlaces } = await import('../src/lib/geocoding')
-const { calculateRoute, FOSSGIS_REQUEST_INTERVAL_MS } = await import('../src/lib/routing')
+const { calculateRoute } = await import('../src/lib/routing')
 const {
   getBaseLayerFrom,
   getThumbnailLayer,
@@ -590,7 +590,6 @@ console.log(`\nPublic-service policy checks\n${'='.repeat(78)}`)
   check('rate-limited requests use one connection', maxActive === 1, `${maxActive} active`)
   check('rate-limited request starts are spaced apart',
     starts.slice(1).every((start, i) => start - starts[i] >= 20), starts.join(', '))
-  check('FOSSGIS routing interval is at least one second', FOSSGIS_REQUEST_INTERVAL_MS >= 1000)
   check('Nominatim interval is at least one second', NOMINATIM_REQUEST_INTERVAL_MS >= 1000)
   check('OSM thumbnails use the policy hostname',
     getThumbnailLayer('openfreemap').url === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
@@ -636,10 +635,8 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   const cleared = clearedRouteDerivedState()
   check('route reset removes geometry and route information',
     cleared.coordinates.length === 0 && cleared.durationSeconds === null &&
-      cleared.engine === null && cleared.routeCache === undefined)
-  check('route reset removes surface results, cache, errors, and activity',
-    cleared.surfaceSegments === null && cleared.surfaceCache === undefined &&
-      cleared.surfaceError === null && !cleared.surfaceApproximate && !cleared.surfaceLoading)
+      cleared.engine === null)
+  check('route reset removes surface results', cleared.surfaceSegments === null)
   check('route reset removes elevation provenance and prior error state',
     !cleared.elevationInterpolated && !cleared.elevationApiError)
   check('route reset removes request status and loading state',
@@ -757,12 +754,13 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       status: '/offline/status',
       packs: '/offline/packs',
       modeControl: '/offline/mode',
+      routing: '/offline/routing',
     },
     services: {
       fuel: '/fuel',
       places: '/places/search',
       pois: 42,
-      valhallaRoute: '/routing/valhalla/route',
+      broomRoute: '/routing/broom/route',
     },
     maps: {
       raster: {
@@ -783,11 +781,13 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('config decoding keeps valid optional service routes',
     runtime.services.fuel === 'https://backend.example.test/api/fuel' &&
       runtime.services.places === 'https://backend.example.test/api/places/search' &&
+      runtime.services.broomRoute === 'https://backend.example.test/api/routing/broom/route' &&
       runtime.services.pois === undefined)
   check('config decoding keeps cache-only mode', runtime.offline?.mode === 'cache-only')
   check('config decoding resolves management routes',
     runtime.offline?.packs === 'https://backend.example.test/api/offline/packs' &&
-      runtime.offline.modeControl === 'https://backend.example.test/api/offline/mode')
+      runtime.offline.modeControl === 'https://backend.example.test/api/offline/mode' &&
+      runtime.offline.routing === 'https://backend.example.test/api/offline/routing')
   let modeRequest: { url?: string; method?: string; body?: string } = {}
   const changedMode = await setRuntimeOfflineMode(runtime, 'auto', async (input, init) => {
     modeRequest = { url: String(input), method: init?.method, body: String(init?.body) }
@@ -829,8 +829,8 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   const backend = selectRuntimeTransport(runtime, 'fuel', 'https://public.example.test/fuel')
   check('an advertised backend endpoint is selected first',
     backend.kind === 'backend' && backend.url === 'https://backend.example.test/api/fuel')
-  check('cache-only refuses an unadvertised direct path',
-    selectRuntimeTransport(runtime, 'surface', 'https://public.example.test/surface').kind === 'unavailable')
+  check('Broom routing selects only its advertised backend endpoint',
+    selectRuntimeTransport(runtime, 'broomRoute', '').kind === 'backend')
 
   const layers = runtimeTerrainLayers(runtime)
   const vector = layers.find(layer => layer.id === 'openfreemap')
@@ -949,93 +949,74 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 
 {
   const runtime = decodeRuntimeConfig({
-    offline: { enabled: true, mode: 'cache-only' },
-    services: {
-      valhallaRoute: '/routing/valhalla',
-      osrmRoute: '/routing/osrm',
-    },
+    offline: { enabled: true, mode: 'cache-only', routing: '/offline/routing' },
+    services: { broomRoute: '/routing/broom/route' },
   }, 'https://backend.example.test')
   const waypoints = [{ lat: 41.6, lon: -0.9 }, { lat: 41.7, lon: -0.8 }]
-  const cacheMiss = () => new Response(JSON.stringify({
-    code: 'offline_cache_miss',
-    detail: 'route is not cached',
-    scope: 'routing',
-  }), { status: 504, headers: { 'Content-Type': 'application/json' } })
-  const valhallaSuccess = () => new Response(JSON.stringify({
-    trip: { legs: [{ shape: '??AA' }], summary: { time: 60, length: 1 } },
-  }), {
-    headers: { 'Content-Type': 'application/json', 'X-GPX-Cache': 'hit' },
-  })
-
-  const valhallaCalls: { url: string; costing?: string }[] = []
-  const cachedFallbackFetch: typeof fetch = async (input, init) => {
-    const body = JSON.parse(String(init?.body ?? '{}')) as { costing?: string }
-    valhallaCalls.push({ url: String(input), costing: body.costing })
-    return valhallaCalls.length === 1 ? cacheMiss() : valhallaSuccess()
-  }
-  const fallbackRoute = await calculateRoute(waypoints, 'mixed', undefined, {
+  const calls: { url: string; profile?: string }[] = []
+  const route = await calculateRoute(waypoints, 'mixed', undefined, {
     runtime,
-    fetcher: cachedFallbackFetch,
+    fetcher: async (input, init) => {
+      const request = JSON.parse(String(init?.body)) as { profile?: string }
+      calls.push({ url: String(input), profile: request.profile })
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        engine: 'Broom',
+        engineVersion: '0.4.0',
+        regionId: 'spain/aragon',
+        generationId: 'abc123',
+        coordinates: [{ lat: 41.6, lon: -0.9 }, { lat: 41.65, lon: -0.85 }, { lat: 41.7, lon: -0.8 }],
+        elevations: [{ meters: 100, interpolated: false }, { meters: 110, interpolated: true }, null],
+        segments: [
+          { geometryStart: 0, geometryEnd: 1, surface: 'asphalt' },
+          { geometryStart: 1, geometryEnd: 2, surface: 'fine_gravel' },
+        ],
+        distanceMeters: 1200,
+        durationSeconds: 90,
+      }), { headers: { 'Content-Type': 'application/json' } })
+    },
   })
-  check('a primary route cache miss replays the advertised Valhalla fallback',
-    valhallaCalls.length === 2 && valhallaCalls[0].costing === 'motorcycle' &&
-      valhallaCalls[1].costing === 'auto' && fallbackRoute.engine === 'Valhalla auto')
-  check('cache-only Valhalla replay never calls a direct router',
-    valhallaCalls.every(call => call.url === 'https://backend.example.test/routing/valhalla'))
-  check('cached Valhalla fallback metadata reaches the route result',
-    fallbackRoute.cache?.state === 'hit')
+  check('managed routes use Broom exactly once',
+    calls.length === 1 && calls[0].url === 'https://backend.example.test/routing/broom/route' && calls[0].profile === 'mixed')
+  check('Broom route geometry keeps aligned elevation provenance',
+    route.coordinates.length === 3 && route.coordinates[0].elevation === 100 &&
+      route.coordinates[1].elevationInterpolated === true && route.coordinates[2].elevation === undefined)
+  check('Broom annotation spans become exact per-segment surface classes',
+    route.surface.segments.join(',') === 'paved,compacted')
+  check('Broom duration, distance and generation identity are retained',
+    route.durationSeconds === 90 && route.distanceKm === 1.2 && route.regionId === 'spain/aragon' && route.generationId === 'abc123')
 
-  const roadCalls: string[] = []
-  const cachedOsrmFetch: typeof fetch = async input => {
-    roadCalls.push(String(input))
-    if (roadCalls.length < 3) return cacheMiss()
-    return new Response(JSON.stringify({
-      routes: [{ geometry: { coordinates: [[-0.9, 41.6], [-0.8, 41.7]] }, duration: 70, distance: 1200 }],
-    }), {
-      headers: { 'Content-Type': 'application/json', 'X-GPX-Cache': 'hit' },
-    })
-  }
-  const osrmRoute = await calculateRoute(waypoints, 'road', undefined, {
-    runtime,
-    fetcher: cachedOsrmFetch,
-  })
-  check('road cache replay reaches the advertised cached OSRM fallback',
-    roadCalls.length === 3 && roadCalls[2] === 'https://backend.example.test/routing/osrm' &&
-      osrmRoute.engine === 'OSRM driving')
-  check('route fallback requests stay on advertised backend URLs',
-    roadCalls.every(url => url.startsWith('https://backend.example.test/routing/')))
-
-  let finalMiss: unknown
-  let missCalls = 0
+  let failure: unknown
+  let failedCalls = 0
   try {
     await calculateRoute(waypoints, 'road', undefined, {
       runtime,
-      fetcher: async () => { missCalls++; return cacheMiss() },
-    })
-  } catch (error) {
-    finalMiss = error
-  }
-  check('all route cache misses retain a typed offline result',
-    missCalls === 3 && finalMiss instanceof OfflineCacheMissError && finalMiss.scope === 'routing')
-
-  let hardFailure: unknown
-  let hardFailureCalls = 0
-  try {
-    await calculateRoute(waypoints, 'mixed', undefined, {
-      runtime,
       fetcher: async () => {
-        hardFailureCalls++
-        return new Response(JSON.stringify({ detail: 'backend failed' }), {
-          status: 500,
+        failedCalls++
+        return new Response(JSON.stringify({ detail: 'prepare routing data' }), {
+          status: 409,
           headers: { 'Content-Type': 'application/json' },
         })
       },
     })
   } catch (error) {
-    hardFailure = error
+    failure = error
   }
-  check('arbitrary route backend failures do not trigger fallback replay',
-    hardFailureCalls === 1 && (hardFailure as Error)?.message === 'backend failed')
+  check('Broom backend failures never fall through to another router',
+    failedCalls === 1 && (failure as Error)?.message === 'prepare routing data')
+
+  let unavailable: unknown
+  let standaloneCalls = 0
+  try {
+    await calculateRoute(waypoints, 'road', undefined, {
+      runtime: decodeRuntimeConfig(null),
+      fetcher: async () => { standaloneCalls++; return new Response(null) },
+    })
+  } catch (error) {
+    unavailable = error
+  }
+  check('a frontend without Broom makes no public routing request',
+    standaloneCalls === 0 && (unavailable as Error)?.message.includes('Broom'))
 }
 
 {
@@ -1220,12 +1201,12 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     maxBytes: 1_048_576,
     entries: 12,
     scopes: {
-      routing: { bytes: 512, entries: 2, durableBytes: 256 },
+      pois: { bytes: 512, entries: 2, durableBytes: 256 },
       malformed: 'nope',
     },
     elevationTiles: { bytes: 2048, entries: 4 },
     providers: {
-      valhalla: { healthy: false, state: 'offline', lastError: 'network down' },
+      nominatim: { healthy: false, state: 'offline', lastError: 'network down' },
     },
     jobs: [
       { id: 'pack-1', name: 'Pyrenees', status: 'running', done: 4, total: 10 },
@@ -1235,12 +1216,12 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('offline status decoding keeps mode and writable state',
     status.mode === 'cache-only' && status.writable === false)
   check('offline status decoding keeps valid scope and legacy elevation values',
-    status.scopes.routing?.bytes === 512 && status.elevationTiles?.entries === 4 &&
+    status.scopes.pois?.bytes === 512 && status.elevationTiles?.entries === 4 &&
       status.scopes.malformed === undefined)
   check('offline status decoding tolerates malformed jobs',
     status.jobs.length === 1 && status.jobs[0].done === 4)
   check('offline status decoding preserves provider health',
-    status.providers.valhalla?.healthy === false && status.providers.valhalla?.state === 'offline')
+    status.providers.nominatim?.healthy === false && status.providers.nominatim?.state === 'offline')
   check('storage byte formatting is compact and binary',
     formatBytes(1536) === '1.50 KiB' && formatBytes(undefined) === 'Unknown')
 }
@@ -1283,7 +1264,7 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     minZoom: 14,
     maxZoom: 8,
     layers: ['opentopo'],
-    scopes: ['routing', 'elevation'],
+    scopes: ['pois', 'elevation'],
   })
   const bboxRequest = buildPackEstimateRequest({
     name: 'Pyrenees',
@@ -1294,7 +1275,7 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     minZoom: 8,
     maxZoom: 14,
     layers: ['opentopo'],
-    scopes: ['routing', 'elevation'],
+    scopes: ['pois', 'elevation'],
   })
   check('pack request building trims names and normalizes zoom order',
     routeRequest?.name === 'Pyrenees' && routeRequest.minZoom === 8 && routeRequest.maxZoom === 14)
@@ -1361,7 +1342,8 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 console.log(`\nSurface checks\n${'='.repeat(78)}`)
 
 {
-  check('paved_rough is still sealed road', classifySurface('paved_rough') === 'paved')
+  check('asphalt is sealed road', classifySurface('asphalt') === 'paved')
+  check('legacy provider enums are not guessed as OSM tags', classifySurface('paved_rough') === 'unknown')
   check('gravel groups with compacted', classifySurface('gravel') === 'compacted')
   check('dirt stays its own class', classifySurface('dirt') === 'dirt')
   check('an untagged edge is unknown, not paved', classifySurface(undefined) === 'unknown')
@@ -1403,53 +1385,29 @@ console.log(`\nSurface checks\n${'='.repeat(78)}`)
 }
 
 {
-  // The trace service rejects any path over 200 km outright, so chunking is
-  // what makes long routes work at all. Checked against the longest tracks in
-  // the library, whatever they happen to be.
-  const longestTracks = [...library]
-    .sort((a, b) => b.track.coordinates.length - a.track.coordinates.length)
-    .slice(0, 2)
-  if (longestTracks.length === 0) {
-    skipped++
-    console.log('  SKIP  surface chunking — no suitable file in ./gpx')
-  }
-  for (const { file, track } of longestTracks) {
-    const coords = track.coordinates
-    const chunks = chunkShape(coords)
-    const cum = cumulativeDistanceKm(coords)
+  const exported = buildGPX({
+    name: 'Elevation provenance',
+    coordinates: [
+      { lat: 41, lon: -1, elevation: 100 },
+      { lat: 41.1, lon: -1, elevation: 110, elevationInterpolated: true },
+      { lat: 41.2, lon: -1 },
+    ],
+    time: '2026-09-11T00:00:00Z',
+  })
+  check('GPX export omits interpolated route heights',
+    (exported.match(/<ele>/g) ?? []).length === 1 && exported.includes('<ele>100.00</ele>') && !exported.includes('110.00'))
 
-    let contiguous = true
-    let longest = 0
-    let mostPoints = 0
-    for (let i = 0; i < chunks.length; i++) {
-      const { start, points } = chunks[i]
-      const end = start + points.length - 1
-      longest = Math.max(longest, cum[end] - cum[start])
-      mostPoints = Math.max(mostPoints, points.length)
-      // Chunks must overlap by exactly one point, or segments fall in the gap.
-      if (i + 1 < chunks.length && chunks[i + 1].start !== end) contiguous = false
-    }
-    const last = chunks[chunks.length - 1]
-
-    check(`${file} chunks stay under the trace distance limit`,
-      longest <= 150 + 1e-9, `longest chunk ${longest.toFixed(1)} km`)
-    check(`${file} chunks stay under the trace point limit`,
-      mostPoints <= 5000, `${mostPoints} points`)
-    check(`${file} chunks are contiguous`, contiguous)
-    check(`${file} chunks start at the first point`, chunks[0].start === 0)
-    check(`${file} chunks reach the last point`,
-      last.start + last.points.length - 1 === coords.length - 1)
-
-    console.log(
-      `  ${file.padEnd(24)} ${cum[cum.length - 1].toFixed(0)} km → ${chunks.length} chunks, ` +
-        `longest ${longest.toFixed(0)} km / ${mostPoints} pts`,
-    )
-  }
-
-  check('a two-point shape needs one chunk', chunkShape([
-    { lat: 41.6, lon: -0.9 }, { lat: 41.7, lon: -0.9 },
-  ]).length === 1)
-  check('a degenerate shape produces no chunks', chunkShape([{ lat: 41.6, lon: -0.9 }]).length === 0)
+  const refreshed = withElevations({
+    name: 'Elevation refresh',
+    filename: 'elevation-refresh.gpx',
+    coordinates: [{ lat: 41, lon: -1 }, { lat: 41.1, lon: -1 }, { lat: 41.2, lon: -1 }],
+    elevations: [null, null, null],
+    waypoints: [],
+  }, [100, 110, null], [false, true, undefined])
+  check('terrain refresh preserves per-point interpolation provenance',
+    refreshed.coordinates[0].elevationInterpolated === false &&
+      refreshed.coordinates[1].elevationInterpolated === true &&
+      refreshed.coordinates[2].elevationInterpolated === undefined)
 }
 
 console.log(`\n${'='.repeat(78)}`)

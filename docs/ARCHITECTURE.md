@@ -54,8 +54,8 @@ src/
     ├── offline.ts              Runtime policy, status and pack client
     ├── mapStyle.ts             Safe style-resource URL resolution
     ├── fuel.ts                 Spanish official fuel prices
-    ├── routing.ts              Valhalla costing and fallbacks
-    ├── surface.ts              Per-segment surface via trace_attributes
+    ├── routing.ts              Broom request and response contract
+    ├── surface.ts              Broom annotation classification and summaries
     ├── terrain.ts              Map layers and colour scales
     ├── poi.ts                  Overpass fuel / water / campsite lookups
     ├── mcp.ts                  MCP command decoding and validation
@@ -73,7 +73,9 @@ internal/server/
 ├── elevation_tiles.go          Terrain-RGB tile reader, cache, interpolation
 ├── cache_store.go              Hashed response bodies, metadata, quota and LRU
 ├── provider.go                 Read-through policy, revalidation and rate groups
-├── data_endpoints.go           Narrow fuel/place/POI/routing adapters
+├── data_endpoints.go           Narrow fuel/place/POI adapters
+├── broom.go                    Local routing lifecycle, cache and HTTP contract
+├── broom_profile.brf           Application-owned motorcycle cost profile
 ├── maps.go                     Approved raster and compatible-style adapters
 ├── packs.go                    Trip-pack estimates, manifests and workers
 ├── offline.go                  Capabilities, status and management security
@@ -100,9 +102,10 @@ The CLI uses `urfave/cli`; the HTTP backend uses Chi for routing and middleware,
 and the optional MCP endpoint uses the official MCP Go SDK.
 The global stack assigns request IDs, recovers panics, compresses eligible
 responses, caps concurrent work, supplies security headers and handles explicit
-CORS origins. Go 1.25 is the minimum because the library uses the
-traversal-resistant `os.Root` file APIs. Keep dependencies beyond the existing
-Chi stack out of `internal/server` unless there is a concrete reason to add one.
+CORS origins. Go 1.27 is the minimum. Track storage uses the
+traversal-resistant `os.Root` file APIs, while Broom owns routing graph and
+metric access. Keep dependencies beyond Chi, MCP and Broom out of
+`internal/server` unless there is a concrete reason to add one.
 
 The listener defaults to `127.0.0.1:8000`, limits header size and read time, and
 has bounded idle and header-read deadlines. Browser-originated writes are
@@ -216,12 +219,14 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /fuel` | Persisted Spanish national fuel snapshot |
 | `GET /places/search` | Validated, server-rate-limited Nominatim search |
 | `POST /pois/search` | Allowlisted POI kind and bounded bbox |
-| `POST /routing/valhalla/route` | Validated exact Valhalla operation |
-| `POST /routing/osrm/route` | Validated exact OSRM fallback operation |
-| `POST /routing/valhalla/surface` | Validated trace-attributes chunk |
+| `POST /routing/broom/route` | Local Road/Dirt/Trail route with aligned elevation provenance and OSM annotations |
 | `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |
+| `GET /offline/routing` | Broom readiness, preparation progress, installed generations and cache inventory |
+| `POST /offline/routing/suggest` | Smallest downloadable region covering a viewport bbox; catalogue lookup only |
+| `POST /offline/routing/prepare` / `cancel` | Protected routing-data preparation lifecycle |
+| `POST /offline/routing/pin` / `prune` | Protected Broom generation retention and cache cleanup |
 | `PUT /offline/mode` | Protected runtime transition between `auto` and `cache-only` when startup policy permits |
 | `/offline/packs` | Estimate, create, inspect, cancel and delete trip packs |
 | `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope |

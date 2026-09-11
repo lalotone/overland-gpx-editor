@@ -13,8 +13,6 @@ import (
 	"strings"
 )
 
-const maxProviderRequestBody = 2 << 20
-
 type coordinate struct {
 	Lat float64 `json:"lat"`
 	Lon float64 `json:"lon"`
@@ -181,123 +179,6 @@ func validatePOIResponse(body []byte) error {
 	return nil
 }
 
-func validateValhallaRouteResponse(body []byte) error {
-	var payload struct {
-		Trip *struct {
-			Legs []struct {
-				Shape string `json:"shape"`
-			} `json:"legs"`
-			Summary *struct {
-				Time   *float64 `json:"time"`
-				Length *float64 `json:"length"`
-			} `json:"summary"`
-		} `json:"trip"`
-	}
-	if json.Unmarshal(body, &payload) != nil || payload.Trip == nil || len(payload.Trip.Legs) == 0 {
-		return errors.New("valhalla returned an invalid route")
-	}
-	points := 0
-	for i, leg := range payload.Trip.Legs {
-		count, err := encodedPolylinePoints(leg.Shape)
-		if err != nil {
-			return errors.New("valhalla returned an invalid route shape")
-		}
-		if i > 0 {
-			count--
-		}
-		points += count
-	}
-	if points < 2 || payload.Trip.Summary == nil || payload.Trip.Summary.Time == nil || payload.Trip.Summary.Length == nil ||
-		*payload.Trip.Summary.Time < 0 || *payload.Trip.Summary.Length < 0 {
-		return errors.New("valhalla returned invalid route details")
-	}
-	return nil
-}
-
-func validateOSRMRouteResponse(body []byte) error {
-	var payload struct {
-		Code   string `json:"code"`
-		Routes []struct {
-			Geometry struct {
-				Type        string      `json:"type"`
-				Coordinates [][]float64 `json:"coordinates"`
-			} `json:"geometry"`
-			Duration *float64 `json:"duration"`
-			Distance *float64 `json:"distance"`
-		} `json:"routes"`
-	}
-	if json.Unmarshal(body, &payload) != nil || payload.Code != "Ok" || len(payload.Routes) == 0 {
-		return errors.New("OSRM returned an invalid route")
-	}
-	for _, route := range payload.Routes {
-		if route.Geometry.Type != "LineString" || len(route.Geometry.Coordinates) < 2 || route.Duration == nil || route.Distance == nil || *route.Duration < 0 || *route.Distance < 0 {
-			return errors.New("OSRM returned invalid route details")
-		}
-		for _, pair := range route.Geometry.Coordinates {
-			if len(pair) < 2 || !(coordinate{Lat: pair[1], Lon: pair[0]}).valid() {
-				return errors.New("OSRM returned invalid route geometry")
-			}
-		}
-	}
-	return nil
-}
-
-func validateSurfaceResponse(body []byte) error {
-	var payload struct {
-		Edges []struct {
-			Surface *string  `json:"surface"`
-			Begin   *float64 `json:"begin_shape_index"`
-			End     *float64 `json:"end_shape_index"`
-		} `json:"edges"`
-		Shape string `json:"shape"`
-	}
-	if json.Unmarshal(body, &payload) != nil || payload.Edges == nil || payload.Shape == "" {
-		return errors.New("valhalla returned invalid surface attributes")
-	}
-	points, err := encodedPolylinePoints(payload.Shape)
-	if err != nil || points < 2 {
-		return errors.New("valhalla returned an invalid surface shape")
-	}
-	for _, edge := range payload.Edges {
-		if edge.Surface != nil && strings.TrimSpace(*edge.Surface) == "" {
-			return errors.New("valhalla returned an invalid surface value")
-		}
-		if edge.Begin == nil || edge.End == nil {
-			return errors.New("valhalla returned invalid surface indexes")
-		}
-		if math.Trunc(*edge.Begin) != *edge.Begin || math.Trunc(*edge.End) != *edge.End || *edge.Begin < 0 || *edge.End < *edge.Begin || *edge.End >= float64(points) {
-			return errors.New("valhalla returned invalid surface indexes")
-		}
-	}
-	return nil
-}
-
-func encodedPolylinePoints(shape string) (int, error) {
-	if shape == "" {
-		return 0, errors.New("empty polyline")
-	}
-	values := 0
-	for i := 0; i < len(shape); {
-		groups := 0
-		for {
-			if i >= len(shape) || shape[i] < 63 || shape[i] > 126 || groups == 10 {
-				return 0, errors.New("malformed polyline")
-			}
-			value := shape[i] - 63
-			i++
-			groups++
-			if value < 0x20 {
-				break
-			}
-		}
-		values++
-	}
-	if values%2 != 0 {
-		return 0, errors.New("malformed polyline")
-	}
-	return values / 2, nil
-}
-
 func (s *Server) handleFuel(w http.ResponseWriter, r *http.Request) {
 	p := s.providers["fuel"]
 	response, err := s.outbound.do(r.Context(), cachedRequest{
@@ -431,13 +312,6 @@ func buildPOIRequest(policy *providerPolicy, kind string, bounds bbox) (cachedRe
 	}, nil
 }
 
-type routeRequest struct {
-	Waypoints []coordinate `json:"waypoints"`
-	Locations []coordinate `json:"locations,omitempty"`
-	Costing   string       `json:"costing"`
-	Profile   string       `json:"profile,omitempty"`
-}
-
 func validatePoints(points []coordinate, minPoints, maxPoints int) error {
 	if len(points) < minPoints || len(points) > maxPoints {
 		return fmt.Errorf("points must contain %d..%d coordinates", minPoints, maxPoints)
@@ -450,171 +324,10 @@ func validatePoints(points []coordinate, minPoints, maxPoints int) error {
 	return nil
 }
 
-func costingPayload(costing, profile string) (map[string]any, error) {
-	if costing != "motorcycle" && costing != "auto" && costing != "bicycle" {
-		return nil, errors.New("costing must be motorcycle, auto, or bicycle")
-	}
-	if profile == "" {
-		profile = "mixed"
-	}
-	if profile != "road" && profile != "mixed" && profile != "trail" {
-		return nil, errors.New("profile must be road, mixed, or trail")
-	}
-	options := map[string]any{}
-	switch costing {
-	case "motorcycle":
-		values := map[string]map[string]float64{
-			"road":  {"use_highways": .6, "use_tolls": .5, "use_trails": 0},
-			"mixed": {"use_highways": .1, "use_tolls": 0, "use_trails": .6},
-			"trail": {"use_highways": 0, "use_tolls": 0, "use_trails": 1},
-		}
-		options["motorcycle"] = values[profile]
-	case "auto":
-		useHighways := .1
-		if profile == "road" {
-			useHighways = .6
-		}
-		options["auto"] = map[string]float64{"use_highways": useHighways, "use_tolls": 0}
-	case "bicycle":
-		options["bicycle"] = map[string]any{"bicycle_type": "Mountain", "use_roads": .1, "use_hills": 1.0, "use_trails": 1.0}
-	}
-	return map[string]any{"costing": costing, "costing_options": options}, nil
-}
-
-func canonicalJSON(value any) ([]byte, error) {
-	return json.Marshal(value)
-}
-
-func (s *Server) handleValhallaRoute(w http.ResponseWriter, r *http.Request) {
-	var payload routeRequest
-	if err := decodeJSONBody(w, r, maxProviderRequestBody, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	points := payload.Waypoints
-	if len(points) == 0 {
-		points = payload.Locations
-	}
-	if err := validatePoints(points, 2, 100); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	costing, err := costingPayload(payload.Costing, payload.Profile)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	upstream := map[string]any{"locations": points, "directions_options": map[string]string{"units": "kilometers"}}
-	for key, value := range costing {
-		upstream[key] = value
-	}
-	body, _ := canonicalJSON(upstream)
-	p := s.providers["valhalla-route"]
-	response, err := s.outbound.do(r.Context(), cachedRequest{
-		policy: p, method: http.MethodPost, url: providerEndpoint(p.baseURL, "/route"), params: string(body), body: body, cacheable: true,
-		headers:  map[string]string{"Accept": "application/json", "Content-Type": "application/json"},
-		validate: validateValhallaRouteResponse,
-	})
-	if err != nil {
-		writeOutboundError(w, err, p.scope)
-		return
-	}
-	writeCachedResponse(w, response)
-}
-
-type osrmRequest struct {
-	Points    []coordinate `json:"points"`
-	Waypoints []coordinate `json:"waypoints,omitempty"`
-}
-
-func (s *Server) handleOSRMRoute(w http.ResponseWriter, r *http.Request) {
-	var payload osrmRequest
-	if err := decodeJSONBody(w, r, maxProviderRequestBody, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	points := payload.Points
-	if len(points) == 0 {
-		points = payload.Waypoints
-	}
-	if err := validatePoints(points, 2, 100); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	parts := make([]string, len(points))
-	for i, point := range points {
-		parts[i] = strconv.FormatFloat(point.Lon, 'f', 6, 64) + "," + strconv.FormatFloat(point.Lat, 'f', 6, 64)
-	}
-	p := s.providers["osrm-route"]
-	path := "/route/v1/driving/" + strings.Join(parts, ";")
-	endpoint := providerEndpoint(p.baseURL, path) + "?overview=full&geometries=geojson"
-	response, err := s.outbound.do(r.Context(), cachedRequest{policy: p, method: http.MethodGet, url: endpoint, params: strings.Join(parts, ";"), cacheable: true, headers: map[string]string{"Accept": "application/json"}, validate: validateOSRMRouteResponse})
-	if err != nil {
-		writeOutboundError(w, err, p.scope)
-		return
-	}
-	writeCachedResponse(w, response)
-}
-
-type surfaceRequest struct {
-	Points  []coordinate `json:"points"`
-	Shape   []coordinate `json:"shape,omitempty"`
-	Costing string       `json:"costing"`
-	Profile string       `json:"profile,omitempty"`
-}
-
 func haversineMeters(a, b coordinate) float64 {
 	const radius = 6371008.8
 	lat1, lat2 := a.Lat*math.Pi/180, b.Lat*math.Pi/180
 	dLat, dLon := lat2-lat1, (b.Lon-a.Lon)*math.Pi/180
 	h := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Cos(lat1)*math.Cos(lat2)*math.Sin(dLon/2)*math.Sin(dLon/2)
 	return 2 * radius * math.Asin(math.Sqrt(h))
-}
-
-func (s *Server) handleValhallaSurface(w http.ResponseWriter, r *http.Request) {
-	var payload surfaceRequest
-	if err := decodeJSONBody(w, r, maxProviderRequestBody, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	points := payload.Points
-	if len(points) == 0 {
-		points = payload.Shape
-	}
-	if err := validatePoints(points, 2, 5000); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	var distance float64
-	for i := 1; i < len(points); i++ {
-		distance += haversineMeters(points[i-1], points[i])
-	}
-	if distance > 200000 {
-		writeError(w, http.StatusBadRequest, "surface chunk must not exceed 200 km")
-		return
-	}
-	costing, err := costingPayload(payload.Costing, payload.Profile)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	upstream := map[string]any{
-		"shape": points, "shape_match": "walk_or_snap",
-		"filters": map[string]any{"action": "include", "attributes": []string{"edge.surface", "edge.begin_shape_index", "edge.end_shape_index", "shape"}},
-	}
-	for key, value := range costing {
-		upstream[key] = value
-	}
-	body, _ := canonicalJSON(upstream)
-	p := s.providers["surface"]
-	response, err := s.outbound.do(r.Context(), cachedRequest{
-		policy: p, method: http.MethodPost, url: providerEndpoint(p.baseURL, "/trace_attributes"), params: string(body), body: body, cacheable: true,
-		headers:  map[string]string{"Accept": "application/json", "Content-Type": "application/json"},
-		validate: validateSurfaceResponse,
-	})
-	if err != nil {
-		writeOutboundError(w, err, p.scope)
-		return
-	}
-	writeCachedResponse(w, response)
 }

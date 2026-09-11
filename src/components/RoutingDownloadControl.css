@@ -1,0 +1,60 @@
+.routing-download {
+  position: absolute;
+  bottom: var(--routing-control-bottom, 60px);
+  left: 12px;
+  z-index: 1000;
+  max-width: calc(100% - 76px);
+  font: 12px/1.5 var(--font-body, sans-serif);
+}
+
+.routing-download-pill,
+.routing-download-panel {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.routing-download-pill {
+  padding: 7px 12px;
+  border-radius: 20px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.routing-download-pill span { color: var(--text-muted); }
+
+.routing-download-panel {
+  width: 300px;
+  max-width: 100%;
+  max-height: min(460px, var(--routing-panel-max-height, 65vh));
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 16px;
+  margin-bottom: 8px;
+  border-radius: 14px;
+}
+
+.routing-download-panel header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.routing-download-panel header strong { display: block; font-size: 15px; margin-top: 2px; }
+.routing-download-panel header small { letter-spacing: 0.09em; font-size: 9px; font-weight: 700; }
+.routing-download-panel p { margin: 12px 0; color: var(--text-secondary); }
+.routing-download-panel small { color: var(--text-muted); }
+.routing-download-panel button { font: inherit; cursor: pointer; border-radius: 8px; }
+.routing-download-panel button:disabled { opacity: 0.5; cursor: default; }
+.routing-download-close { border: 0; background: transparent; color: var(--text-muted); padding: 0 4px; font-size: 20px !important; }
+.routing-download-primary { width: 100%; padding: 9px 12px; border: 1px solid var(--border-strong); color: var(--text-primary); background: var(--accent-light); font-weight: 600 !important; }
+.routing-download-secondary { padding: 6px 0; border: 0; color: var(--text-muted); background: transparent; margin-top: 8px; }
+.routing-download-stages { list-style: none; margin: 16px 0; padding: 0; display: grid; gap: 9px; }
+.routing-download-stages li { display: flex; align-items: center; gap: 9px; color: var(--text-muted); }
+.routing-download-stages li > span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-subtle); font-size: 10px; }
+.routing-download-stages .current { color: var(--text-primary); font-weight: 600; }
+.routing-download-stages .current > span { background: var(--accent-light); border-color: var(--gradient-start); }
+.routing-download-stages .complete { color: var(--text-secondary); }
+.routing-download-transfer { display: grid; gap: 5px; padding: 10px; border-radius: 9px; background: var(--bg-secondary); }
+.routing-download-transfer > span { font-size: 11px; color: var(--text-secondary); }
+.routing-download-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; }
+.routing-download-transfer progress { width: 100%; height: 5px; border: 0; border-radius: 4px; overflow: hidden; accent-color: var(--gradient-start); }
+.routing-download-transfer progress::-webkit-progress-bar { background: var(--border-subtle); }
+.routing-download-transfer progress::-webkit-progress-value { background: var(--gradient-start); }
+.routing-download-panel [role=alert] { color: var(--text-primary); border-left: 2px solid var(--gradient-start); padding-left: 8px; }

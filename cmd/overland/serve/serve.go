@@ -104,8 +104,18 @@ func Flags() []cli.Flag {
 		&cli.StringFlag{Name: "upstream-contact", Usage: "operator contact included in outbound User-Agent", Value: "https://github.com/lalotone/overland-gpx-editor", Sources: util.NonEmptyEnv("UPSTREAM_CONTACT")},
 		&cli.StringFlag{Name: "trusted-ui-origin", Usage: "exact remote UI origin allowed to manage offline data", Sources: util.NonEmptyEnv("TRUSTED_UI_ORIGIN")},
 		&cli.StringFlag{Name: "offline-admin-token", Usage: "Bearer token for non-loopback offline management", Sources: util.StringEnv("OFFLINE_ADMIN_TOKEN")},
-		&cli.StringFlag{Name: "valhalla-url", Usage: "Valhalla provider base URL", Value: "https://valhalla1.openstreetmap.de", Sources: util.NonEmptyEnv("VALHALLA_URL")},
-		&cli.StringFlag{Name: "osrm-url", Usage: "OSRM provider base URL", Value: "https://router.project-osrm.org", Sources: util.NonEmptyEnv("OSRM_URL")},
+		&cli.StringFlag{Name: "routing-cache-dir", Usage: "Broom routing data directory; empty disables local routing", Value: util.DefaultRoutingCacheDir(), Sources: util.StringEnv("ROUTING_CACHE_DIR")},
+		&cli.StringFlag{Name: "routing-region", Usage: "canonical Broom region to reopen or prepare", Sources: util.NonEmptyEnv("ROUTING_REGION")},
+		&cli.StringFlag{Name: "routing-graph", Usage: "trusted application-owned Broom graph to open instead of a managed region", Sources: util.NonEmptyEnv("ROUTING_GRAPH")},
+		&cli.BoolFlag{Name: "routing-prepare", Usage: "prepare --routing-region in the background when serving", Sources: util.BoolEnv("ROUTING_PREPARE")},
+		&cli.BoolFlag{Name: "routing-update", Usage: "explicitly refresh --routing-region while preparing", Sources: util.BoolEnv("ROUTING_UPDATE")},
+		&cli.IntFlag{Name: "routing-jobs", Usage: "parallel Broom graph preparation jobs", Value: 2, Sources: util.IntEnv("ROUTING_JOBS")},
+		&cli.IntFlag{Name: "routing-concurrency", Usage: "maximum concurrent local route queries", Value: 4, Sources: util.IntEnv("ROUTING_CONCURRENCY")},
+		&cli.DurationFlag{Name: "routing-timeout", Usage: "deadline for one local route query", Value: 45 * time.Second, Sources: util.NonEmptyEnv("ROUTING_TIMEOUT")},
+		&cli.StringFlag{Name: "routing-index-url", Usage: "Broom geometry index mirror", Sources: util.NonEmptyEnv("ROUTING_INDEX_URL")},
+		&cli.StringFlag{Name: "routing-metadata-index-url", Usage: "Broom metadata index mirror", Sources: util.NonEmptyEnv("ROUTING_METADATA_INDEX_URL")},
+		&cli.StringFlag{Name: "routing-pbf-base-url", Usage: "Broom PBF/checksum mirror base", Sources: util.NonEmptyEnv("ROUTING_PBF_BASE_URL")},
+		&cli.StringFlag{Name: "routing-dem-base-url", Usage: "Broom Skadi-compatible DEM mirror base", Sources: util.NonEmptyEnv("ROUTING_DEM_BASE_URL")},
 		&cli.StringFlag{Name: "overpass-url", Usage: "Overpass interpreter URL", Value: "https://overpass-api.de/api/interpreter", Sources: util.NonEmptyEnv("OVERPASS_URL")},
 		&cli.StringFlag{Name: "fuel-url", Usage: "Spanish fuel snapshot URL", Value: "https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/", Sources: util.NonEmptyEnv("FUEL_URL")},
 		&cli.StringFlag{Name: "openfreemap-url", Usage: "OpenFreeMap-compatible style source", Value: defaultOpenFreeMapURL, Sources: util.NonEmptyEnv("OPENFREEMAP_URL")},
@@ -136,6 +146,9 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return fmt.Errorf("elevation-tile-cache-max-bytes: %w", err)
 	}
+	if (cmd.Bool("routing-prepare") || cmd.Bool("routing-update")) && strings.TrimSpace(cmd.String("routing-region")) == "" {
+		return errors.New("--routing-prepare and --routing-update require --routing-region")
+	}
 
 	behindProxy := cmd.Bool("behind-proxy")
 	bridge, mcpServer, mcpListener, err := startMCP(cmd, behindProxy)
@@ -159,8 +172,18 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		UpstreamContact:            cmd.String("upstream-contact"),
 		TrustedUIOrigin:            cmd.String("trusted-ui-origin"),
 		OfflineAdminToken:          cmd.String("offline-admin-token"),
-		ValhallaURL:                cmd.String("valhalla-url"),
-		OSRMURL:                    cmd.String("osrm-url"),
+		RoutingCacheDir:            cmd.String("routing-cache-dir"),
+		RoutingRegion:              cmd.String("routing-region"),
+		RoutingGraph:               cmd.String("routing-graph"),
+		RoutingPrepare:             cmd.Bool("routing-prepare"),
+		RoutingUpdate:              cmd.Bool("routing-update"),
+		RoutingJobs:                cmd.Int("routing-jobs"),
+		RoutingConcurrency:         cmd.Int("routing-concurrency"),
+		RoutingTimeout:             cmd.Duration("routing-timeout"),
+		RoutingIndexURL:            cmd.String("routing-index-url"),
+		RoutingMetadataIndexURL:    cmd.String("routing-metadata-index-url"),
+		RoutingPBFBaseURL:          cmd.String("routing-pbf-base-url"),
+		RoutingDEMBaseURL:          cmd.String("routing-dem-base-url"),
 		OverpassURL:                cmd.String("overpass-url"),
 		FuelURL:                    cmd.String("fuel-url"),
 		OpenFreeMapURL:             cmd.String("openfreemap-url"),
@@ -207,6 +230,9 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 
 	log.Printf("%s %s listening on %s (library: %s, elevation: %s)",
 		util.AppName, cmd.Root().Version, cmd.String("addr"), cmd.String("gpx-dir"), elevationSource)
+	if cmd.String("routing-cache-dir") != "" {
+		log.Printf("Broom routing enabled (data: %s, region: %s)", cmd.String("routing-cache-dir"), valueOrNone(cmd.String("routing-region")))
+	}
 	if bridge != nil {
 		log.Printf("MCP available at http://%s/mcp (Streamable HTTP, loopback clients only)", mcpListener.Addr())
 	}
@@ -285,6 +311,13 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 
 func expectedServiceStop(err error) bool {
 	return errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)
+}
+
+func valueOrNone(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "select in planner"
+	}
+	return strings.TrimSpace(value)
 }
 
 func parseByteSize(value string) (int64, error) {

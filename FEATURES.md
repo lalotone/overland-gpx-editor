@@ -60,26 +60,25 @@ Applies to any loaded track, with undo:
 ## Route planning
 
 - Click waypoints on the map, drag to adjust, Ctrl+Z to undo, reverse direction.
-- **Motorbike routing profiles** via Valhalla `motorcycle` costing:
+- **Motorbike routing profiles** via the embedded Broom engine and an
+  application-owned motorcycle profile:
   - **Road** — sealed roads
   - **Dirt** — prefers unsealed roads and forest tracks over tarmac
   - **Trail** — maximum offroad, narrow tracks and paths where legal
-  Falls back to `auto`/`bicycle`, then OSRM, if the server lacks motorcycle
-  costing — and says so, because travel time then models a different vehicle.
-- Requests are debounced, cancelled, and serialized at one per second across
-  routing and surface calls, so they respect the public FOSSGIS service limit.
-- Elevation is fetched for **every** routed point in batched, concurrent
-  requests. Only past ~6000 points is it sampled and interpolated, and that
-  is reported rather than silently written to file.
+  There is no remote or non-motorcycle fallback.
+- Requests are debounced and cancelled, with bounded local concurrency and a
+  deadline. Interactive queries only use an already prepared graph.
+- Broom returns graph elevation for every routed point, including a per-point
+  interpolation flag. Interpolated heights are shown but omitted from GPX.
 - Place search via Nominatim, throttled to one request per second and cached for
   the session and persistently by the Go service. The provider is
   runtime-configurable with `NOMINATIM_URL`.
 
 ## Surface
 
-- **What the route is actually made of**, read per segment from Valhalla
-  `trace_attributes` while planning: sealed road, gravel/compacted, dirt
-  track, path/rough.
+- **What the route is actually made of**, read from Broom's route-aligned OSM
+  annotations while planning: sealed road, gravel/compacted, dirt track,
+  path/rough.
 - **Distance and share per surface**, weighted by segment length rather than
   segment count — a route is a few long road segments and many short twisty
   dirt ones, so counting segments reports the opposite of the truth.
@@ -230,7 +229,8 @@ the service is down, the OSM fuel layer answers as before.
 - Periodic structured diagnostics report only aggregate cache inventory,
   hit/miss/stale counts, outbound status classes and timing, queue pressure,
   elevation-tile usage and pack-state counts. They never log travel data.
-- Standard-library-only HTTP backend; the command interface uses `urfave/cli`.
+- Small Go HTTP backend; the command interface uses `urfave/cli`, and embedded
+  routing uses Broom.
 
 ---
 
@@ -238,8 +238,8 @@ the service is down, the OSM fuel layer answers as before.
 
 - **Surface on a loaded track** — the breakdown is read while planning; an
   imported GPX would need map-matching before it could be classified.
-- **`tracktype`/`smoothness`** — how rough the dirt is, not just that it is
-  dirt. Valhalla's `surface` does not carry it; needs an Overpass tag join.
+- **`tracktype`/`smoothness` presentation** — Broom returns these OSM road
+  attributes, but the planner does not yet display a roughness breakdown.
 - **Arbitrary public raster basemap packs** — provider policies prohibit them;
   bounded OpenFreeMap vector packs are the supported exception.
 - **Access warnings** — `access=private`, gates, seasonal closures.

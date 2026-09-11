@@ -116,14 +116,13 @@ Two rules it is worth repeating here:
   reads as sea level.
   `VITE_ELEVATION_API` adds an optional direct-from-browser fallback and is
   empty by default.
-- **Routing**: Valhalla at `valhalla1.openstreetmap.de`, `motorcycle` costing,
-  falling back to `auto`/`bicycle` then OSRM if unsupported. Both public hosts
-  are operated by FOSSGIS, so every request goes through the shared
-  `fetchFossgis` one-request-per-second queue.
-- **Surface**: the same Valhalla instance's `/trace_attributes`, which rejects
-  any path over 200 km — `lib/surface.ts` chunks around that limit, and the
-  verify harness asserts the chunking so it cannot regress silently. Chunks are
-  sent sequentially through the same FOSSGIS queue as route requests.
+- **Routing**: embedded Broom with an application-owned motorcycle BRF and
+  Road/Dirt/Trail overrides. Route queries use only an already-open graph;
+  region acquisition, graph building, updates and cache pruning go through the
+  explicit `/offline/routing` lifecycle. There is no remote routing fallback.
+- **Surface**: Broom returns OSM surface and road attributes aligned to route
+  geometry. Untagged or unsupported surface values remain `unknown`; never infer
+  a surface from highway class or track type.
 - **Places**: Nominatim, with a one-request-per-second queue and session cache.
   `NOMINATIM_URL` changes the provider at runtime through `/config`.
   **POIs**: Overpass.

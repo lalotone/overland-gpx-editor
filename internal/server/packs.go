@@ -38,8 +38,6 @@ const (
 	packResourceWater        = "water"
 	packResourceCampsites    = "campsites"
 	packResourceFuelPrices   = "fuel-prices"
-	packResourceRoute        = "route"
-	packResourceSurface      = "surface"
 	packResourcePlaces       = "places"
 	packResourcePOIs         = "points-of-interest"
 )
@@ -395,7 +393,7 @@ func validatePackInput(input packInput) (bbox, error) {
 	}
 	for _, scope := range input.Scopes {
 		switch scope {
-		case "elevation", "routing", "surface", "pois", "fuel", "places":
+		case "elevation", "pois", "fuel", "places":
 		default:
 			return bbox{}, fmt.Errorf("unknown data scope %q", scope)
 		}
@@ -629,8 +627,6 @@ func packProgressFromEstimate(estimate packEstimate) map[string]packResourceProg
 	add(packResourceFuelStations, estimate.Counts["pois-fuel"])
 	add(packResourceWater, estimate.Counts["pois-water"])
 	add(packResourceCampsites, estimate.Counts["pois-camp"])
-	add(packResourceRoute, estimate.Counts["routing"])
-	add(packResourceSurface, estimate.Counts["surface"])
 	add(packResourcePlaces, estimate.Counts["places"])
 	add(packResourcePOIs, estimate.Counts["pois"])
 	return resources
@@ -987,7 +983,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			estimate.Scopes["pois"] = cacheScopeStat{Bytes: poiBytes, Entries: len(estimate.POIRequests)}
 		}
 	}
-	for _, scope := range []string{"routing", "surface", "pois", "places"} {
+	for _, scope := range []string{"pois", "places"} {
 		if !containsString(input.Scopes, scope) {
 			continue
 		}
@@ -995,12 +991,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			continue
 		}
 		keys, bytes := m.server.cache.retainedKeys(scope, time.Now().UTC())
-		category := map[string]string{
-			"routing": packResourceRoute,
-			"surface": packResourceSurface,
-			"pois":    packResourcePOIs,
-			"places":  packResourcePlaces,
-		}[scope]
+		category := map[string]string{"pois": packResourcePOIs, "places": packResourcePlaces}[scope]
 		for _, key := range keys {
 			estimate.ExistingKeys = append(estimate.ExistingKeys, existingPackResource{Category: category, Key: key})
 		}
@@ -1010,10 +1001,8 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		estimate.Reused += len(keys)
 		estimate.ReusedBytes += bytes
 		detail := map[string]string{
-			"routing": "Routes protect exact results already in the cache; the pack does not calculate new routes",
-			"surface": "Surface protects exact analyses already in the cache; the pack does not analyze new roads",
-			"pois":    "POIs protect exact searches already in the cache; the pack does not run new POI queries for this area",
-			"places":  "Places protect exact searches already in the cache; the pack does not search for new places",
+			"pois":   "POIs protect exact searches already in the cache; the pack does not run new POI queries for this area",
+			"places": "Places protect exact searches already in the cache; the pack does not search for new places",
 		}[scope]
 		estimate.Dynamic = append(estimate.Dynamic, detail)
 	}

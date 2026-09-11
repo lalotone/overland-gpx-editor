@@ -2,7 +2,8 @@
 
 Offline mode assumes the browser can still reach the `overland serve` process
 and its embedded frontend, but that the Go process cannot reach public
-providers. It is not a service worker and it does not supply a routing graph.
+providers. It is not a service worker. Local routing uses a separately managed
+Broom graph prepared before going offline.
 
 ## Storage
 
@@ -15,14 +16,14 @@ APIs. Terrarium elevation keeps its existing, separate
 already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` bounds that
 separate tree to 1 GiB by default; oldest disk tiles are evicted first.
 
-Response filenames are hashes. Search text, route coordinates and POI bounds do
+Response filenames are hashes. Search text and POI bounds do
 not appear in paths or request logs. Cache directories use mode `0700` and files
 use `0600`; writes use temporary files followed by rename. Bodies, sidecars and
 pack manifests count towards the quota. Expired entries are removed first,
 then least-recently-used unpinned entries. A pack cannot extend a provider's
 retention ceiling.
 
-Route, place and POI caches reveal location history. Set `OFFLINE_CACHE_DIR=`
+Place and POI caches reveal location history. Set `OFFLINE_CACHE_DIR=`
 to opt out of persistence, use the management API to clear an individual
 scope, or remove the cache directory while the server is stopped.
 
@@ -66,7 +67,7 @@ before changing an adapter or release default.
 | Fuel snapshot | Explicit open-data snapshot, dated by source and cache | One bounded snapshot |
 | Nominatim | Exact user searches, one server-wide request/second | No autocomplete, grid or area sweep |
 | Overpass | Exact bounded user POI query | No tiled sweeps or harvesting |
-| Valhalla/OSRM/surface | Exact requests, shared FOSSGIS one/second queue | No speculative routes |
+| Broom routing data | Local OSM extract, DEM, graph and profile metrics | Explicit region preparation only |
 | API elevation | Exact source/dataset coordinates | Bounded requests subject to provider licence/quota |
 
 Policy sources: [OSMF tiles](https://operations.osmfoundation.org/policies/tiles/),
@@ -77,9 +78,42 @@ Policy sources: [OSMF tiles](https://operations.osmfoundation.org/policies/tiles
 [terms](https://openfreemap.org/tos/),
 [Nominatim](https://operations.osmfoundation.org/policies/nominatim/),
 [Overpass](https://dev.overpass-api.de/overpass-doc/en/preface/commons.html),
-[FOSSGIS](https://www.fossgis.de/arbeitsgruppen/osm-server/nutzungsbedingungen/),
 [Open-Meteo](https://open-meteo.com/en/terms), and the
 [Spanish fuel catalogue](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas).
+
+## Routing Data
+
+Broom routing data lives under `$XDG_CACHE_HOME/overland/routing`, outside the
+generic response-cache quota. `POST /offline/routing/prepare` explicitly
+downloads and builds one region; status and progress are available from
+`GET /offline/routing`, and cancellation is cooperative. A completed generation
+is opened and warmed for all three motorcycle profiles before it becomes active,
+so interactive route requests never trigger graph building or profile
+customization.
+
+Planner and Explore suggest the smallest downloadable extract whose polygon
+covers the complete viewport. A coastal view that would otherwise select a
+continent instead offers a local centre-containing extract, explicitly marked
+as partial coverage. The region catalogue is cached through the backend;
+viewport suggestions fetch no PBFs or DEMs and start no preparation jobs. Open the
+compact **Offline routing** map pill to accept a download and reveal progress.
+The selected generation and explicit pins survive pruning. Protected pin and
+prune API operations expose Broom's application-level cache policy.
+The last active managed region is persisted and reopened on restart. Older
+caches without that selection reopen the newest installed region.
+
+Progress reports road data, terrain tiles, graph building and profile preparation
+separately. Transfer percentages are per file; completed terrain tile counts do
+not reset between files. Only an open graph is reported as ready.
+
+Broom 0.4 determines terrain acquisition from all PBF node bounds, including
+distant relation members. Some extracts therefore acquire substantially more
+terrain than their advertised coverage; a live Catalonia preparation required
+180 HGT tiles. This is a remaining upstream acquisition limitation, not a retry
+loop, and the UI reports the tile count rather than a misleading overall percent.
+Entering `cache-only` cancels active acquisition and prevents new downloads, but
+installed graphs remain routable. A custom `--routing-graph` is opened directly
+and is not owned or pruned by the managed routing cache.
 
 ## Trip Packs
 

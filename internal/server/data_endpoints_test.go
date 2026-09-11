@@ -24,21 +24,6 @@ func TestProviderResponseValidators(t *testing.T) {
 			valid:   `{"elements":[{"type":"node","id":1,"lat":40.4,"lon":-3.7,"tags":{"name":"Fuel"}}]}`,
 			invalid: `{"elements":[{"type":"node","id":1,"lat":140.4,"lon":-3.7}]}`,
 		},
-		{
-			name: "valhalla route", validate: validateValhallaRouteResponse,
-			valid:   `{"trip":{"legs":[{"shape":"??AA"}],"summary":{"time":10,"length":1}}}`,
-			invalid: `{"trip":{"legs":[{"shape":"?"}],"summary":{"time":10,"length":1}}}`,
-		},
-		{
-			name: "OSRM route", validate: validateOSRMRouteResponse,
-			valid:   `{"code":"Ok","routes":[{"geometry":{"type":"LineString","coordinates":[[-3.7,40.4],[-3.6,40.5]]},"duration":10,"distance":100}]}`,
-			invalid: `{"code":"Ok","routes":[{"geometry":{"type":"LineString","coordinates":[[-3.7,40.4]]},"duration":10,"distance":100}]}`,
-		},
-		{
-			name: "surface", validate: validateSurfaceResponse,
-			valid:   `{"shape":"??AA","edges":[{"surface":"gravel","begin_shape_index":0,"end_shape_index":1}]}`,
-			invalid: `{"shape":"??AA","edges":[{"surface":"gravel","begin_shape_index":1,"end_shape_index":3}]}`,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -322,6 +322,99 @@ test('creation mode renders the selected OFM vector layer', async ({ page }) => 
   await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
 })
 
+test('planner suggests viewport routing downloads and reveals progress', async ({ page }, testInfo) => {
+  await mockRuntime(page)
+  let ready = false
+  let running = false
+  let complete = false
+  let suggestedBounds: unknown
+  let requestedRegion: string | undefined
+  let routeCalls = 0
+  const status = () => ({
+    enabled: true,
+    ready,
+    ...(ready ? { regionId: 'spain/aragon', generationId: 'generation-1', name: 'Aragon' } : {}),
+    ...(running ? { job: { id: 'routing-1', regionId: 'spain/aragon', state: 'running', phase: 'build', done: 1, total: 2 } } : {}),
+    cached: ready ? [{ regionId: 'spain/aragon', generationId: 'generation-1', name: 'Aragon', selected: true, pinned: false }] : [],
+    cacheBytes: ready ? 4096 : 0,
+    pinnedBytes: 0,
+    inUseBytes: ready ? 2048 : 0,
+    reclaimableBytes: 0,
+  })
+  await page.route(/\/config$/, route => json(route, {
+    offline: {
+      enabled: true,
+      mode: 'auto',
+      status: '/offline/status',
+      packs: '/offline/packs',
+      modeControl: '/offline/mode',
+      routing: '/offline/routing',
+    },
+    services: { places: '/places/search', broomRoute: '/routing/broom/route' },
+    maps: { raster: { osm: '/e2e/osm/{z}/{x}/{y}.png' }, openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, async route => {
+    requestedRegion = (route.request().postDataJSON() as { regionId: string }).regionId
+    running = true
+    await json(route, status(), 202)
+  })
+  await page.route(/\/offline\/routing\/suggest$/, async route => {
+    suggestedBounds = (route.request().postDataJSON() as { bbox: unknown }).bbox
+    await json(route, { region: { regionId: 'spain/aragon', name: 'Aragon', installed: ready, active: ready } })
+  })
+  await page.route(/\/offline\/routing$/, async route => {
+    if (running && complete) {
+      running = false
+      ready = true
+    }
+    await json(route, status())
+  })
+  await page.route(/\/routing\/broom\/route$/, async route => {
+    routeCalls++
+    expect(ready).toBe(true)
+    await json(route, {
+      schemaVersion: 1, engine: 'Broom', engineVersion: '0.4.0',
+      coordinates: [{ lat: 41.6, lon: -0.9 }, { lat: 41.7, lon: -0.8 }],
+      elevations: [null, null], segments: [], distanceMeters: 15000, durationSeconds: 900,
+    })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+  await expect(page.getByRole('combobox', { name: 'Broom routing region' })).toHaveCount(0)
+  const pill = page.locator('.routing-download-pill')
+  await page.locator('.leaflet-container').scrollIntoViewIfNeeded()
+  await expect(pill).toContainText('Aragon')
+  await expectFloatingAbove(page.locator('.leaflet-control-zoom'), page.locator('.creation-poi-strip'))
+  await page.locator('.leaflet-container').hover({ position: { x: 100, y: 100 } })
+  const readout = page.locator('.map-cursor-readout')
+  if (await readout.isVisible()) await expectFloatingAbove(pill, readout)
+  const mapBounds = await page.locator('.leaflet-container').boundingBox()
+  const fullMap = await page.getByRole('button', { name: 'Full map — hide the panels' }).boundingBox()
+  expect(fullMap!.y - mapBounds!.y).toBeLessThanOrEqual(12)
+  expect(fullMap!.x - mapBounds!.x).toBeLessThanOrEqual(12)
+  expect(suggestedBounds).toMatchObject({ south: expect.any(Number), west: expect.any(Number), north: expect.any(Number), east: expect.any(Number) })
+  expect(requestedRegion).toBeUndefined()
+  await expect(page.getByRole('region', { name: 'Offline routing download' })).toHaveCount(0)
+  await pill.click()
+  await page.getByRole('button', { name: 'Download Aragon' }).click()
+  expect(requestedRegion).toBe('spain/aragon')
+  await expect(page.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '50')
+  await pill.click()
+  await expect(page.getByRole('progressbar')).toHaveCount(0)
+  await expect(pill).toContainText('Build routing graph')
+  await pill.click()
+  await expect(page.getByRole('button', { name: 'Cancel download' })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('routing-progress.png') })
+  await pill.click()
+  await page.locator('.leaflet-container').click({ position: { x: 170, y: 150 } })
+  await page.locator('.leaflet-container').click({ position: { x: 240, y: 210 } })
+  expect(routeCalls).toBe(0)
+  complete = true
+  await expect(pill).toHaveText('Routing ready')
+  await expect.poll(() => routeCalls).toBe(1)
+})
+
 test('MCP bridge draws planner routes and reports the active view', async ({ page }) => {
   await mockRuntime(page)
   const commands = [
@@ -1034,9 +1127,6 @@ test('MCP agents can see errors caused by their own commands', async ({ page }) 
   await mockRuntime(page)
   // Routing fails after plan_route has already returned, so the only way an
   // agent can learn about it is through the snapshot.
-  await page.route(/valhalla1\.openstreetmap\.de/, route => route.fulfill({ status: 503, body: 'upstream unavailable' }))
-  await page.route(/router\.project-osrm\.org/, route => route.fulfill({ status: 503, body: 'upstream unavailable' }))
-
   const commands = [
     { id: 'command-mode', name: 'switch_mode', arguments: { mode: 'planner' } },
     {

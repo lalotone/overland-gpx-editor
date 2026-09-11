@@ -33,7 +33,7 @@ the part I want.
   inflating totals by 10–50%, and slope measured over real distance
 - ✂️ **A real editor** — crop, split, day-stage, simplify and repair elevation
   on any track you load
-- 🏍️ **Motorbike routing** — embedded Broom routing with road / dirt / trail
+- 🏍️ **Motorbike routing** — embedded Broom routing with road / dirt / trail / enduro
   profiles, OSM surface annotations and no remote route service
 - 🧭 **Prepared for dead zones** — viewed resources and trip packs survive a
   restart, with a strict cache-only mode that makes no upstream requests
@@ -238,6 +238,12 @@ For unattended startup, use:
 managed by region; use this for cross-border union graphs. Routing has no public
 provider fallback. Without prepared data it reports that routing data is needed
 while GPX loading and editing continue to work.
+
+**Enduro** uses Broom's built-in road-registered motorcycle BRF, favouring unsealed
+tracks and requiring explicit motor permission on paths. **Upload session BRF**
+lets you prepare a custom profile for the currently open graph. It is temporary:
+no library file or browser storage is written, and it is released when removed,
+on page exit, or after two hours. Switching routing regions requires a new upload.
 
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be

@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	broomVersion        = "0.5.0"
+	broomVersion        = "0.5.1"
 	broomProfileName    = "overland-motorcycle"
 	maxBroomRouteBody   = 64 << 10
 	defaultRouteJobs    = 2
@@ -58,6 +58,7 @@ type broomProfileSpec struct {
 }
 
 type broomDataset struct {
+	temporaryDir string
 	router       *broom.Router
 	regionID     string
 	generationID string
@@ -117,6 +118,8 @@ type broomRoutingStatus struct {
 }
 
 type broomRoutingService struct {
+	sessions      map[string]*sessionBroomProfile
+	uploads       chan struct{}
 	selectionPath string
 	manager       *broom.Manager
 	profiles      map[string]broomProfileSpec
@@ -193,6 +196,13 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		profiles[name] = broomProfileSpec{profile: resolved, overrides: overrides}
 		warmup = append(warmup, resolved)
 	}
+	enduro, ok := broom.BuiltinProfile("enduro")
+	if !ok {
+		return nil, errors.New("built-in Enduro profile is unavailable")
+	}
+	profiles["enduro"] = broomProfileSpec{profile: enduro}
+	warmup = append(warmup, enduro)
+	registered := []*broom.Profile{profile, enduro}
 	slices.SortFunc(warmup, func(a, b *broom.Profile) int { return strings.Compare(a.Hash(), b.Hash()) })
 	if cfg.Jobs <= 0 {
 		cfg.Jobs = defaultRouteJobs
@@ -226,9 +236,9 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 			PBFBaseURL: cfg.PBFBaseURL, DEMBaseURL: cfg.DEMBaseURL,
 			UserAgent: "overland-gpx-editor/1 broom/" + broomVersion, Contact: cfg.Contact,
 		},
-		Profiles: []*broom.Profile{profile},
+		Profiles: registered,
 		Router: broom.RouterOptions{
-			Profiles: []*broom.Profile{profile}, MetricCacheSize: len(definitions),
+			Profiles: registered, MetricCacheSize: len(profiles),
 			DisableCustomizeOnDemand: true, MaxUncustomizedDistance: &zeroDistance,
 		},
 	})
@@ -236,6 +246,7 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		return nil, err
 	}
 	service := &broomRoutingService{
+		sessions: make(map[string]*sessionBroomProfile), uploads: make(chan struct{}, 1),
 		selectionPath: filepath.Join(cfg.CacheDir, "overland-active-region"),
 		manager:       manager, profiles: profiles, warmup: warmup, modes: modes,
 		ctx: ctx, wg: wg, jobs: cfg.Jobs, timeout: cfg.Timeout,
@@ -243,7 +254,7 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 	}
 	if cfg.Graph != "" {
 		router, openErr := broom.Open(cfg.Graph, broom.RouterOptions{
-			Profiles: []*broom.Profile{profile}, MetricCacheSize: len(definitions),
+			Profiles: registered, MetricCacheSize: len(profiles),
 			DisableCustomizeOnDemand: true, MaxUncustomizedDistance: &zeroDistance,
 		})
 		if openErr != nil {
@@ -340,7 +351,11 @@ func (d *broomDataset) close() error {
 	}
 	d.mu.Unlock()
 	<-d.drained
-	return d.router.Close()
+	err := d.router.Close()
+	if d.temporaryDir != "" {
+		err = errors.Join(err, os.RemoveAll(d.temporaryDir))
+	}
+	return err
 }
 
 func (s *broomRoutingService) warmRouter(ctx context.Context, router *broom.Router) error {
@@ -557,8 +572,9 @@ func (c requiredCoordinate) coordinate() (coordinate, error) {
 }
 
 type broomRouteRequest struct {
-	Waypoints []requiredCoordinate `json:"waypoints"`
-	Profile   string               `json:"profile"`
+	SessionProfile string               `json:"sessionProfile,omitempty"`
+	Waypoints      []requiredCoordinate `json:"waypoints"`
+	Profile        string               `json:"profile"`
 }
 
 type broomElevationSample struct {
@@ -594,8 +610,8 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 		return broomRouteResponse{}, errors.New("waypoints must contain 2..100 coordinates")
 	}
 	spec, ok := s.profiles[request.Profile]
-	if !ok {
-		return broomRouteResponse{}, errors.New("profile must be road, mixed, or trail")
+	if !ok && request.Profile != "custom" {
+		return broomRouteResponse{}, errors.New("profile must be road, mixed, trail, enduro, or custom")
 	}
 	waypoints := make([]broom.Waypoint, len(request.Waypoints))
 	for i, raw := range request.Waypoints {
@@ -617,6 +633,14 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 	defer stopRootCancel()
 	s.mu.RLock()
 	dataset := s.current
+	if request.Profile == "custom" {
+		session := s.sessions[request.SessionProfile]
+		if session == nil || time.Now().After(session.expires) || dataset == nil || session.graph != dataset.router.Path() {
+			s.mu.RUnlock()
+			return broomRouteResponse{}, errors.New("session profile expired or routing region changed; upload the BRF again")
+		}
+		dataset, spec = session.dataset, broomProfileSpec{profile: session.profile}
+	}
 	if dataset == nil || !dataset.acquire() {
 		s.mu.RUnlock()
 		return broomRouteResponse{}, errRoutingNotReady
@@ -624,7 +648,7 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 	s.mu.RUnlock()
 	defer dataset.release()
 	route, err := dataset.router.Route(queryCtx, broom.Request{
-		Profile: broomProfileName, Overrides: spec.overrides, Waypoints: waypoints,
+		Profile: spec.profile.Name, Overrides: spec.overrides, Waypoints: waypoints,
 		Geometry: broom.GeometryFull, Annotations: true, Elevations: true,
 	})
 	if err != nil {

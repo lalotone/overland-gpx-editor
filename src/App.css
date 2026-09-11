@@ -1524,6 +1524,8 @@ html.dark .elev-api-banner svg {
 
 .routing-profile-toggle {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   margin-top: 8px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);

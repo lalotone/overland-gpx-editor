@@ -702,7 +702,16 @@ function App() {
   const [elevationApiError, setElevationApiError] = useState(false)
   const [elevationInterpolated, setElevationInterpolated] = useState(false)
   const [routingProfile, setRoutingProfile] = useState<RoutingProfile>('mixed')
+  const [sessionProfile, setSessionProfile] = useState<{ id: string; name: string; generationId?: string } | null>(null)
+  const [profileUploading, setProfileUploading] = useState(false)
+  const profileInput = useRef<HTMLInputElement>(null)
   const [routingData, setRoutingData] = useState<RoutingDataStatus | null>(null)
+  useEffect(() => {
+    if (sessionProfile && routingData?.ready && sessionProfile.generationId !== routingData.generationId) {
+      setSessionProfile(null)
+      setRoutingProfile(current => current === 'custom' ? 'mixed' : current)
+    }
+  }, [routingData?.generationId, routingData?.ready, sessionProfile])
   /**
    * POIs found while planning. Kept apart from the view screen's `activePois`,
    * which are tied to a loaded track: these are tied to a map view instead,
@@ -764,6 +773,35 @@ function App() {
   const dismissNotification = useCallback((id: number) => {
     setNotifications(prev => prev.filter(n => n.id !== id))
   }, [])
+
+  useEffect(() => {
+    if (!sessionProfile || !runtime.offline?.routing) return
+    const endpoint = `${runtime.offline.routing}/profile/release`
+    const release = () => {
+      void fetch(endpoint, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' }, body: JSON.stringify({ id: sessionProfile.id }) }).catch(() => {})
+    }
+    window.addEventListener('pagehide', release)
+    return () => { window.removeEventListener('pagehide', release); release() }
+  }, [sessionProfile, runtime.offline?.routing])
+
+  const uploadProfile = async (file: File) => {
+    if (!runtime.offline?.routing || profileUploading) return
+    if (!file.name.toLowerCase().endsWith('.brf') || file.size > 128 * 1024) { notify('Choose a BRF file no larger than 128 KiB', 'error'); return }
+    setProfileUploading(true)
+    try {
+      const response = await fetch(`${runtime.offline.routing}/profile`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+        body: JSON.stringify({ source: await file.text() }),
+      })
+      const result = await response.json() as { id?: string; detail?: string; warnings?: string[] }
+      if (!response.ok || !result.id) throw new Error(result.detail || 'Could not prepare BRF profile')
+      setSessionProfile({ id: result.id, name: file.name.replace(/\.brf$/i, ''), generationId: routingData?.generationId })
+      setRoutingProfile('custom')
+      notify('BRF profile ready for this session (up to two hours)', 'success')
+      if (result.warnings?.length) notify(result.warnings.join('; '), 'info')
+    } catch (error) { notify((error as Error).message, 'error') }
+    finally { setProfileUploading(false) }
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1780,7 +1818,7 @@ function App() {
           creationWaypoints.map(w => ({ lat: w.lat, lon: w.lon })),
           routingProfile,
           controller.signal,
-          { runtime },
+          { runtime, sessionProfile: routingProfile === 'custom' ? sessionProfile?.id : undefined },
         )
         if (!isCurrent()) return
         setRoutedCoordinates(result.coordinates)
@@ -1801,7 +1839,7 @@ function App() {
     }, ROUTE_DEBOUNCE_MS)
 
     return () => { clearTimeout(timer); controller.abort() }
-  }, [clearRouteDerived, creationWaypoints, routingData?.generationId, routingData?.ready, routingData?.error, routingProfile, runtime, viewMode, notify])
+  }, [clearRouteDerived, creationWaypoints, routingData?.generationId, routingData?.ready, routingData?.error, routingProfile, runtime, viewMode, notify, sessionProfile?.id])
 
   const creationCoordinates = useMemo<Coordinate[]>(
     () =>
@@ -2721,7 +2759,19 @@ function App() {
                       {p.label}
                     </button>
                   ))}
+                  {sessionProfile && <>
+                    <button className={`profile-btn${routingProfile === 'custom' ? ' active' : ''}`} onClick={() => setRoutingProfile('custom')} title="Uploaded BRF — current session only">{sessionProfile.name}</button>
+                    <button className="profile-btn" aria-label="Remove session profile" onClick={() => { setSessionProfile(null); if (routingProfile === 'custom') setRoutingProfile('mixed') }}>×</button>
+                  </>}
                 </div>
+                <input ref={profileInput} type="file" accept=".brf" hidden aria-label="Session BRF profile" onChange={event => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) void uploadProfile(file)
+                }} />
+                <button className="btn btn-ghost btn-xs" disabled={!routingData?.ready || profileUploading} title="Upload a temporary BRF for this browser session and routing region" onClick={() => profileInput.current?.click()}>
+                  {profileUploading ? 'Preparing profile…' : 'Upload session BRF'}
+                </button>
               </div>
               <div className="creation-controls">
                 <button

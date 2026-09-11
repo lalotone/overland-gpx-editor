@@ -322,6 +322,41 @@ test('creation mode renders the selected OFM vector layer', async ({ page }) => 
   await expect(page.locator('.terrain-fab-label')).toHaveText('OFM')
 })
 
+test('Enduro and session BRF profiles are selectable without persisting the upload', async ({ page }) => {
+  await mockRuntime(page)
+  let released = false
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', routing: '/offline/routing' },
+    services: { broomRoute: '/routing/broom/route' },
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing$/, route => json(route, { enabled: true, ready: true, regionId: 'aragon', generationId: 'one', cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/suggest$/, route => json(route, { region: { regionId: 'aragon', name: 'Aragón', installed: true, active: true } }))
+  await page.route(/\/offline\/routing\/profile$/, async route => {
+    expect(route.request().postDataJSON()).toMatchObject({ source: 'session BRF test' })
+    await json(route, { id: 'session-test-token', warnings: [] }, 201)
+  })
+  await page.route(/\/offline\/routing\/profile\/release$/, async route => {
+    expect(route.request().postDataJSON()).toEqual({ id: 'session-test-token' })
+    released = true
+    await route.fulfill({ status: 204 })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+  await page.getByRole('button', { name: 'Enduro', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Enduro', exact: true })).toHaveClass(/active/)
+  await expect(page.getByRole('button', { name: 'Upload session BRF' })).toBeEnabled()
+  await page.getByLabel('Session BRF profile').setInputFiles({ name: 'Weekend.brf', mimeType: 'text/plain', buffer: Buffer.from('session BRF test') })
+  await expect(page.getByRole('button', { name: 'Weekend', exact: true })).toHaveClass(/active/)
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('session-test-token')
+  await page.getByRole('button', { name: 'Remove session profile' }).click()
+  await expect.poll(() => released).toBe(true)
+  await expect(page.getByRole('button', { name: 'Weekend', exact: true })).toHaveCount(0)
+  await page.reload()
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+  await expect(page.getByRole('button', { name: 'Weekend', exact: true })).toHaveCount(0)
+})
+
 test('planner suggests viewport routing downloads and reveals progress', async ({ page }, testInfo) => {
   await mockRuntime(page)
   let ready = false

@@ -65,6 +65,10 @@ Applies to any loaded track, with undo:
   - **Road** — sealed roads
   - **Dirt** — prefers unsealed roads and forest tracks over tarmac
   - **Trail** — maximum offroad, narrow tracks and paths where legal
+  - **Enduro** — road-registered motorcycle, unsealed tracks preferred, paths
+    require explicit motor permission; purpose-limited access isn't a shortcut
+  - **Session BRF** — upload and prepare a temporary custom profile for the
+    current graph, without saving it to the library or restoring it on reload
   There is no remote or non-motorcycle fallback.
 - Requests are debounced and cancelled, with bounded local concurrency and a
   deadline. Interactive queries only use an already prepared graph.

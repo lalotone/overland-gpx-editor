@@ -87,7 +87,7 @@ Broom routing data lives under `$XDG_CACHE_HOME/overland/routing`, outside the
 generic response-cache quota. `POST /offline/routing/prepare` explicitly
 downloads and builds one region; status and progress are available from
 `GET /offline/routing`, and cancellation is cooperative. A completed generation
-is opened and warmed for all three motorcycle profiles before it becomes active,
+is opened and warmed for Road, Dirt, Trail and Enduro before it becomes active,
 so interactive route requests never trigger graph building or profile
 customization.
 
@@ -124,6 +124,16 @@ source tiles remain until explicitly pruned; an upgrade doesn't erase the cache.
 Entering `cache-only` cancels active acquisition and prevents new downloads, but
 installed graphs remain routable. A custom `--routing-graph` is opened directly
 and is not owned or pruned by the managed routing cache.
+
+## Session BRF profiles
+
+Once a routing graph is ready, **Upload session BRF** compiles and warms a custom
+profile for that graph. The BRF is kept in memory, never in the track library or
+browser storage. Its derived metrics use a temporary directory. Removing the
+profile or closing the browser session releases it; abandoned sessions expire
+after two hours and all sessions are released on server shutdown. A region switch
+requires uploading again. Uploads are limited to 128 KiB and eight live profiles
+per server. This does not change the built-in profiles or saved GPX contents.
 
 ## Trip Packs
 

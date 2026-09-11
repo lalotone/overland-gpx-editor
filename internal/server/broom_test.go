@@ -252,6 +252,73 @@ func TestBroomEndpointRoutesOnBuiltGraph(t *testing.T) {
 			t.Fatalf("graph without DEM invented elevation: %+v", response.Elevations)
 		}
 	}
+	enduroResult := do(t, s, http.MethodPost, "/routing/broom/route", strings.NewReader(strings.Replace(body, `"mixed"`, `"enduro"`, 1)))
+	if enduroResult.Code != http.StatusOK {
+		t.Fatalf("enduro route = %d %s", enduroResult.Code, enduroResult.Body)
+	}
+	invalidProfile := do(t, s, http.MethodPost, "/offline/routing/profile", strings.NewReader(`{"source":"---context:way\nassign costfactor = if"}`))
+	if invalidProfile.Code != http.StatusBadRequest {
+		t.Fatalf("invalid profile accepted: %d %s", invalidProfile.Code, invalidProfile.Body)
+	}
+	profileBody, _ := json.Marshal(map[string]string{"source": broomProfileSource})
+	upload := do(t, s, http.MethodPost, "/offline/routing/profile", strings.NewReader(string(profileBody)))
+	if upload.Code != http.StatusCreated {
+		t.Fatalf("profile upload = %d %s", upload.Code, upload.Body)
+	}
+	var uploaded struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(upload.Body.Bytes(), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	if uploaded.ID == "" {
+		t.Fatal("profile has no session id")
+	}
+	sessionBody := strings.Replace(body, `"profile":"mixed"`, `"profile":"custom","sessionProfile":"`+uploaded.ID+`"`, 1)
+	custom := do(t, s, http.MethodPost, "/routing/broom/route", strings.NewReader(sessionBody))
+	if custom.Code != http.StatusOK {
+		t.Fatalf("custom route = %d %s", custom.Code, custom.Body)
+	}
+	dir := s.broom.sessions[uploaded.ID].dataset.temporaryDir
+	release := do(t, s, http.MethodPost, "/offline/routing/profile/release", strings.NewReader(`{"id":"`+uploaded.ID+`"}`))
+	if release.Code != http.StatusNoContent {
+		t.Fatalf("release = %d", release.Code)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temporary metrics remain: %v", err)
+	}
+	custom = do(t, s, http.MethodPost, "/routing/broom/route", strings.NewReader(sessionBody))
+	if custom.Code != http.StatusBadRequest {
+		t.Fatalf("released profile accepted: %d", custom.Code)
+	}
+}
+
+func TestEnduroAccessAndPreference(t *testing.T) {
+	p, ok := broom.BuiltinProfile("enduro")
+	if !ok {
+		t.Fatal("Broom Enduro profile is unavailable")
+	}
+	for _, tt := range []struct {
+		name    string
+		tags    map[string]string
+		allowed bool
+	}{
+		{"track", map[string]string{"highway": "track", "surface": "gravel"}, true},
+		{"unpermitted path", map[string]string{"highway": "path"}, false},
+		{"permitted path", map[string]string{"highway": "path", "motorcycle": "yes"}, true},
+		{"destination shortcut", map[string]string{"highway": "track", "access": "destination"}, false},
+		{"impassable", map[string]string{"highway": "track", "smoothness": "impassable"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := p.EvalWay(tt.tags, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (result.CostFactor < 10000) != tt.allowed {
+				t.Fatalf("cost %v, allowed %v", result.CostFactor, tt.allowed)
+			}
+		})
+	}
 }
 
 func TestBroomManagementRequiresPrivilege(t *testing.T) {
@@ -263,7 +330,7 @@ func TestBroomManagementRequiresPrivilege(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleanupTestServer(t, s)
-	for _, path := range []string{"/offline/routing/prepare", "/offline/routing/cancel", "/offline/routing/pin", "/offline/routing/prune"} {
+	for _, path := range []string{"/offline/routing/prepare", "/offline/routing/cancel", "/offline/routing/pin", "/offline/routing/prune", "/offline/routing/profile", "/offline/routing/profile/release"} {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		request.RemoteAddr = "192.0.2.10:1"
 		response := httptest.NewRecorder()

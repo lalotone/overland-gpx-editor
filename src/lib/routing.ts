@@ -6,7 +6,7 @@ import type { RuntimeRequestContext } from './offline'
 import { classifySurface } from './surface'
 import type { SurfaceClass, SurfaceResult } from './surface'
 
-export type RoutingProfile = 'road' | 'mixed' | 'trail'
+export type RoutingProfile = 'road' | 'mixed' | 'trail' | 'enduro' | 'custom'
 
 export interface ProfileDefinition {
   id: RoutingProfile
@@ -18,6 +18,7 @@ export const ROUTING_PROFILES: ProfileDefinition[] = [
   { id: 'road', label: 'Road', hint: 'Sealed roads — fastest sensible tarmac route' },
   { id: 'mixed', label: 'Dirt', hint: 'Prefers unsealed roads and forest tracks over tarmac' },
   { id: 'trail', label: 'Trail', hint: 'Maximum offroad — narrow tracks and paths where legal' },
+  { id: 'enduro', label: 'Enduro', hint: 'Road-registered enduro motorcycle — prefers unsealed tracks; paths require explicit motor permission' },
 ]
 
 export interface RouteResult {
@@ -117,7 +118,7 @@ export async function calculateRoute(
   waypoints: Coordinate[],
   profile: RoutingProfile,
   signal?: AbortSignal,
-  context: RuntimeRequestContext = {},
+  context: RuntimeRequestContext & { sessionProfile?: string } = {},
 ): Promise<RouteResult> {
   if (waypoints.length < 2) throw new RoutingError('Need at least two waypoints')
   if (!context.runtime?.services.broomRoute) {
@@ -130,7 +131,7 @@ export async function calculateRoute(
     backendInit: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile, waypoints: waypoints.map(({ lat, lon }) => ({ lat, lon })) }),
+      body: JSON.stringify({ profile, sessionProfile: context.sessionProfile, waypoints: waypoints.map(({ lat, lon }) => ({ lat, lon })) }),
     },
     signal,
   })

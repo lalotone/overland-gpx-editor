@@ -410,6 +410,9 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 	s.handler = s.routes()
+	if s.broom != nil {
+		s.wg.Go(s.broom.reapSessions)
+	}
 	if s.openFreeMap != nil {
 		s.wg.Add(1)
 		go func() {
@@ -434,7 +437,7 @@ func (s *Server) Close() error {
 	s.wg.Wait()
 	var routingErr error
 	if s.broom != nil {
-		routingErr = s.broom.close()
+		routingErr = errors.Join(s.broom.close(), s.broom.closeSessions())
 	}
 	s.cache.flushAccesses()
 	var tileCacheErr error
@@ -591,6 +594,8 @@ func (s *Server) routes() http.Handler {
 		r.Get("/offline/routing", s.requireOfflineRead(s.handleBroomStatus))
 		r.Post("/offline/routing/suggest", s.requireOfflineRead(s.handleBroomSuggest))
 		r.Post("/offline/routing/plan", s.requireOfflineControl(s.handleBroomPlan))
+		r.Post("/offline/routing/profile", s.requireOfflineControl(s.handleSessionProfile))
+		r.Post("/offline/routing/profile/release", s.requireOfflineControl(s.handleReleaseSessionProfile))
 		r.Post("/offline/routing/prepare", s.requireOfflineControl(s.handleBroomPrepare))
 		r.Post("/offline/routing/cancel", s.requireOfflineControl(s.handleBroomCancel))
 		r.Post("/offline/routing/pin", s.requireOfflineControl(s.handleBroomPin))

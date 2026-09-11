@@ -51,6 +51,10 @@ export function useMcpBridge(
           signal: controller.signal,
         })
         if (!response.ok) return
+        // Static hosts and older servers can answer unknown API paths with
+        // the SPA shell and HTTP 200. Require the broker's session payload.
+        const session = await response.json()
+        if (session?.enabled !== true) return
       } catch {
         return
       }
@@ -73,7 +77,8 @@ export function useMcpBridge(
 
       // The broker only streams to a view it already knows about.
       try {
-        await publishView()
+        const response = await publishView()
+        if (!response.ok) return
       } catch {
         return
       }

@@ -677,6 +677,12 @@ func (s *Server) assetHandler() http.Handler {
 	files := http.FileServerFS(s.assets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/")
+		// Optional API routes must never masquerade as a successful session
+		// by falling through to the SPA shell.
+		if name == "mcp" || strings.HasPrefix(name, "mcp/") {
+			http.NotFound(w, r)
+			return
+		}
 		if name == "" {
 			name = "index.html"
 		}

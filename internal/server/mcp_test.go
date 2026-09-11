@@ -4,9 +4,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 
 	overlandmcp "github.com/lalotone/overland-gpx-editor/internal/mcp"
 )
+
+func TestDisabledMCPWithFrontend(t *testing.T) {
+	srv, err := New(Config{
+		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+		Assets: fstest.MapFS{"index.html": {Data: []byte("<!doctype html><head></head><body>app</body>")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	for _, path := range []string{"/mcp", "/mcp/", "/mcp/browser/session", "/mcp/browser/events", "/mcp/browser/view"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	for _, path := range []string{"/", "/planner", "/mcp-guide"} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("SPA path %s status = %d, want 200", path, rec.Code)
+		}
+	}
+}
 
 // The agent endpoint lives on its own loopback listener, so the main router —
 // the one a reverse proxy fronts — must expose the browser bridge and nothing

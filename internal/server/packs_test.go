@@ -136,53 +136,6 @@ func TestPackInputRejectsHostileAndOversizedValues(t *testing.T) {
 	}
 }
 
-func TestPackPinsExistingDynamicScopeWithoutFetching(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleanupTestServer(t, s)
-	now := time.Now().UTC()
-	key := canonicalCacheKey("valhalla-route", "source", http.MethodPost, "request", "", nil)
-	meta := cacheMetadata{Key: key, Scope: "routing", Provider: "valhalla-route", SourceFingerprint: "source", Status: http.StatusOK, ContentType: "application/json", FetchedAt: now, FreshUntil: now.Add(time.Hour), StaleUntil: now.Add(time.Hour), LastAccess: now}
-	if err := s.cache.put(meta, []byte(`{"trip":{}}`)); err != nil {
-		t.Fatal(err)
-	}
-	input := packInput{Name: "existing", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, ZoomMin: 1, ZoomMax: 1, Scopes: []string{"routing"}}
-	estimate, err := s.packs.estimate(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if estimate.Counts["routing"] != 1 || estimate.Reused != 1 || len(estimate.Dynamic) != 1 {
-		t.Fatalf("estimate = %+v", estimate)
-	}
-	manifest, _, err := s.packs.start(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		summary, _ := s.packs.publicManifest(manifest.ID)
-		if summary.State == "complete" {
-			progress := summary.Resources[packResourceRoute]
-			if progress.Done != 1 || progress.Total != 1 || progress.Failed != 0 {
-				t.Fatalf("route progress = %+v", progress)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("pack did not complete: %+v", summary)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	s.cache.mu.Lock()
-	pins := append([]string(nil), s.cache.entries[key].Pins...)
-	s.cache.mu.Unlock()
-	if len(pins) != 1 || pins[0] != manifest.ID {
-		t.Fatalf("pins = %v", pins)
-	}
-}
-
 func TestPackPrefetchesBoundedTripPOIs(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -244,6 +244,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 			Status      string      `json:"status"`
 			Packs       string      `json:"packs"`
 			ModeControl string      `json:"modeControl,omitempty"`
+			Routing     string      `json:"routing,omitempty"`
 		} `json:"offline"`
 		Services map[string]string `json:"services"`
 		Maps     struct {
@@ -260,10 +261,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	if s.modes.canToggle() {
 		response.Offline.ModeControl = "/offline/mode"
 	}
-	response.Services = map[string]string{
-		"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search",
-		"valhallaRoute": "/routing/valhalla/route", "osrmRoute": "/routing/osrm/route",
-		"surface": "/routing/valhalla/surface",
+	response.Services = map[string]string{"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search"}
+	if s.broom != nil {
+		response.Services["broomRoute"] = "/routing/broom/route"
+		response.Offline.Routing = "/offline/routing"
 	}
 	response.Maps.Raster = map[string]string{
 		"osm":      "/map/raster/osm/{z}/{x}/{y}.png",

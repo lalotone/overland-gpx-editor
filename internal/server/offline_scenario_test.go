@@ -226,10 +226,6 @@ func TestNarrowEndpointValidationStopsHostileInput(t *testing.T) {
 	tests := []struct{ path, body string }{
 		{"/pois/search", `{"kind":"raw","bbox":{"south":1,"west":1,"north":2,"east":2},"url":"http://169.254.169.254"}`},
 		{"/pois/search", `{"kind":"fuel","bbox":{"south":0,"west":0,"north":20,"east":20}}`},
-		{"/routing/valhalla/route", `{"waypoints":[{"lat":0,"lon":0},{"lat":1,"lon":1}],"costing":"pedestrian"}`},
-		{"/routing/valhalla/route", `{"waypoints":[{"lat":91,"lon":0},{"lat":1,"lon":1}],"costing":"auto"}`},
-		{"/routing/osrm/route", `{"points":[{"lat":0,"lon":0}],"url":"http://localhost"}`},
-		{"/routing/valhalla/surface", `{"points":[{"lat":0,"lon":0},{"lat":80,"lon":80}],"costing":"motorcycle"}`},
 	}
 	for _, tt := range tests {
 		rec := do(t, s, http.MethodPost, tt.path, strings.NewReader(tt.body))

@@ -1,0 +1,132 @@
+# GPX Editor motorcycle profile. Route preference is controlled by the three
+# application-owned globals while access and ETA continue to model a motorbike.
+---context:global
+assign validForFoot = 0
+assign validForBikes = 0
+assign validForCars = 1
+assign overland_surface_bias = 0.5 # %overland_surface_bias% | Penalise unsealed surfaces | number
+assign overland_road_bias = 0.6 # %overland_road_bias% | Penalise larger road classes | number
+assign offroad_hard_factor = 1 # %offroad_hard_factor% | Penalise difficult trails | number
+assign considerTurnRestrictions = 1
+assign continueStraight = 0
+assign waypointCatchingRange = 300
+assign downhillcost = 20
+assign downhillcutoff = 2
+assign downhillmaxslope = 30
+assign downhillmaxslopecost = 80
+assign uphillcost = 55
+assign uphillcutoff = 1.5
+assign uphillmaxslope = 25
+assign uphillmaxslopecost = 150
+assign elevationpenaltybuffer = 5
+assign elevationmaxbuffer = 10
+assign elevationbufferreduce = 0.2
+
+---context:way
+assign defaultaccess = if access= then true else not access=no|private
+assign vehicleaccess = if vehicle= then defaultaccess else not vehicle=no|private
+assign motoraccess = if motor_vehicle= then vehicleaccess else not motor_vehicle=no|private
+assign motorcycleaccess = if motorcycle= then motoraccess else not motorcycle=no|private
+assign hasway = or not highway= route=ferry
+assign badoneway = if reversedirection=yes then oneway=yes else oneway=-1
+
+assign surfacepenalty = multiply overland_surface_bias
+  switch surface=asphalt|paved|concrete 0
+  switch surface=paving_stones|cobblestone|sett 0.5
+  switch surface=compacted|fine_gravel 1
+  switch surface=gravel 1.2
+  switch surface=ground|dirt|earth|unpaved|grass|grass_paver 2
+  switch surface=sand 4
+  switch surface=mud|clay 6
+  1
+
+assign trackpenalty =
+  switch tracktype=grade1 0
+  switch tracktype=grade2 0.2
+  switch tracktype=grade3 0.8
+  switch tracktype=grade4 2
+  switch tracktype=grade5 5
+  0.3
+
+assign scalepenalty =
+  switch mtb:scale=0|0+ 0
+  switch mtb:scale=1 0.2
+  switch mtb:scale=2 0.8
+  switch mtb:scale=3 2
+  switch mtb:scale=4 6
+  switch mtb:scale=5|6 20
+  0
+
+assign roadpenalty = multiply overland_road_bias
+  switch highway=track|path|road 0
+  switch highway=service|unclassified 0.5
+  switch highway=residential|living_street 1
+  switch highway=tertiary 2
+  switch highway=secondary 4
+  switch highway=primary|trunk|motorway 8
+  switch route=ferry 5
+  3
+
+assign costfactor = if or not hasway not motorcycleaccess then 10000 else if badoneway then 10000 else add 1 add roadpenalty add surfacepenalty add trackpenalty multiply scalepenalty offroad_hard_factor
+assign uphillcostfactor = costfactor
+assign downhillcostfactor = costfactor
+assign turncost = 50
+assign initialcost = 0
+assign nodeaccessgranted = false
+assign priorityclassifier = switch highway=track|path 3 switch highway=service|unclassified 2 1
+
+assign roadspeed =
+  switch highway=motorway|motorway_link 80
+  switch highway=trunk|trunk_link 70
+  switch highway=primary|primary_link 60
+  switch highway=secondary|secondary_link 50
+  switch highway=tertiary|tertiary_link 45
+  switch highway=unclassified 35
+  switch highway=residential 30
+  switch highway=living_street 10
+  switch highway=service 20
+  switch highway=track 25
+  switch highway=path 12
+  switch route=ferry 15
+  20
+assign surfacespeed =
+  switch surface=asphalt|paved|concrete 80
+  switch surface=compacted|fine_gravel 35
+  switch surface=gravel 25
+  switch surface=paving_stones|cobblestone|sett|ground|dirt|earth|unpaved 20
+  switch surface=grass|grass_paver 12
+  switch surface=sand 10
+  switch surface=mud|clay 6
+  switch surface= 80
+  20
+assign trackspeed =
+  switch tracktype=grade1 40
+  switch tracktype=grade2 30
+  switch tracktype=grade3 20
+  switch tracktype=grade4 12
+  switch tracktype=grade5 8
+  80
+assign legalspeed =
+  switch maxspeed=10 5
+  switch maxspeed=20 16
+  switch maxspeed=30 30
+  switch maxspeed=40 40
+  switch maxspeed=50 48
+  switch maxspeed=60 56
+  switch maxspeed=70 70
+  switch maxspeed=80 80
+  switch maxspeed=90 88
+  switch maxspeed=100 96
+  switch maxspeed=110 110
+  switch maxspeed=120 120
+  switch maxspeed=130 130
+  130
+assign maxspeed = min legalspeed min roadspeed min surfacespeed trackspeed
+
+---context:node
+assign defaultaccess = if access= then true else not access=no|private
+assign vehicleaccess = if vehicle= then defaultaccess else not vehicle=no|private
+assign motoraccess = if motor_vehicle= then vehicleaccess else not motor_vehicle=no|private
+assign motorcycleaccess = if motorcycle= then motoraccess else not motorcycle=no|private
+assign barrierok = or barrier= barrier=no
+assign initialcost = if or nodeaccessgranted=yes and motorcycleaccess barrierok then 0 else 1000000

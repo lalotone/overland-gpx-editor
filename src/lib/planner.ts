@@ -1,4 +1,3 @@
-import type { CacheMetadata } from './offline'
 import type { SurfaceClass } from './surface'
 import type { Coordinate } from './types'
 
@@ -6,12 +5,7 @@ export interface ClearedRouteDerivedState {
   coordinates: Coordinate[]
   durationSeconds: null
   engine: null
-  routeCache: CacheMetadata | undefined
   surfaceSegments: SurfaceClass[] | null
-  surfaceApproximate: false
-  surfaceCache: CacheMetadata | undefined
-  surfaceError: null
-  surfaceLoading: false
   elevationInterpolated: false
   elevationApiError: false
   routeStatus: ''
@@ -24,12 +18,7 @@ export function clearedRouteDerivedState(): ClearedRouteDerivedState {
     coordinates: [],
     durationSeconds: null,
     engine: null,
-    routeCache: undefined,
     surfaceSegments: null,
-    surfaceApproximate: false,
-    surfaceCache: undefined,
-    surfaceError: null,
-    surfaceLoading: false,
     elevationInterpolated: false,
     elevationApiError: false,
     routeStatus: '',

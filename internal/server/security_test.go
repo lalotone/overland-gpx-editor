@@ -210,9 +210,6 @@ func TestTrafficGeneratingRoutesRejectRemoteRelayRequests(t *testing.T) {
 		{http.MethodGet, "/fuel", ""},
 		{http.MethodGet, "/places/search?q=test", ""},
 		{http.MethodPost, "/pois/search", `{}`},
-		{http.MethodPost, "/routing/valhalla/route", `{}`},
-		{http.MethodPost, "/routing/osrm/route", `{}`},
-		{http.MethodPost, "/routing/valhalla/surface", `{}`},
 		{http.MethodGet, "/map/raster/osm/1/0/0.png", ""},
 	}
 	for _, tt := range tests {
@@ -355,7 +352,12 @@ func TestConfigurationValidation(t *testing.T) {
 		func() Config { c := base; c.OfflineMode = "sometimes"; return c }(),
 		func() Config { c := base; c.OfflineCacheMaxBytes = -1; return c }(),
 		func() Config { c := base; c.OfflineCacheMaxEntries = -1; return c }(),
-		func() Config { c := base; c.ValhallaURL = "file:///etc/passwd"; return c }(),
+		func() Config {
+			c := base
+			c.RoutingCacheDir = t.TempDir()
+			c.RoutingIndexURL = "file:///etc/passwd"
+			return c
+		}(),
 		func() Config { c := base; c.OverpassURL = "http://user:pass@example.test"; return c }(),
 		func() Config { c := base; c.OpenFreeMapURL = "https://example.test/style?token=secret"; return c }(),
 		func() Config { c := base; c.TrustedUIOrigin = "https://example.test/path"; return c }(),

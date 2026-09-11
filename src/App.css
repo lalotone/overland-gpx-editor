@@ -1524,6 +1524,8 @@ html.dark .elev-api-banner svg {
 
 .routing-profile-toggle {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   margin-top: 8px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -2373,6 +2375,12 @@ html.dark .loading-overlay {
 
   .map-container {
     min-height: 50vh;
+    height: 50vh;
+    flex: none;
+  }
+
+  .creation-screen--full .map-container {
+    height: 100dvh;
   }
 }
 
@@ -2951,11 +2959,10 @@ html.dark .loading-overlay {
   display: none;
 }
 
-/* Tucked under Leaflet's zoom control, the only free edge left: the terrain
-   pill has top-right, the POI strip bottom-right, the readout bottom-left. */
+/* Top-left anchors full-map mode; zoom lives above the bottom-right POI strip. */
 .map-full-toggle {
   position: absolute;
-  top: 78px;
+  top: 10px;
   left: 10px;
   z-index: 1000;
   display: inline-flex;
@@ -2989,8 +2996,7 @@ html.dark .loading-overlay {
 
 /* -- POI search over the current map view (creation screen) --------- */
 
-/* Bottom-right: the terrain pill owns top-right, the cursor readout
-   bottom-left, and Leaflet's zoom control top-left. */
+/* Bottom-right, below zoom; MapControlLayout tracks this strip's wrapped height. */
 .creation-poi-strip {
   position: absolute;
   bottom: 24px;
@@ -3165,16 +3171,6 @@ html.dark .loading-overlay {
   color: var(--text-primary);
 }
 
-.surface-spinner {
-  width: 11px;
-  height: 11px;
-  margin-left: auto;
-  border: 2px solid var(--border-subtle);
-  border-top-color: var(--gradient-start);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
 /* -- Elevation profile extras --------------------------------------- */
 
 .elevation-note {
@@ -3333,7 +3329,7 @@ html.dark .loading-overlay {
 
 .leaflet-bottom.leaflet-right .leaflet-control-zoom {
   margin-right: 12px;
-  margin-bottom: 10px;
+  margin-bottom: var(--zoom-control-gap, 10px);
 }
 
 .leaflet-control-attribution {

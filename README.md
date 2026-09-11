@@ -7,7 +7,7 @@
 Terrain-first mapping, elevation numbers that do not lie, and a real editor —
 shipped as one self-contained binary.
 
-[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![Go dependencies](https://img.shields.io/badge/Go%20dependencies-4-brightgreen)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -33,12 +33,12 @@ the part I want.
   inflating totals by 10–50%, and slope measured over real distance
 - ✂️ **A real editor** — crop, split, day-stage, simplify and repair elevation
   on any track you load
-- 🏍️ **Motorbike routing** — Valhalla `motorcycle` costing with road / dirt /
-  trail profiles, not a repurposed bicycle model
+- 🏍️ **Motorbike routing** — embedded Broom routing with road / dirt / trail / enduro
+  profiles, OSM surface annotations and no remote route service
 - 🧭 **Prepared for dead zones** — viewed resources and trip packs survive a
   restart, with a strict cache-only mode that makes no upstream requests
 - 📦 **One binary** — the React app is embedded in the Go server with
-  `go:embed`. Copy ~7 MB to a machine and run it: no runtime, no dependencies,
+  `go:embed`. Copy ~20 MB to a machine and run it: no runtime, no dependencies,
   no container needed
 
 ---
@@ -80,7 +80,7 @@ Each release ships `SHA256SUMS`; check a download with
 
 ### Or build it
 
-**To build:** Go 1.25+ and Node 18+. **To run:** nothing at all.
+**To build:** Go 1.27+ and Node 18+. **To run:** nothing at all.
 
 ```bash
 git clone https://github.com/lalotone/overland-gpx-editor.git
@@ -213,9 +213,37 @@ to deterministic no-network operation immediately; **Go online** re-enables
 provider traffic. Starting with `--offline-mode cache-only` is an operator lock
 and cannot be overridden by the browser. Cached data is served with its source
 and cache date; unknown resources fail immediately without bypassing the server
-or stopping GPX editing. It does not calculate a new route without a local
-Valhalla/OSRM service, and it does not make the web UI available when the browser
+or stopping GPX editing. It does not make the web UI available when the browser
 cannot reach the Go server itself.
+
+Routing is separate from response-cache trip packs. Broom stores OSM extracts,
+elevation sources, prepared graphs and profile metrics in
+`$XDG_CACHE_HOME/overland/routing` (normally `~/.cache/overland/routing`).
+Planner and Explore use Broom's region suggestions to find local routing data
+for the visible map, explicitly labelling partial coverage. Open the
+**Offline routing** map pill to see available acquisition estimates and download the
+suggested region or use an installed copy. The same pill reveals preparation
+progress and cancellation; it keeps showing tile totals and progress when collapsed. Preparation
+runs in the background, and completed route queries are entirely local. Updates,
+pinning and pruning remain available through the management API. A strict
+cache-only server can open installed regions but never downloads missing data.
+
+For unattended startup, use:
+
+```bash
+./overland serve --routing-region spain/aragon --routing-prepare
+```
+
+`--routing-graph` opens a trusted application-built Broom graph instead of one
+managed by region; use this for cross-border union graphs. Routing has no public
+provider fallback. Without prepared data it reports that routing data is needed
+while GPX loading and editing continue to work.
+
+**Enduro** uses Broom's built-in road-registered motorcycle BRF, favouring unsealed
+tracks and requiring explicit motor permission on paths. **Upload session BRF**
+lets you prepare a custom profile for the currently open graph. It is temporary:
+no library file or browser storage is written, and it is released when removed,
+on page exit, or after two hours. Switching routing regions requires a new upload.
 
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be
@@ -256,7 +284,13 @@ bundle at build time.
 | `UPSTREAM_CONTACT` | backend | project URL | Contact included in the outbound User-Agent |
 | `TRUSTED_UI_ORIGIN` | backend | *(loopback UI only)* | Exact non-loopback UI origin allowed to manage offline data |
 | `OFFLINE_ADMIN_TOKEN` | backend | *(empty)* | Bearer token for non-loopback management clients |
-| `VALHALLA_URL` / `OSRM_URL` | backend | public FOSSGIS services | Startup-only routing service overrides |
+| `ROUTING_CACHE_DIR` | backend | `$XDG_CACHE_HOME/overland/routing` | Broom sources, graphs and metrics; empty disables routing |
+| `ROUTING_REGION` | backend | *(empty)* | Canonical Broom region to reopen or prepare |
+| `ROUTING_GRAPH` | backend | *(empty)* | Trusted application-owned Broom graph, including cross-border unions |
+| `ROUTING_PREPARE` / `ROUTING_UPDATE` | backend | `off` | Prepare or explicitly refresh `ROUTING_REGION` at startup |
+| `ROUTING_JOBS` / `ROUTING_CONCURRENCY` / `ROUTING_TIMEOUT` | backend | `2` / `4` / `45s` | Preparation parallelism and route-query bounds |
+| `ROUTING_INDEX_URL` / `ROUTING_METADATA_INDEX_URL` | backend | Broom defaults | Optional region catalogue mirrors |
+| `ROUTING_PBF_BASE_URL` / `ROUTING_DEM_BASE_URL` | backend | Broom defaults | Optional OSM extract and DEM mirrors |
 | `OVERPASS_URL` / `FUEL_URL` | backend | public services | Startup-only data-service overrides |
 | `OPENFREEMAP_URL` | backend | OpenFreeMap Liberty style | OpenFreeMap-compatible source eligible for persistent proxying |
 | `OPENFREEMAP_ALLOW_BULK` | backend | `on` | Permit bounded trip-pack fetching from the configured source |
@@ -349,16 +383,16 @@ is rendered on the map by Leaflet.
 | [OpenTopoMap](https://opentopomap.org) | Contour base map (CC-BY-SA, low volume only) |
 | [CyclOSM](https://www.cyclosm.org) | Surface/grade base map |
 | Esri ArcGIS | Satellite, relief, hillshade (attribution required; World Shaded Relief retires March 2028) |
-| [Valhalla](https://valhalla1.openstreetmap.de) | Routing, with [OSRM](https://router.project-osrm.org) as fallback; serialized to the [FOSSGIS limit](https://www.fossgis.de/arbeitsgruppen/osm-server/nutzungsbedingungen/) of one request/second |
+| [Broom](https://code.rbel.co/rubiojr/broom) | Embedded local routing over explicitly prepared OpenStreetMap and DEM data |
 | [Nominatim](https://nominatim.org) | Place search, throttled to one request/second and cached; switchable with `NOMINATIM_URL` |
 | [Overpass](https://overpass-api.de) | User-triggered fuel / water / campsite POIs |
 | [Spanish fuel-price feed](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas) | Official national snapshot, persistently cached with its publication time |
 | [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) | Elevation by default — mixed-source data with [source-specific attribution](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) |
 | [Open-Meteo](https://open-meteo.com/en/docs/elevation-api) | Elevation with `-elevation-tiles=false`; free endpoint is non-commercial and quota-limited |
 
-These are shared community resources. Routing and Nominatim requests are
-serialized to their one-request-per-second limits, and repeated place searches
-are cached. Public raster basemap tiles are never prefetched; OSM, OpenTopoMap
+These are shared community resources. Nominatim requests are serialized to its
+one-request-per-second limit, and repeated place searches are cached. Public
+raster basemap tiles are never prefetched; OSM, OpenTopoMap
 and CyclOSM viewed tiles may use the bounded server cache for their
 provider-permitted lifetime. Bounded OpenFreeMap vector packs are the explicit
 supported exception.

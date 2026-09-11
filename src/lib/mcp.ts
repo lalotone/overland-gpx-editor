@@ -42,7 +42,7 @@ export function parseMcpCommand(value: unknown): McpCommand {
         arguments: {
           points: points(args.points, 100, true),
           mode: editMode(args.mode),
-          profile: optionalEnum(args.profile, ['road', 'mixed', 'trail'], 'profile'),
+          profile: optionalEnum(args.profile, ['road', 'mixed', 'trail', 'enduro'], 'profile'),
           fitView: optionalBoolean(args.fitView, true),
         },
       }

@@ -176,8 +176,8 @@ export async function fetchElevationProfile(
   apiBase: string,
   elevationApi: string,
   opts: ElevationOptions = {},
-): Promise<{ elevations: (number | null)[]; interpolated: boolean }> {
-  if (coords.length === 0) return { elevations: [], interpolated: false }
+): Promise<{ elevations: (number | null)[]; interpolated: boolean; interpolatedPoints: boolean[] }> {
+  if (coords.length === 0) return { elevations: [], interpolated: false, interpolatedPoints: [] }
 
   const dataset = opts.dataset ?? 'srtm30m'
   const stride = Math.max(1, Math.ceil(coords.length / MAX_ELEVATION_LOOKUPS))
@@ -205,10 +205,13 @@ export async function fetchElevationProfile(
     throw new ElevationUnavailableError()
   }
 
-  if (!interpolated) return { elevations: sampled, interpolated: false }
+  if (!interpolated) {
+    return { elevations: sampled, interpolated: false, interpolatedPoints: new Array(sampled.length).fill(false) }
+  }
 
   // Fill the gaps between measured samples.
   const elevations: (number | null)[] = new Array(coords.length).fill(null)
+  const interpolatedPoints = new Array(coords.length).fill(false)
   for (let s = 0; s < sampleIndices.length; s++) elevations[sampleIndices[s]] = sampled[s]
   for (let s = 0; s < sampleIndices.length - 1; s++) {
     const i0 = sampleIndices[s]
@@ -218,9 +221,10 @@ export async function fetchElevationProfile(
     if (e0 === null || e1 === null) continue
     for (let i = i0 + 1; i < i1; i++) {
       elevations[i] = e0 + ((i - i0) / (i1 - i0)) * (e1 - e0)
+      interpolatedPoints[i] = true
     }
   }
-  return { elevations, interpolated: true }
+  return { elevations, interpolated: interpolatedPoints.some(Boolean), interpolatedPoints }
 }
 
 /** Fetch elevations and attach them to a copy of the coordinates. */
@@ -230,11 +234,12 @@ export async function attachElevations(
   elevationApi: string,
   opts: ElevationOptions = {},
 ): Promise<{ coordinates: Coordinate[]; interpolated: boolean }> {
-  const { elevations, interpolated } = await fetchElevationProfile(coords, apiBase, elevationApi, opts)
+  const { elevations, interpolated, interpolatedPoints } = await fetchElevationProfile(coords, apiBase, elevationApi, opts)
   return {
     coordinates: coords.map((c, i) => ({
       ...c,
       elevation: elevations[i] ?? undefined,
+      elevationInterpolated: elevations[i] === null ? undefined : interpolatedPoints[i],
     })),
     interpolated,
   }

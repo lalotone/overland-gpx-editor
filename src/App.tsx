@@ -16,7 +16,6 @@ import { ESCAPE_PRIORITY, useEscapeDismiss } from './components/useEscapeDismiss
 import { useMcpBridge } from './useMcpBridge'
 
 import {
-  attachElevations,
   ElevationUnavailableError,
   fetchElevationProfile,
   fetchGroundElevation,
@@ -53,7 +52,7 @@ import type { BoundingBox, Poi, PoiKind } from './lib/poi'
 import { calculateRoute, formatDuration, ROUTING_PROFILES } from './lib/routing'
 import type { RoutingProfile } from './lib/routing'
 import { availableFuels, DEFAULT_FUEL_REFERENCE, fuelBandColors, FUEL_PRICE_BANDS } from './lib/fuel'
-import { fetchRouteSurface, summarizeSurface, surfaceDefinition } from './lib/surface'
+import { summarizeSurface, surfaceDefinition } from './lib/surface'
 import type { SurfaceClass } from './lib/surface'
 import { clearedRouteDerivedState, routeSequenceIsCurrent } from './lib/planner'
 import type { McpCommand, McpMapMarker } from './lib/mcp'
@@ -74,14 +73,17 @@ import {
 import type { WaypointMarkerId } from './lib/waypointMarkers'
 import {
   bootstrapRuntimeConfig,
+  fetchRoutingDataStatus,
   formatCacheContext,
   formatCacheDate,
   loadRuntimeConfig,
   setRuntimeOfflineMode,
 } from './lib/offline'
-import type { CacheMetadata, OfflineMode } from './lib/offline'
+import type { CacheMetadata, OfflineMode, RoutingDataStatus } from './lib/offline'
 
 import './App.css'
+import RoutingDownloadControl from './components/RoutingDownloadControl'
+import MapControlLayout from './components/MapControlLayout'
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -694,13 +696,22 @@ function App() {
   const [routedCoordinates, setRoutedCoordinates] = useState<Coordinate[]>([])
   const [routedDuration, setRoutedDuration] = useState<number | null>(null)
   const [routedEngine, setRoutedEngine] = useState<string | null>(null)
-  const [routeCache, setRouteCache] = useState<CacheMetadata | undefined>()
   const [routedLoading, setRoutedLoading] = useState(false)
   const [routeStatus, setRouteStatus] = useState('')
   const [routeError, setRouteError] = useState<string | null>(null)
   const [elevationApiError, setElevationApiError] = useState(false)
   const [elevationInterpolated, setElevationInterpolated] = useState(false)
   const [routingProfile, setRoutingProfile] = useState<RoutingProfile>('mixed')
+  const [sessionProfile, setSessionProfile] = useState<{ id: string; name: string; generationId?: string } | null>(null)
+  const [profileUploading, setProfileUploading] = useState(false)
+  const profileInput = useRef<HTMLInputElement>(null)
+  const [routingData, setRoutingData] = useState<RoutingDataStatus | null>(null)
+  useEffect(() => {
+    if (sessionProfile && routingData?.ready && sessionProfile.generationId !== routingData.generationId) {
+      setSessionProfile(null)
+      setRoutingProfile(current => current === 'custom' ? 'mixed' : current)
+    }
+  }, [routingData?.generationId, routingData?.ready, sessionProfile])
   /**
    * POIs found while planning. Kept apart from the view screen's `activePois`,
    * which are tied to a loaded track: these are tied to a map view instead,
@@ -714,10 +725,6 @@ function App() {
   /** Fuel the price colouring ranks on, shared by both screens. */
   const [fuelReference, setFuelReference] = useState(DEFAULT_FUEL_REFERENCE)
   const [surfaceSegments, setSurfaceSegments] = useState<SurfaceClass[] | null>(null)
-  const [surfaceApproximate, setSurfaceApproximate] = useState(false)
-  const [surfaceCache, setSurfaceCache] = useState<CacheMetadata | undefined>()
-  const [surfaceLoading, setSurfaceLoading] = useState(false)
-  const [surfaceError, setSurfaceError] = useState<string | null>(null)
   const [placeSearch, setPlaceSearch] = useState('')
   const [placeResults, setPlaceResults] = useState<PlaceResult[]>([])
   const [placeCache, setPlaceCache] = useState<CacheMetadata | undefined>()
@@ -742,12 +749,7 @@ function App() {
     setRoutedCoordinates(cleared.coordinates)
     setRoutedDuration(cleared.durationSeconds)
     setRoutedEngine(cleared.engine)
-    setRouteCache(cleared.routeCache)
     setSurfaceSegments(cleared.surfaceSegments)
-    setSurfaceApproximate(cleared.surfaceApproximate)
-    setSurfaceCache(cleared.surfaceCache)
-    setSurfaceError(cleared.surfaceError)
-    setSurfaceLoading(cleared.surfaceLoading)
     setElevationInterpolated(cleared.elevationInterpolated)
     setElevationApiError(cleared.elevationApiError)
     setRouteStatus(cleared.routeStatus)
@@ -773,6 +775,35 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!sessionProfile || !runtime.offline?.routing) return
+    const endpoint = `${runtime.offline.routing}/profile/release`
+    const release = () => {
+      void fetch(endpoint, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' }, body: JSON.stringify({ id: sessionProfile.id }) }).catch(() => {})
+    }
+    window.addEventListener('pagehide', release)
+    return () => { window.removeEventListener('pagehide', release); release() }
+  }, [sessionProfile, runtime.offline?.routing])
+
+  const uploadProfile = async (file: File) => {
+    if (!runtime.offline?.routing || profileUploading) return
+    if (!file.name.toLowerCase().endsWith('.brf') || file.size > 128 * 1024) { notify('Choose a BRF file no larger than 128 KiB', 'error'); return }
+    setProfileUploading(true)
+    try {
+      const response = await fetch(`${runtime.offline.routing}/profile`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+        body: JSON.stringify({ source: await file.text() }),
+      })
+      const result = await response.json() as { id?: string; detail?: string; warnings?: string[] }
+      if (!response.ok || !result.id) throw new Error(result.detail || 'Could not prepare BRF profile')
+      setSessionProfile({ id: result.id, name: file.name.replace(/\.brf$/i, ''), generationId: routingData?.generationId })
+      setRoutingProfile('custom')
+      notify('BRF profile ready for this session (up to two hours)', 'success')
+      if (result.warnings?.length) notify(result.warnings.join('; '), 'info')
+    } catch (error) { notify((error as Error).message, 'error') }
+    finally { setProfileUploading(false) }
+  }
+
+  useEffect(() => {
     const controller = new AbortController()
     void loadRuntimeConfig(API_BASE, controller.signal, fetch, initialRuntimeRef.current)
       .then(config => {
@@ -782,6 +813,25 @@ function App() {
       .catch(() => {})
     return () => controller.abort()
   }, [])
+
+  useEffect(() => {
+    if (!runtime.offline?.routing) {
+      setRoutingData(null)
+      return
+    }
+    const controller = new AbortController()
+    const load = async () => {
+      try {
+        const status = await fetchRoutingDataStatus(runtime, controller.signal)
+        if (!status || controller.signal.aborted) return
+        setRoutingData(status)
+      } catch (error) {
+        if ((error as Error).name !== 'AbortError') setRoutingData(null)
+      }
+    }
+    void load()
+    return () => controller.abort()
+  }, [runtime])
 
   const handleCacheMetadata = useCallback((metadata: CacheMetadata) => {
     if (!metadata.stale || staleNotifiedRef.current) return
@@ -1325,8 +1375,6 @@ function App() {
     setWaypointMode(false)
     setActivePois({ fuel: [], water: [], camp: [] })
     setSurfaceSegments(null)
-    setSurfaceError(null)
-    setSurfaceApproximate(false)
     setElevationInterpolated(false)
     setElevationApiError(false)
     setShowTools(false)
@@ -1439,7 +1487,7 @@ function App() {
     setLoading(true)
     setLoadingMessage('Reading elevation from the terrain model…')
     try {
-      const { elevations } = await fetchElevationProfile(
+      const { elevations, interpolatedPoints } = await fetchElevationProfile(
         currentTrack.coordinates,
         API_BASE,
         ELEVATION_API,
@@ -1451,7 +1499,7 @@ function App() {
             setLoadingMessage(`Reading elevation… ${done}/${total} points`),
         },
       )
-      applyEdit('Elevation refreshed from terrain model', track => withElevations(track, elevations))
+      applyEdit('Elevation refreshed from terrain model', track => withElevations(track, elevations, interpolatedPoints))
     } catch (err) {
       notify(
         err instanceof ElevationUnavailableError
@@ -1744,6 +1792,13 @@ function App() {
       return
     }
 
+    if (runtime.services.broomRoute && !routingData?.ready) {
+      routeSeqRef.current++
+      clearRouteDerived()
+      setRouteError(routingData?.error || 'Routing data is not ready yet. Open Offline routing on the map to follow preparation or download this area.')
+      return
+    }
+
     const controller = new AbortController()
     const seq = ++routeSeqRef.current
     clearRouteDerived()
@@ -1758,92 +1813,33 @@ function App() {
     const timer = setTimeout(async () => {
       setRoutedLoading(true)
       setRouteStatus('Calculating route…')
-      let routingComplete = false
       try {
         const result = await calculateRoute(
           creationWaypoints.map(w => ({ lat: w.lat, lon: w.lon })),
           routingProfile,
           controller.signal,
-          { runtime, onCacheMetadata: handleCacheMetadata },
+          { runtime, sessionProfile: routingProfile === 'custom' ? sessionProfile?.id : undefined },
         )
         if (!isCurrent()) return
-        routingComplete = true
-
         setRoutedCoordinates(result.coordinates)
         setRoutedDuration(result.durationSeconds)
         setRoutedEngine(result.engine)
-        setRouteCache(result.cache)
-        if (result.warning) notify(result.warning, 'info')
-
-        // Surface is an overlay on top of a route that already works, so it
-        // runs alongside elevation instead of in front of it: a slow or
-        // missing trace service must never hold up the numbers that matter.
-        setSurfaceSegments(null)
-        setSurfaceCache(undefined)
-        setSurfaceError(null)
-        setSurfaceLoading(true)
-        void fetchRouteSurface(
-          result.coordinates,
-          routingProfile,
-          controller.signal,
-          { runtime, onCacheMetadata: handleCacheMetadata },
-        )
-          .then(surface => {
-            if (!isCurrent()) return
-            setSurfaceSegments(surface.segments)
-            setSurfaceApproximate(surface.approximate)
-            setSurfaceCache(surface.cache)
-          })
-          .catch(err => {
-            if ((err as Error).name === 'AbortError' || !isCurrent()) return
-            setSurfaceSegments(null)
-            setSurfaceCache(undefined)
-            setSurfaceError((err as Error).message || 'Surface data unavailable')
-          })
-          .finally(() => { if (isCurrent()) setSurfaceLoading(false) })
-
-        setRouteStatus('Reading elevation…')
-        const { coordinates, interpolated } = await attachElevations(
-          result.coordinates,
-          API_BASE,
-          ELEVATION_API,
-          {
-            signal: controller.signal,
-            dataset: ELEVATION_DATASET,
-            runtime,
-            onCacheMetadata: handleCacheMetadata,
-            onProgress: (done, total) => {
-              if (isCurrent()) setRouteStatus(`Reading elevation… ${done}/${total}`)
-            },
-          },
-        )
-        if (!isCurrent()) return
-
-        setRoutedCoordinates(coordinates)
-        setElevationInterpolated(interpolated)
-        setElevationApiError(false)
+        setSurfaceSegments(result.surface.segments)
+        setElevationInterpolated(result.coordinates.some(point => point.elevationInterpolated === true))
+        setElevationApiError(!result.coordinates.some(point => point.elevation !== undefined))
       } catch (err) {
         if ((err as Error).name === 'AbortError' || !isCurrent()) return
-        if (!routingComplete) {
-          clearRouteDerived()
-          const message = (err as Error).message || 'Could not calculate route'
-          setRouteError(message)
-          notify(message, 'error')
-        } else if (err instanceof ElevationUnavailableError) {
-          setElevationInterpolated(false)
-          setElevationApiError(true)
-        } else {
-          setElevationInterpolated(false)
-          setElevationApiError(true)
-          notify((err as Error).message || 'Could not read route elevation', 'error')
-        }
+        clearRouteDerived()
+        const message = (err as Error).message || 'Could not calculate route'
+        setRouteError(message)
+        notify(message, 'error')
       } finally {
         if (isCurrent()) { setRoutedLoading(false); setRouteStatus('') }
       }
     }, ROUTE_DEBOUNCE_MS)
 
     return () => { clearTimeout(timer); controller.abort() }
-  }, [clearRouteDerived, creationWaypoints, handleCacheMetadata, routingProfile, runtime, viewMode, notify])
+  }, [clearRouteDerived, creationWaypoints, routingData?.generationId, routingData?.ready, routingData?.error, routingProfile, runtime, viewMode, notify, sessionProfile?.id])
 
   const creationCoordinates = useMemo<Coordinate[]>(
     () =>
@@ -2223,13 +2219,10 @@ function App() {
         loading: routedLoading,
         status: routeStatus,
         routeError,
-        routeCache,
+        routingData,
         elevationInterpolated,
         elevationError: elevationApiError,
         surface: surfaceSummary,
-        surfaceLoading,
-        surfaceError,
-        surfaceCache,
         pois: POI_KINDS.flatMap(kind => creationPois[kind.id].map(poi => ({ ...poi, kind: kind.id }))),
         poiCache: creationPoiCache,
       },
@@ -2493,6 +2486,7 @@ function App() {
           onHome={() => setViewMode('welcome')}
           onCacheMetadata={handleCacheMetadata}
           onNotify={notify}
+          onRoutingStatus={setRoutingData}
           onMapInstance={registerActiveMap}
           mapOverlays={<SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />}
         />
@@ -2509,7 +2503,7 @@ function App() {
                 </svg>
                 <div>
                   <strong>Elevation unavailable</strong>
-                  <p>The elevation service is not reachable. The track will be saved without elevation data.</p>
+                  <p>No elevation is available for this route. The track will be saved without invented heights.</p>
                 </div>
               </div>
             )}
@@ -2592,12 +2586,6 @@ function App() {
                       <span className="route-stat-value route-stat-muted">{routedEngine}</span>
                     </div>
                   )}
-                  {routeCache && (
-                    <div className="route-stat-row">
-                      <span className="route-stat-label">Route data</span>
-                      <CacheContext metadata={routeCache} />
-                    </div>
-                  )}
                   {creationHasElevation && creationSparkPath && (
                     <div className="route-elev-sparkline">
                       <div className="sparkline-labels">
@@ -2624,7 +2612,7 @@ function App() {
                   )}
                   {elevationInterpolated && (
                     <p className="route-stat-note">
-                      Long route — elevation sampled and interpolated between measured points.
+                      Some clipped route points use interpolated elevation. Those heights are shown here but omitted from GPX export.
                     </p>
                   )}
                 </div>
@@ -2639,12 +2627,10 @@ function App() {
                   <path d="M14 6l-3.75 5 2.85 3.8-1.6 1.2C9.81 13.75 7 10 7 10l-6 8h22L14 6z" />
                 </svg>
                 Surface
-                {surfaceLoading && <span className="surface-spinner" title="Reading surface…" />}
               </h3>
 
               {surfaceReady && surfaceSummary ? (
                 <div className="surface-panel">
-                  {surfaceCache && <CacheContext metadata={surfaceCache} />}
                   <div className="surface-headline">
                     <span>
                       <strong>{(surfaceSummary.unpavedFraction * 100).toFixed(0)}%</strong> unpaved
@@ -2698,17 +2684,7 @@ function App() {
                       rather than assumed sealed.
                     </p>
                   )}
-                  {surfaceApproximate && (
-                    <p className="route-stat-note">
-                      This route had to be matched back onto the road graph, so surface
-                      boundaries are approximate.
-                    </p>
-                  )}
                 </div>
-              ) : surfaceLoading ? (
-                <p className="sidebar-empty">Reading surface…</p>
-              ) : surfaceError ? (
-                <p className="sidebar-empty">{surfaceError}</p>
               ) : (
                 <p className="sidebar-empty">Add waypoints to see what the route is made of</p>
               )}
@@ -2783,7 +2759,19 @@ function App() {
                       {p.label}
                     </button>
                   ))}
+                  {sessionProfile && <>
+                    <button className={`profile-btn${routingProfile === 'custom' ? ' active' : ''}`} onClick={() => setRoutingProfile('custom')} title="Uploaded BRF — current session only">{sessionProfile.name}</button>
+                    <button className="profile-btn" aria-label="Remove session profile" onClick={() => { setSessionProfile(null); if (routingProfile === 'custom') setRoutingProfile('mixed') }}>×</button>
+                  </>}
                 </div>
+                <input ref={profileInput} type="file" accept=".brf" hidden aria-label="Session BRF profile" onChange={event => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) void uploadProfile(file)
+                }} />
+                <button className="btn btn-ghost btn-xs" disabled={!routingData?.ready || profileUploading} title="Upload a temporary BRF for this browser session and routing region" onClick={() => profileInput.current?.click()}>
+                  {profileUploading ? 'Preparing profile…' : 'Upload session BRF'}
+                </button>
               </div>
               <div className="creation-controls">
                 <button
@@ -2851,6 +2839,8 @@ function App() {
                 zoomControl={false}
                 ref={registerActiveMap}
               >
+                <RoutingDownloadControl runtime={runtime} status={routingData} onStatus={setRoutingData} />
+                <MapControlLayout />
                 <MapTiles
                   baseLayerId={activeBaseLayer}
                   hillshade={hillshade}

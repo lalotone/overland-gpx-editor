@@ -132,17 +132,21 @@ walls. Every DEM service does the same internally, but it is worth stating
 plainly: between posts, the surface is a straight-line assumption, and no DEM
 knows what the ground does in the 30 m between two measurements.
 
-**Measured vs interpolated.** Planned routes fetch a real DEM reading for every
-point. Only past **6000 points** (`MAX_ELEVATION_LOOKUPS`) does the app query an
-evenly spaced subset and interpolate between them — and when it does, it says
-so, both in the route panel and above the elevation profile.
+**Measured vs interpolated.** Planned routes receive elevation from the prepared
+Broom graph, aligned one-for-one with route geometry. Broom marks snapped route
+endpoints whose height was interpolated along an edge; missing source data stays
+missing. Terrain-model refreshes query every point. Only past **6000 points**
+(`MAX_ELEVATION_LOOKUPS`) does refresh query an evenly spaced subset and
+interpolate between them. Both paths preserve the per-point interpolation flag
+through the UI and editing history.
 
 This matters because it used to lie. An earlier version sampled every 20th point
 of the routed geometry, linearly interpolated the rest, and wrote the
-interpolated values into the saved GPX as if they had been measured. On OSRM
-geometry, 20 points can span several hundred metres, so any hill shorter than
-that was erased. Interpolated elevation is now always labelled and never
-silently persisted as fact.
+interpolated values into the saved GPX as if they had been measured. On dense
+route geometry, 20 points can span several hundred metres, so any hill shorter than
+that was erased. GPX cannot carry this provenance flag, so interpolated values
+are labelled in the editor and omitted from GPX output rather than silently
+persisted as fact.
 
 ---
 

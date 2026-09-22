@@ -378,14 +378,6 @@ func TestServerUsesContextDeadlinesForOutboundProviders(t *testing.T) {
 	if srv.outbound.fetchTimeout != client.Timeout {
 		t.Fatalf("default outbound timeout = %s, want injected %s", srv.outbound.fetchTimeout, client.Timeout)
 	}
-	for _, name := range []string{"valhalla-route", "osrm-route"} {
-		if got := srv.providers[name].fetchTimeout; got != routeOutboundFetchTimeout {
-			t.Errorf("%s timeout = %s, want %s", name, got, routeOutboundFetchTimeout)
-		}
-	}
-	if got := srv.providers["surface"].fetchTimeout; got != 0 {
-		t.Errorf("surface timeout override = %s, want default", got)
-	}
 }
 
 func TestProviderForcesIdentityAndRejectsEncodedResponses(t *testing.T) {

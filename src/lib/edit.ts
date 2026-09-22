@@ -181,12 +181,17 @@ export function smoothTrackElevation(track: Track, windowM: number): Track {
 }
 
 /** Replace elevations wholesale, e.g. after re-querying the DEM. */
-export function withElevations(track: Track, elevations: (number | null)[]): Track {
+export function withElevations(
+  track: Track,
+  elevations: (number | null)[],
+  interpolated: (boolean | undefined)[] = [],
+): Track {
   return {
     ...track,
     coordinates: track.coordinates.map((c, i) => ({
       ...c,
       elevation: elevations[i] ?? undefined,
+      elevationInterpolated: elevations[i] === null ? undefined : interpolated[i],
     })),
     elevations: [...elevations],
   }

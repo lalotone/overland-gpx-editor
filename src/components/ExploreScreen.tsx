@@ -3,6 +3,8 @@ import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from '
 import { MapContainer, Marker, Pane, Popup, Rectangle, ZoomControl, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import { MapTiles, VectorMapDiagnostic } from './MapLayers'
+import RoutingDownloadControl from './RoutingDownloadControl'
+import MapControlLayout from './MapControlLayout'
 import type { VectorMapIssue } from './MapLayers'
 import { OfflineAreaPanel } from './OfflineAreaPanel'
 import { OfflineAreasPanel } from './OfflineAreasPanel'
@@ -337,6 +339,7 @@ export function ExploreScreen({
   onHome,
   onCacheMetadata,
   onNotify,
+  onRoutingStatus,
   onMapInstance,
   mapOverlays,
 }: {
@@ -356,6 +359,7 @@ export function ExploreScreen({
   onHome: () => void
   onCacheMetadata: (metadata: CacheMetadata) => void
   onNotify: (message: string, type?: 'info' | 'success' | 'error') => void
+  onRoutingStatus: (status: import('../lib/offline').RoutingDataStatus) => void
   onMapInstance: (map: L.Map | null) => void
   mapOverlays: ReactNode
 }) {
@@ -489,6 +493,8 @@ export function ExploreScreen({
           style={{ width: '100%', height: '100%' }}
           ref={captureMap}
         >
+          <RoutingDownloadControl runtime={runtime} onStatus={onRoutingStatus} />
+          <MapControlLayout />
           <MapTiles
             baseLayerId={baseLayerId}
             hillshade={hillshade}

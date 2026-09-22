@@ -63,10 +63,23 @@ type Config struct {
 	// hosted frontend. It is never returned by /config.
 	TrustedUIOrigin   string
 	OfflineAdminToken string
-	ValhallaURL       string
-	OSRMURL           string
-	OverpassURL       string
-	FuelURL           string
+	// RoutingCacheDir enables embedded Broom routing. It owns source, graph,
+	// metric and catalogue data independently from the generic response cache.
+	// Empty disables routing.
+	RoutingCacheDir         string
+	RoutingRegion           string
+	RoutingGraph            string
+	RoutingPrepare          bool
+	RoutingUpdate           bool
+	RoutingJobs             int
+	RoutingConcurrency      int
+	RoutingTimeout          time.Duration
+	RoutingIndexURL         string
+	RoutingMetadataIndexURL string
+	RoutingPBFBaseURL       string
+	RoutingDEMBaseURL       string
+	OverpassURL             string
+	FuelURL                 string
 	// OpenFreeMapURL enables the persistent OpenFreeMap-compatible map proxy.
 	// The CLI supplies the public Liberty style by default.
 	OpenFreeMapURL       string
@@ -96,8 +109,6 @@ type Config struct {
 
 const (
 	defaultNominatimURL            = "https://nominatim.openstreetmap.org"
-	defaultValhallaURL             = "https://valhalla1.openstreetmap.de"
-	defaultOSRMURL                 = "https://router.project-osrm.org"
 	defaultOverpassURL             = "https://overpass-api.de/api/interpreter"
 	defaultFuelURL                 = "https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/"
 	defaultCacheBytes              = int64(1 << 30)
@@ -126,6 +137,7 @@ type Server struct {
 	openFreeMap     *openFreeMapManager
 	rasterMaps      map[string]*rasterAdapter
 	packs           *packManager
+	broom           *broomRoutingService
 	allowedOrigins  map[string]struct{}
 	mcpBrowser      http.Handler
 	behindProxy     bool
@@ -172,6 +184,14 @@ func New(cfg Config) (*Server, error) {
 		gpxRoot.Close()
 		return nil, errors.New("elevation tile cache max bytes must be positive")
 	}
+	if strings.TrimSpace(cfg.RoutingRegion) != "" && strings.TrimSpace(cfg.RoutingGraph) != "" {
+		gpxRoot.Close()
+		return nil, errors.New("routing region and routing graph are mutually exclusive")
+	}
+	if cfg.RoutingJobs < 0 || cfg.RoutingConcurrency < 0 || cfg.RoutingTimeout < 0 {
+		gpxRoot.Close()
+		return nil, errors.New("routing jobs, concurrency and timeout cannot be negative")
+	}
 	// Persisted pins are derived from pack manifests, so defer pin-aware
 	// eviction until the manifests have been reconciled below.
 	cache, err := openCacheStore(cfg.OfflineCacheDir, cfg.OfflineCacheMaxBytes, cfg.OfflineCacheMaxEntries, false)
@@ -192,8 +212,6 @@ func New(cfg Config) (*Server, error) {
 
 	providerURLs := map[string]string{
 		"nominatim": valueOrDefault(cfg.NominatimURL, defaultNominatimURL),
-		"valhalla":  valueOrDefault(cfg.ValhallaURL, defaultValhallaURL),
-		"osrm":      valueOrDefault(cfg.OSRMURL, defaultOSRMURL),
 		"overpass":  valueOrDefault(cfg.OverpassURL, defaultOverpassURL),
 		"fuel":      valueOrDefault(cfg.FuelURL, defaultFuelURL),
 	}
@@ -253,19 +271,13 @@ func New(cfg Config) (*Server, error) {
 		contact = "https://github.com/lalotone/overland-gpx-editor"
 	}
 	ua := "gpx-editor/1 (" + strings.ReplaceAll(contact, ")", "") + ")"
-	fossgis := newRateGroup(time.Second)
 	nominatimGroup := newRateGroup(time.Second)
 	overpassGroup := newRateGroup(time.Second)
 	providers := map[string]*providerPolicy{
-		"fuel":           newProviderPolicy("fuel", "fuel", parsedURLs["fuel"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json"}, nil, true),
-		"places":         newProviderPolicy("nominatim", "places", parsedURLs["nominatim"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 2<<20, []string{"application/json"}, nominatimGroup, false),
-		"pois":           newProviderPolicy("overpass", "pois", parsedURLs["overpass"], time.Hour, 7*24*time.Hour, 30*24*time.Hour, true, 8<<20, []string{"application/json"}, overpassGroup, true),
-		"valhalla-route": newProviderPolicy("valhalla-route", "routing", parsedURLs["valhalla"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
-		"osrm-route":     newProviderPolicy("osrm-route", "routing", parsedURLs["osrm"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
-		"surface":        newProviderPolicy("valhalla-surface", "surface", parsedURLs["valhalla"], time.Hour, -1, 30*24*time.Hour, false, 16<<20, []string{"application/json"}, fossgis, false),
+		"fuel":   newProviderPolicy("fuel", "fuel", parsedURLs["fuel"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json"}, nil, true),
+		"places": newProviderPolicy("nominatim", "places", parsedURLs["nominatim"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 2<<20, []string{"application/json"}, nominatimGroup, false),
+		"pois":   newProviderPolicy("overpass", "pois", parsedURLs["overpass"], time.Hour, 7*24*time.Hour, 30*24*time.Hour, true, 8<<20, []string{"application/json"}, overpassGroup, true),
 	}
-	providers["valhalla-route"].fetchTimeout = routeOutboundFetchTimeout
-	providers["osrm-route"].fetchTimeout = routeOutboundFetchTimeout
 	providers["fuel"].maxFresh = 24 * time.Hour
 	providers["fuel"].applicationData = true
 
@@ -376,7 +388,31 @@ func New(cfg Config) (*Server, error) {
 		}
 		return nil, fmt.Errorf("enforce offline cache limits: %w", err)
 	}
+	if strings.TrimSpace(cfg.RoutingCacheDir) != "" {
+		s.broom, err = newBroomRoutingService(rootCtx, &s.wg, modes, broomRoutingConfig{
+			IndexCache: s.outbound,
+			CacheDir:   strings.TrimSpace(cfg.RoutingCacheDir), Region: strings.TrimSpace(cfg.RoutingRegion),
+			Graph: strings.TrimSpace(cfg.RoutingGraph), Prepare: cfg.RoutingPrepare, Update: cfg.RoutingUpdate,
+			Jobs: cfg.RoutingJobs, Concurrency: cfg.RoutingConcurrency, Timeout: cfg.RoutingTimeout,
+			IndexURL: strings.TrimSpace(cfg.RoutingIndexURL), MetadataIndexURL: strings.TrimSpace(cfg.RoutingMetadataIndexURL),
+			PBFBaseURL: strings.TrimSpace(cfg.RoutingPBFBaseURL), DEMBaseURL: strings.TrimSpace(cfg.RoutingDEMBaseURL),
+			Contact: contact,
+		}, &outboundHTTPClient)
+		if err != nil {
+			cancel()
+			s.wg.Wait()
+			gpxRoot.Close()
+			cache.close()
+			if tiles != nil {
+				tiles.closeCache()
+			}
+			return nil, fmt.Errorf("initialize local routing: %w", err)
+		}
+	}
 	s.handler = s.routes()
+	if s.broom != nil {
+		s.wg.Go(s.broom.reapSessions)
+	}
 	if s.openFreeMap != nil {
 		s.wg.Add(1)
 		go func() {
@@ -399,6 +435,10 @@ func (s *Server) Close() error {
 		s.elevation.tiles.close()
 	}
 	s.wg.Wait()
+	var routingErr error
+	if s.broom != nil {
+		routingErr = errors.Join(s.broom.close(), s.broom.closeSessions())
+	}
 	s.cache.flushAccesses()
 	var tileCacheErr error
 	if s.elevation.tiles != nil {
@@ -407,7 +447,7 @@ func (s *Server) Close() error {
 	s.gpxMu.Lock()
 	gpxErr := s.gpxRoot.Close()
 	s.gpxMu.Unlock()
-	return errors.Join(gpxErr, s.cache.close(), tileCacheErr)
+	return errors.Join(gpxErr, s.cache.close(), tileCacheErr, routingErr)
 }
 
 func valueOrDefault(value, fallback string) string {
@@ -481,9 +521,9 @@ func (s *Server) routes() http.Handler {
 	r.Get("/fuel", s.protectOutboundResource(s.handleFuel))
 	r.Get("/places/search", s.protectOutboundResource(s.handlePlaceSearch))
 	r.Post("/pois/search", s.protectOutboundResource(s.handlePOISearch))
-	r.Post("/routing/valhalla/route", s.protectOutboundResource(s.handleValhallaRoute))
-	r.Post("/routing/osrm/route", s.protectOutboundResource(s.handleOSRMRoute))
-	r.Post("/routing/valhalla/surface", s.protectOutboundResource(s.handleValhallaSurface))
+	if s.broom != nil {
+		r.Post("/routing/broom/route", s.protectOutboundResource(s.handleBroomRoute))
+	}
 	r.Get("/map/raster/{layer}/{z}/{x}/{y}", s.protectOutboundResource(s.handleRasterMap))
 	r.Get("/map/openfreemap/style.json", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
 		if s.openFreeMap == nil {
@@ -550,6 +590,17 @@ func (s *Server) routes() http.Handler {
 	r.Post("/offline/packs/{id}/cancel", s.requireOfflineControl(s.handleCancelPack))
 	r.Delete("/offline/packs/{id}", s.requireOfflineControl(s.handleDeletePack))
 	r.Delete("/offline/cache", s.requireOfflineControl(s.handleClearCache))
+	if s.broom != nil {
+		r.Get("/offline/routing", s.requireOfflineRead(s.handleBroomStatus))
+		r.Post("/offline/routing/suggest", s.requireOfflineRead(s.handleBroomSuggest))
+		r.Post("/offline/routing/plan", s.requireOfflineControl(s.handleBroomPlan))
+		r.Post("/offline/routing/profile", s.requireOfflineControl(s.handleSessionProfile))
+		r.Post("/offline/routing/profile/release", s.requireOfflineControl(s.handleReleaseSessionProfile))
+		r.Post("/offline/routing/prepare", s.requireOfflineControl(s.handleBroomPrepare))
+		r.Post("/offline/routing/cancel", s.requireOfflineControl(s.handleBroomCancel))
+		r.Post("/offline/routing/pin", s.requireOfflineControl(s.handleBroomPin))
+		r.Post("/offline/routing/prune", s.requireOfflineControl(s.handleBroomPrune))
+	}
 	r.Options("/offline/*", s.handleOfflineOptions)
 	r.Get("/config", s.handleConfig)
 	if s.mcpBrowser != nil {

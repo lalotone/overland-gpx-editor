@@ -112,3 +112,14 @@ func DefaultOfflineCacheDir() string {
 	}
 	return filepath.Join(home, ".cache", "overland", "responses")
 }
+
+func DefaultRoutingCacheDir() string {
+	if base := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(base) {
+		return filepath.Join(base, "overland", "routing")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "routing"
+	}
+	return filepath.Join(home, ".cache", "overland", "routing")
+}

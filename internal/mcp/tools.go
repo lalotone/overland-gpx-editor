@@ -41,7 +41,7 @@ var toolDefinitions = []toolDefinition{
 		InputSchema: objectSchema(map[string]any{
 			"points":  pointArraySchema(0, 100),
 			"mode":    enumSchema("replace", "append"),
-			"profile": enumSchema("road", "mixed", "trail"),
+			"profile": enumSchema("road", "mixed", "trail", "enduro"),
 			"fitView": map[string]any{"type": "boolean", "description": "Fit the map to the supplied points."},
 		}, []string{"points"}),
 		Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false},
@@ -230,8 +230,8 @@ func validatePlanRoute(raw json.RawMessage) (json.RawMessage, error) {
 	if args.Mode != "replace" && args.Mode != "append" {
 		return nil, errors.New("mode must be replace or append")
 	}
-	if args.Profile != "" && args.Profile != "road" && args.Profile != "mixed" && args.Profile != "trail" {
-		return nil, errors.New("profile must be road, mixed, or trail")
+	if args.Profile != "" && args.Profile != "road" && args.Profile != "mixed" && args.Profile != "trail" && args.Profile != "enduro" {
+		return nil, errors.New("profile must be road, mixed, trail, or enduro")
 	}
 	return marshalValidated(args, nil)
 }

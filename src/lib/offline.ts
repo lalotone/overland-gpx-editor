@@ -7,9 +7,7 @@ export type RuntimeService =
   | 'fuel'
   | 'places'
   | 'pois'
-  | 'valhallaRoute'
-  | 'osrmRoute'
-  | 'surface'
+  | 'broomRoute'
 
 export type RuntimeRasterMap = 'osm' | 'opentopo' | 'cyclosm'
 
@@ -19,6 +17,7 @@ export interface OfflineCapability {
   status: string
   packs: string
   modeControl?: string
+  routing?: string
 }
 
 export interface RuntimeConfig {
@@ -86,6 +85,50 @@ export interface OfflineStatus {
   elevationTiles?: CacheScopeStatus
   providers: Record<string, ProviderStatus>
   jobs: OfflineJob[]
+}
+
+export interface RoutingDataJob {
+  id: string
+  regionId: string
+  state: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled' | string
+  phase?: string
+  item?: string
+  done?: number
+  total?: number
+  detail?: string
+  completedItems?: number
+  itemsTotal?: number
+  itemsDownloaded?: number
+  itemsReused?: number
+  stage?: string
+  elapsedSeconds?: number
+  retrySeconds?: number
+  attempt?: number
+  retrying?: boolean
+}
+
+export interface RoutingDataRegion {
+  regionId: string
+  name: string
+  generationId: string
+  selected: boolean
+  pinned: boolean
+  installedAt?: string
+}
+
+export interface RoutingDataStatus {
+  enabled: boolean
+  ready: boolean
+  regionId?: string
+  generationId?: string
+  name?: string
+  error?: string
+  job?: RoutingDataJob
+  cached: RoutingDataRegion[]
+  cacheBytes: number
+  pinnedBytes: number
+  inUseBytes: number
+  reclaimableBytes: number
 }
 
 export interface PackSummary extends OfflineJob {
@@ -204,7 +247,7 @@ export function syncPackLayers(
 
 const WEB_MERCATOR_LATITUDE = 85.05112878
 const PACK_LAYERS = new Set(['openfreemap', 'osm', 'opentopo', 'cyclosm', 'satellite', 'relief', 'hillshade'])
-const PACK_SCOPES = new Set(['elevation', 'routing', 'surface', 'pois', 'fuel', 'places'])
+const PACK_SCOPES = new Set(['elevation', 'pois', 'fuel', 'places'])
 
 function normalizedLongitude(value: number): number {
   const normalized = ((value + 180) % 360 + 360) % 360 - 180
@@ -273,9 +316,7 @@ const SERVICE_KEYS: RuntimeService[] = [
   'fuel',
   'places',
   'pois',
-  'valhallaRoute',
-  'osrmRoute',
-  'surface',
+  'broomRoute',
 ]
 const RASTER_KEYS: RuntimeRasterMap[] = ['osm', 'opentopo', 'cyclosm']
 
@@ -347,6 +388,7 @@ export function decodeRuntimeConfig(value: unknown, apiBase = ''): RuntimeConfig
   const status = text(offlineRaw?.status)
   const packs = text(offlineRaw?.packs)
   const modeControl = text(offlineRaw?.modeControl)
+  const routing = text(offlineRaw?.routing)
 
   return {
     apiBase,
@@ -358,6 +400,7 @@ export function decodeRuntimeConfig(value: unknown, apiBase = ''): RuntimeConfig
           status: resolveApiUrl(status ?? '/offline/status', apiBase),
           packs: resolveApiUrl(packs ?? '/offline/packs', apiBase),
           modeControl: modeControl ? resolveApiUrl(modeControl, apiBase) : undefined,
+          routing: routing ? resolveApiUrl(routing, apiBase) : undefined,
         }
       : undefined,
     services,
@@ -456,6 +499,114 @@ export async function responseError(response: Response, fallback: string): Promi
   const scope = text(record(body)?.scope)
   if (code === 'offline_cache_miss') return new OfflineCacheMissError(detail, scope)
   return new Error(detail ?? fallback)
+}
+
+function decodeRoutingDataStatus(value: unknown): RoutingDataStatus {
+  const root = record(value)
+  const job = record(root?.job)
+  const cached = Array.isArray(root?.cached) ? root.cached.flatMap(value => {
+    const region = record(value)
+    const regionId = text(region?.regionId)
+    const generationId = text(region?.generationId)
+    if (!regionId || !generationId) return []
+    return [{
+      regionId,
+      generationId,
+      name: text(region?.name) ?? regionId,
+      selected: region?.selected === true,
+      pinned: region?.pinned === true,
+      installedAt: text(region?.installedAt),
+    }]
+  }) : []
+  const jobId = text(job?.id)
+  const jobRegion = text(job?.regionId)
+  return {
+    enabled: root?.enabled === true,
+    ready: root?.ready === true,
+    regionId: text(root?.regionId),
+    generationId: text(root?.generationId),
+    name: text(root?.name),
+    error: text(root?.error),
+    job: jobId && jobRegion ? {
+      id: jobId,
+      regionId: jobRegion,
+      state: text(job?.state) ?? 'unknown',
+      phase: text(job?.phase),
+      item: text(job?.item),
+      done: number(job?.done),
+      total: number(job?.total),
+      detail: text(job?.detail),
+      completedItems: number(job?.completedItems),
+      itemsTotal: number(job?.itemsTotal),
+      itemsDownloaded: number(job?.itemsDownloaded),
+      itemsReused: number(job?.itemsReused),
+      stage: text(job?.stage),
+      elapsedSeconds: number(job?.elapsedSeconds),
+      retrySeconds: number(job?.retrySeconds),
+      attempt: number(job?.attempt),
+      retrying: job?.retrying === true,
+    } : undefined,
+    cached,
+    cacheBytes: number(root?.cacheBytes) ?? 0,
+    pinnedBytes: number(root?.pinnedBytes) ?? 0,
+    inUseBytes: number(root?.inUseBytes) ?? 0,
+    reclaimableBytes: number(root?.reclaimableBytes) ?? 0,
+  }
+}
+
+export async function fetchRoutingDataStatus(runtime: RuntimeConfig, signal?: AbortSignal): Promise<RoutingDataStatus | null> {
+  if (!runtime.offline?.routing) return null
+  const response = await fetch(runtime.offline.routing, { signal })
+  if (!response.ok) throw await responseError(response, `Routing data status returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
+}
+
+export async function prepareRoutingData(runtime: RuntimeConfig, regionId: string, update = false): Promise<RoutingDataStatus> {
+  if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
+  const response = await fetch(`${runtime.offline.routing}/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+    body: JSON.stringify({ regionId, update }),
+  })
+  if (!response.ok) throw await responseError(response, `Routing data preparation returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
+}
+
+export async function cancelRoutingData(runtime: RuntimeConfig): Promise<RoutingDataStatus> {
+  if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
+  const response = await fetch(`${runtime.offline.routing}/cancel`, {
+    method: 'POST',
+    headers: { 'X-GPX-Editor': '1' },
+  })
+  if (!response.ok) throw await responseError(response, `Routing data cancellation returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
+}
+
+export async function pinRoutingData(
+  runtime: RuntimeConfig,
+  regionId: string,
+  generationId: string,
+  pinned: boolean,
+): Promise<RoutingDataStatus> {
+  if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
+  const response = await fetch(`${runtime.offline.routing}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+    body: JSON.stringify({ regionId, generationId, pinned }),
+  })
+  if (!response.ok) throw await responseError(response, `Routing data pin returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
+}
+
+export async function pruneRoutingData(runtime: RuntimeConfig): Promise<RoutingDataStatus> {
+  if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
+  const response = await fetch(`${runtime.offline.routing}/prune`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+    body: JSON.stringify({ keepGenerations: 1, removeSources: true, removeMetrics: true }),
+  })
+  if (!response.ok) throw await responseError(response, `Routing data cleanup returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
 }
 
 export interface RuntimeFetchOptions extends RuntimeRequestContext {

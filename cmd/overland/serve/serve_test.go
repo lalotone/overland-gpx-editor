@@ -130,6 +130,9 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 		"ELEVATION_TILES", "ELEVATION_TILE_ZOOM", "ELEVATION_TILE_CACHE",
 		"ELEVATION_TILE_CACHE_MAX_BYTES",
 		"NOMINATIM_URL", "OPENFREEMAP_URL", "OPENFREEMAP_ALLOW_BULK", "ALLOWED_ORIGINS", "STATS_LOG_INTERVAL",
+		"ROUTING_CACHE_DIR", "ROUTING_REGION", "ROUTING_GRAPH", "ROUTING_PREPARE", "ROUTING_UPDATE",
+		"ROUTING_JOBS", "ROUTING_CONCURRENCY", "ROUTING_TIMEOUT", "ROUTING_INDEX_URL",
+		"ROUTING_METADATA_INDEX_URL", "ROUTING_PBF_BASE_URL", "ROUTING_DEM_BASE_URL",
 	} {
 		t.Setenv(key, "")
 	}
@@ -166,6 +169,18 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			}
 			if got := cmd.String("openfreemap-url"); got != defaultOpenFreeMapURL {
 				t.Errorf("openfreemap-url = %q, want %q", got, defaultOpenFreeMapURL)
+			}
+			if got := cmd.String("routing-cache-dir"); got != "" {
+				t.Errorf("routing-cache-dir = %q, want explicit empty environment value", got)
+			}
+			if got := cmd.Int("routing-jobs"); got != 2 {
+				t.Errorf("routing-jobs = %d, want 2", got)
+			}
+			if got := cmd.Int("routing-concurrency"); got != 4 {
+				t.Errorf("routing-concurrency = %d, want 4", got)
+			}
+			if got := cmd.Duration("routing-timeout"); got != 45*time.Second {
+				t.Errorf("routing-timeout = %s, want 45s", got)
 			}
 			if !cmd.Bool("openfreemap-allow-bulk") {
 				t.Error("openfreemap-allow-bulk = false, want true")

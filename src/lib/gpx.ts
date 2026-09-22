@@ -229,7 +229,7 @@ export function buildGPX({
   lines.push('    <trkseg>')
   for (const c of coordinates) {
     lines.push(`      <trkpt lat="${coord(c.lat)}" lon="${coord(c.lon)}">`)
-    if (c.elevation !== undefined && Number.isFinite(c.elevation)) {
+    if (c.elevation !== undefined && Number.isFinite(c.elevation) && !c.elevationInterpolated) {
       lines.push(`        <ele>${c.elevation.toFixed(2)}</ele>`)
     }
     if (c.time) lines.push(`        <time>${esc(c.time)}</time>`)

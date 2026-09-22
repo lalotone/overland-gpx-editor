@@ -4,6 +4,8 @@ export interface Coordinate {
   lat: number
   lon: number
   elevation?: number
+  /** True when elevation was interpolated between route samples, not read at this point. */
+  elevationInterpolated?: boolean
   /** ISO-8601 timestamp from <time>, when the source recorded one. */
   time?: string
 }

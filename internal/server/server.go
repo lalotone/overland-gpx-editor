@@ -285,7 +285,8 @@ func New(cfg Config) (*Server, error) {
 	// the tile default.
 	var tiles *tileStore
 	if cfg.ElevationTiles && strings.TrimSpace(cfg.ElevationHost) == "" {
-		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client)
+		// Pack-owned terrain pins must be restored before any disk eviction.
+		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client, true)
 		if tiles.cacheErr != nil {
 			cancel()
 			gpxRoot.Close()
@@ -592,6 +593,7 @@ func (s *Server) routes() http.Handler {
 	r.Delete("/offline/cache", s.requireOfflineControl(s.handleClearCache))
 	if s.broom != nil {
 		r.Get("/offline/routing", s.requireOfflineRead(s.handleBroomStatus))
+		r.Get("/offline/routing/regions", s.requireOfflineRead(s.handleBroomRegions))
 		r.Post("/offline/routing/suggest", s.requireOfflineRead(s.handleBroomSuggest))
 		r.Post("/offline/routing/plan", s.requireOfflineControl(s.handleBroomPlan))
 		r.Post("/offline/routing/profile", s.requireOfflineControl(s.handleSessionProfile))

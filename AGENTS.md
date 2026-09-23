@@ -46,6 +46,24 @@ make run            # build and serve on :8000
 npm run dev         # frontend dev server (http://localhost:5173)
 ```
 
+### Android mobile app
+
+`mobile/` is a separate Go module and a separate React frontend. Read
+`mobile/README.md` before changing it. Reuse the parent `src/lib` logic and Go
+backend; never fork the distance/elevation or routing maths into the mobile UI.
+The Wails-generated `mobile/build/` and artifacts under `mobile/bin/` are ignored.
+Edit the checked adaptations in `mobile/android/`, not generated Java files.
+
+```bash
+npm run check:mobile
+npm run test:mobile
+go -C mobile test -race -cover ./host/... ./frontend/... ./cmd/preview/...
+bash mobile/build-android.sh debug
+```
+
+Use `adb install -r` when updating the app; uninstalling removes its data.
+Keep Go commands scoped: generated mobile build helpers are not app packages.
+
 ## Project Structure
 
 The file tree, the embed/build pipeline and the HTTP API live in

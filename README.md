@@ -45,6 +45,10 @@ the part I want.
 
 ## Install
 
+An Android app with a separate map-first mobile frontend lives in **[mobile/](mobile/README.md)**.
+It embeds the same Go backend and Broom engine, with native GPX import/sharing,
+on-device routing, and offline downloads.
+
 Grab the archive for your platform from
 [Releases](https://github.com/lalotone/overland-gpx-editor/releases), unpack
 it, and run the binary. It serves the whole app — frontend, API and track

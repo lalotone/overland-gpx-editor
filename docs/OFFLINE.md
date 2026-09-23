@@ -113,6 +113,30 @@ and reused counts, retries, elapsed stage time and activity updates. Transfer
 percentages are per file; diagnostics don't replace current work. Only an open
 graph is reported as ready.
 
+`GET /offline/routing/regions` exposes the provider's region hierarchy and bounds
+with installed/in-use flags. It starts no preparation. Without the full provider
+catalogue, installed generations remain browsable from local metadata. City
+map packs still use a covering regional routing extract, not a city-specific
+routing graph.
+
+Vector pack preparation clamps tile requests to each source's declared native
+maximum zoom. Higher requested display zooms reuse native parent tiles for
+overzooming instead of requesting nonexistent tiles from the provider.
+
+Explicit `regional: true` bbox packs use a bounded 100,000-resource budget and
+128-resource batches, instead of the ordinary 10,000-resource trip-pack limit.
+Two vector workers share the existing provider limiter. Their larger manifests
+have reserved control storage and checkpoint every batch (or five seconds),
+with terminal states always flushed. One manifest owns all cache pins; terrain
+pins are restored before quota eviction at startup. Quota shortages fail admission
+rather than silently replacing previously downloaded packs.
+
+Regional elevation work allows up to 16,384 tiles / 2 GiB, still subject to the
+configured terrain quota and existing pack reservations. Broad POI searches keep
+their provider bounds: `unavailable` reports unsupported resources and a terminal
+`provider_limits` result distinguishes those from a network failure. There is no
+tiled Overpass sweep. Supported map/elevation work can finish independently.
+
 Broom 0.5 selects sparse terrain tiles intersecting retained highway/ferry
 geometry. A real Catalonia plan and rebuild selected 55 tiles, versus 180 with
 0.4's all-node rectangle. Retained distant roads and ferries still require terrain;

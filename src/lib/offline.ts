@@ -134,6 +134,9 @@ export interface RoutingDataStatus {
 }
 
 export interface PackSummary extends OfflineJob {
+  unavailable?: { resource?: string; layer?: string; reason: string }[]
+  batchesDone?: number
+  batchesTotal?: number
   bbox?: PackBounds
   createdAt?: string
   updatedAt?: string
@@ -152,6 +155,7 @@ export interface PackResourceProgress {
 }
 
 export interface PackEstimateRequest {
+  regional?: boolean
   name: string
   automatic?: boolean
   route?: { lat: number; lon: number }[]
@@ -750,6 +754,13 @@ export function decodePacks(value: unknown): PackSummary[] {
     if (!job || !item) return []
     return [{
       ...job,
+      unavailable: Array.isArray(item.unavailable) ? item.unavailable.flatMap(value => {
+        const blocked = record(value)
+        const reason = text(blocked?.reason)
+        return reason ? [{ reason, resource: text(blocked?.resource), layer: text(blocked?.layer) }] : []
+      }) : [],
+      batchesDone: number(item.batchesDone),
+      batchesTotal: number(item.batchesTotal),
       bbox: decodePackBounds(item.bbox),
       createdAt: text(item.createdAt),
       updatedAt: text(item.updatedAt),

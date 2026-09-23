@@ -101,6 +101,7 @@ type tileStore struct {
 	prefetch prefetchState
 
 	diskMu    sync.Mutex
+	diskPins  map[string]map[string]struct{}
 	diskBytes int64
 	diskFiles map[string]tileDiskFile
 
@@ -153,7 +154,7 @@ func newTileStore(url string, zoom int, cacheDir string, client *http.Client) *t
 	return newTileStoreWithQuota(url, zoom, cacheDir, defaultElevationTileCacheBytes, client)
 }
 
-func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes int64, client *http.Client) *tileStore {
+func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes int64, client *http.Client, deferQuota ...bool) *tileStore {
 	if url == "" {
 		url = defaultTileURL
 	}
@@ -175,6 +176,7 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 		inflight:     make(map[tileKey]*tileFetch),
 		maxDiskBytes: maxDiskBytes,
 		diskFiles:    make(map[string]tileDiskFile),
+		diskPins:     make(map[string]map[string]struct{}),
 		ctx:          context.Background(),
 		wg:           &sync.WaitGroup{},
 	}
@@ -196,7 +198,11 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 			store.cacheErr = err
 			return store
 		}
-		if err := store.loadDiskIndex(); err != nil {
+		err = store.loadDiskIndex()
+		if err == nil && (len(deferQuota) == 0 || !deferQuota[0]) {
+			err = store.enforceDiskQuotaLocked("")
+		}
+		if err != nil {
 			root.Close()
 			store.cacheRoot = nil
 			store.cacheErr = err
@@ -630,7 +636,7 @@ func (s *tileStore) loadDiskIndex() error {
 	}); err != nil {
 		return err
 	}
-	return s.enforceDiskQuotaLocked("")
+	return nil
 }
 
 func tileKeyFromPath(path string) (tileKey, bool) {
@@ -669,13 +675,13 @@ func (s *tileStore) evictOldestDiskLocked(exclude string) error {
 	oldestPath := ""
 	var oldest tileDiskFile
 	for path, entry := range s.diskFiles {
-		if path == exclude || (oldestPath != "" && !entry.lastAccess.Before(oldest.lastAccess)) {
+		if path == exclude || len(s.diskPins[path]) > 0 || (oldestPath != "" && !entry.lastAccess.Before(oldest.lastAccess)) {
 			continue
 		}
 		oldestPath, oldest = path, entry
 	}
 	if oldestPath == "" {
-		return errors.New("elevation tile cache quota cannot be satisfied")
+		return errTileQuotaPinned
 	}
 	if err := s.cacheRoot.Remove(oldestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("evict elevation tile: %w", err)

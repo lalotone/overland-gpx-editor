@@ -90,6 +90,12 @@ web/embed.go                    go:embed of the built frontend
 web/dist/                       npm run build output (gitignored, embedded)
 
 packaging/                      nfpm config and the example systemd unit
+mobile/                         Separate Wails Android module and mobile UI
+├── frontend/src/               Map-first React interface; imports shared src/lib
+├── host/                       Capability-protected embedding of internal/server
+├── cmd/overland/               Android/Wails entry point and native facilities
+├── cmd/preview/                Browser preview with the real mobile backend
+└── android/                    Checked adaptations of pinned Wails templates
 scripts/verify.ts               Logic harness (npm run verify)
 gpx/                            Local track library (gitignored)
 ```
@@ -99,6 +105,13 @@ gpx/                            Local track library (gitignored)
 ---
 
 ## Backend
+
+The Android app uses this same backend through `mobile/host`, served on an
+ephemeral loopback port behind a per-launch capability cookie. Its UI is built
+separately from `mobile/frontend/src`; GPX maths, editing, routing and provider
+clients still come from the shared `src/lib` modules. Wails and the Android
+toolchain live in the separate `mobile` Go module. See
+[mobile/README.md](../mobile/README.md) for builds, lifecycle and storage.
 
 The CLI uses `urfave/cli`; the HTTP backend uses Chi for routing and middleware,
 and the optional MCP endpoint uses the official MCP Go SDK.
@@ -226,6 +239,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |
 | `GET /offline/routing` | Broom readiness, preparation progress, installed generations and cache inventory |
+| `GET /offline/routing/regions` | Provider country/region hierarchy, public bounds and downloaded/in-use flags; cached-region fallback offline |
 | `POST /offline/routing/suggest` | Smallest downloadable region covering a viewport bbox; catalogue lookup only |
 | `POST /offline/routing/plan` | Broom acquisition estimate; no PBF or terrain downloads |
 | `POST /offline/routing/profile` | Compile and warm a session-only BRF; returns a capability token |

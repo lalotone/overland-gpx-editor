@@ -43,6 +43,7 @@ const (
 )
 
 type packInput struct {
+	Regional  bool         `json:"regional,omitempty"`
 	Name      string       `json:"name"`
 	Automatic bool         `json:"automatic,omitempty"`
 	BBox      *bbox        `json:"bbox,omitempty"`
@@ -56,6 +57,7 @@ type packInput struct {
 
 func (p *packInput) UnmarshalJSON(raw []byte) error {
 	type wireInput struct {
+		Regional  bool            `json:"regional"`
 		Name      string          `json:"name"`
 		Automatic bool            `json:"automatic"`
 		BBox      json.RawMessage `json:"bbox"`
@@ -75,6 +77,7 @@ func (p *packInput) UnmarshalJSON(raw []byte) error {
 		return err
 	}
 	p.Name, p.Automatic, p.Route, p.PaddingKM, p.Layers, p.Scopes = wire.Name, wire.Automatic, wire.Route, wire.PaddingKM, wire.Layers, wire.Scopes
+	p.Regional = wire.Regional
 	if wire.ZoomMin != nil {
 		p.ZoomMin = *wire.ZoomMin
 	} else if wire.MinZoom != nil {
@@ -152,38 +155,46 @@ type packResourceProgress struct {
 }
 
 type packManifest struct {
-	ID        string                          `json:"id"`
-	Name      string                          `json:"name"`
-	State     string                          `json:"state"`
-	CreatedAt time.Time                       `json:"createdAt"`
-	UpdatedAt time.Time                       `json:"updatedAt"`
-	Done      int                             `json:"done"`
-	Total     int                             `json:"total"`
-	Bytes     int64                           `json:"bytes"`
-	Failures  int                             `json:"failures"`
-	Resources map[string]packResourceProgress `json:"resources,omitempty"`
-	Input     packInput                       `json:"input"`
-	CacheKeys []string                        `json:"cacheKeys,omitempty"`
-	ErrorCode string                          `json:"errorCode,omitempty"`
+	Unavailable   []blockedPackResource           `json:"unavailable,omitempty"`
+	ElevationKeys []string                        `json:"elevationKeys,omitempty"`
+	ID            string                          `json:"id"`
+	Name          string                          `json:"name"`
+	State         string                          `json:"state"`
+	CreatedAt     time.Time                       `json:"createdAt"`
+	UpdatedAt     time.Time                       `json:"updatedAt"`
+	Done          int                             `json:"done"`
+	Total         int                             `json:"total"`
+	Bytes         int64                           `json:"bytes"`
+	Failures      int                             `json:"failures"`
+	Resources     map[string]packResourceProgress `json:"resources,omitempty"`
+	Input         packInput                       `json:"input"`
+	CacheKeys     []string                        `json:"cacheKeys,omitempty"`
+	ErrorCode     string                          `json:"errorCode,omitempty"`
 
-	cancel  context.CancelFunc `json:"-"`
-	deleted bool               `json:"-"`
+	cancel         context.CancelFunc `json:"-"`
+	deleted        bool               `json:"-"`
+	cacheKeySet    map[string]struct{}
+	lastCheckpoint time.Time
+	checkpointDone int
 }
 
 type packSummary struct {
-	ID        string                          `json:"id"`
-	Name      string                          `json:"name"`
-	State     string                          `json:"state"`
-	BBox      *bbox                           `json:"bbox,omitempty"`
-	Done      int                             `json:"done"`
-	Total     int                             `json:"total"`
-	Failures  int                             `json:"failed"`
-	Bytes     int64                           `json:"bytes"`
-	Resources map[string]packResourceProgress `json:"resources,omitempty"`
-	ErrorCode string                          `json:"errorCode,omitempty"`
-	Error     string                          `json:"error,omitempty"`
-	CreatedAt time.Time                       `json:"createdAt"`
-	UpdatedAt time.Time                       `json:"updatedAt"`
+	Unavailable  []blockedPackResource           `json:"unavailable,omitempty"`
+	BatchesDone  int                             `json:"batchesDone,omitempty"`
+	BatchesTotal int                             `json:"batchesTotal,omitempty"`
+	ID           string                          `json:"id"`
+	Name         string                          `json:"name"`
+	State        string                          `json:"state"`
+	BBox         *bbox                           `json:"bbox,omitempty"`
+	Done         int                             `json:"done"`
+	Total        int                             `json:"total"`
+	Failures     int                             `json:"failed"`
+	Bytes        int64                           `json:"bytes"`
+	Resources    map[string]packResourceProgress `json:"resources,omitempty"`
+	ErrorCode    string                          `json:"errorCode,omitempty"`
+	Error        string                          `json:"error,omitempty"`
+	CreatedAt    time.Time                       `json:"createdAt"`
+	UpdatedAt    time.Time                       `json:"updatedAt"`
 }
 
 type packManager struct {
@@ -217,6 +228,11 @@ func (b *packAdmissionBudget) admit(bytes int64) error {
 func newPackManager(server *Server) (*packManager, error) {
 	m := &packManager{server: server, packs: make(map[string]*packManifest), jobTimeout: defaultPackJobTimeout}
 	if !server.cache.writable {
+		if server.elevation.tiles != nil {
+			if err := server.elevation.tiles.finishPackRestore(); err != nil {
+				return nil, err
+			}
+		}
 		return m, nil
 	}
 	changed, err := m.loadStoredPacks()
@@ -224,6 +240,17 @@ func newPackManager(server *Server) (*packManager, error) {
 		return nil, err
 	}
 	if err := m.pruneExcessStoredPacks(changed); err != nil {
+		return nil, err
+	}
+	for _, pack := range m.packs {
+		if pack.Input.Regional {
+			if err := server.cache.setReservedBytes(m.regionalControlReserve()); err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	if err := m.restoreElevationPins(changed); err != nil {
 		return nil, err
 	}
 	desired, unavailable := m.desiredStoredPins()
@@ -254,12 +281,12 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !validPackID(filenameID) {
 			continue
 		}
-		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxPackManifestBytes)
+		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxRegionalManifestBytes)
 		if err != nil {
 			continue
 		}
 		var manifest packManifest
-		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(manifest.CacheKeys) > maxPackResources {
+		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(manifest.CacheKeys) > packResourceLimit(manifest.Input) || len(raw) > packManifestLimit(manifest.Input) || len(manifest.ElevationKeys) > 16384 {
 			continue
 		}
 		if manifest.State == "running" || manifest.State == "queued" {
@@ -361,10 +388,14 @@ func (m *packManager) persistLocked(manifest *packManifest) error {
 	if err != nil {
 		return err
 	}
-	if len(raw) > maxPackManifestBytes {
+	if len(raw) > packManifestLimit(manifest.Input) {
 		return errors.New("pack manifest exceeds storage limit")
 	}
-	return atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw)
+	if err := atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw); err != nil {
+		return err
+	}
+	manifest.lastCheckpoint, manifest.checkpointDone = time.Now(), manifest.Done
+	return nil
 }
 
 func (m *packManager) removeManifestFile(id string) error {
@@ -378,6 +409,9 @@ func (m *packManager) removeManifestFile(id string) error {
 }
 
 func validatePackInput(input packInput) (bbox, error) {
+	if input.Regional && (input.BBox == nil || len(input.Route) != 0) {
+		return bbox{}, errors.New("regional packs require a bounding area")
+	}
 	input.Name = strings.TrimSpace(input.Name)
 	if input.Name == "" || len(input.Name) > 100 {
 		return bbox{}, errors.New("name is required and must not exceed 100 characters")
@@ -823,8 +857,8 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				estimate.Reused++
 				estimate.ReusedBytes += entry.Meta.Length
 			}
-			if estimate.Resources >= maxPackResources {
-				return packEstimate{}, fmt.Errorf("pack exceeds %d resources", maxPackResources)
+			if estimate.Resources >= packResourceLimit(input) {
+				return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
 			}
 			m.server.openFreeMap.mu.RLock()
 			vectorSources := make(map[string]int, len(m.server.openFreeMap.tiles))
@@ -848,7 +882,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			for source, sourceMaxZoom := range vectorSources {
 				// A WebView overzooms the source's native tiles. Fetch their
 				// ancestors rather than requesting nonexistent high-zoom tiles.
-				tiles, err := enumeratePackTiles(input, bounds, min(input.ZoomMin, sourceMaxZoom), min(input.ZoomMax, sourceMaxZoom), maxPackResources-estimate.Resources)
+				tiles, err := enumeratePackTiles(input, bounds, min(input.ZoomMin, sourceMaxZoom), min(input.ZoomMax, sourceMaxZoom), packResourceLimit(input)-estimate.Resources)
 				if err != nil {
 					return packEstimate{}, err
 				}
@@ -871,7 +905,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				if sourceMaxZoom < input.ZoomMin {
 					continue
 				}
-				rasterTiles, err := enumeratePackTiles(input, bounds, input.ZoomMin, min(input.ZoomMax, sourceMaxZoom), maxPackResources-estimate.Resources)
+				rasterTiles, err := enumeratePackTiles(input, bounds, input.ZoomMin, min(input.ZoomMax, sourceMaxZoom), packResourceLimit(input)-estimate.Resources)
 				if err != nil {
 					return packEstimate{}, err
 				}
@@ -901,12 +935,13 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		if m.server.elevation.tiles == nil || m.server.elevation.tiles.cacheDir == "" {
 			return packEstimate{}, errors.New("elevation packs require Terrarium tile mode with a persistent tile cache")
 		}
-		tiles, err := enumeratePackTiles(input, bounds, m.server.elevation.tiles.zoom, m.server.elevation.tiles.zoom, maxPackResources-estimate.Resources)
+		tiles, err := enumeratePackTiles(input, bounds, m.server.elevation.tiles.zoom, m.server.elevation.tiles.zoom, packResourceLimit(input)-estimate.Resources)
 		if err != nil {
 			return packEstimate{}, err
 		}
-		if len(tiles) > maxElevationPackEntries {
-			return packEstimate{}, fmt.Errorf("elevation pack exceeds %d tiles", maxElevationPackEntries)
+		maxEntries, maxBytes := packElevationLimits(input)
+		if len(tiles) > maxEntries {
+			return packEstimate{}, fmt.Errorf("elevation pack exceeds %d tiles", maxEntries)
 		}
 		estimate.ElevationTiles = tiles
 		estimate.Counts["elevation"] = len(tiles)
@@ -925,11 +960,14 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		}
 		missing := len(tiles) - elevationReused
 		estimatedTileBytes := int64(missing)*(120<<10) + elevationReusedBytes
-		if estimatedTileBytes > maxElevationPackBytes {
+		if estimatedTileBytes > maxBytes {
 			return packEstimate{}, errors.New("elevation pack exceeds its byte limit")
 		}
 		if estimatedTileBytes > m.server.elevation.tiles.diskQuota() {
 			return packEstimate{}, errors.New("elevation pack exceeds the configured tile cache quota")
+		}
+		if !m.server.elevation.tiles.canFitPack(tiles) {
+			return packEstimate{}, errors.New("elevation cache is reserved by downloaded packs; remove an old pack or increase storage")
 		}
 		elevationBytes := int64(missing) * 120 << 10
 		estimate.Scopes["elevation"] = cacheScopeStat{Bytes: elevationBytes, Entries: len(tiles)}
@@ -955,7 +993,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		poiBytes := int64(0)
 		searchBounds, boundsErr := packPOIBounds(input, bounds)
 		if boundsErr != nil {
-			reason := "route area cannot be split into bounded POI searches"
+			reason := "POI provider limits do not permit a search across this whole area; choose a city for fresh place data"
 			for _, blockedKind := range []string{"fuel", "water", "camp"} {
 				estimate.Blocked = append(estimate.Blocked, blockedPackResource{Resource: poiPackCategory(blockedKind), Reason: reason})
 			}
@@ -1008,11 +1046,15 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		}[scope]
 		estimate.Dynamic = append(estimate.Dynamic, detail)
 	}
-	if estimate.Resources > maxPackResources {
-		return packEstimate{}, fmt.Errorf("pack exceeds %d resources", maxPackResources)
+	if estimate.Resources > packResourceLimit(input) {
+		return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
 	}
 	stats := m.server.cache.stats()
-	estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-stats.Reserved)
+	reserved := stats.Reserved
+	if input.Regional {
+		reserved = max(reserved, m.regionalControlReserve())
+	}
+	estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-reserved)
 	estimate.FinalBytes = stats.Bytes + estimate.GenericBytes
 	estimate.Detail = strings.Join(estimate.Dynamic, "; ")
 	return estimate, nil
@@ -1067,13 +1109,28 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 	if err := ctx.Err(); err != nil {
 		return nil, estimate, err
 	}
+	if input.Regional {
+		if err := requirePackDiskSpace(m.server.cache.dir, estimate.EstimatedBytes); err != nil {
+			return nil, estimate, err
+		}
+		if err := m.server.cache.setReservedBytes(m.regionalControlReserve()); err != nil {
+			return nil, estimate, err
+		}
+	}
 	id, err := newPackID()
 	if err != nil {
 		return nil, estimate, err
 	}
 	now := time.Now().UTC()
-	manifest := &packManifest{ID: id, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input}
-	jobCtx, cancel := context.WithTimeout(m.server.ctx, m.jobTimeout)
+	manifest := &packManifest{ID: id, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input, Unavailable: estimate.Blocked}
+	for _, key := range estimate.ElevationTiles {
+		manifest.ElevationKeys = append(manifest.ElevationKeys, key.path())
+	}
+	timeout := m.jobTimeout
+	if input.Regional {
+		timeout = regionalJobTimeout
+	}
+	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
 	manifest.cancel = cancel
 	var pruned *packManifest
 	m.mu.Lock()
@@ -1124,6 +1181,9 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		delete(m.packs, pruned.ID)
 	}
 	m.packs[id] = manifest
+	if m.server.elevation.tiles != nil {
+		m.server.elevation.tiles.setPackPins(id, manifest.ElevationKeys)
+	}
 	copyManifest := m.publicCopyLocked(manifest)
 	m.mu.Unlock()
 	m.server.wg.Add(1)
@@ -1150,6 +1210,9 @@ func (m *packManager) matchingPackLocked(input packInput) *packManifest {
 func (m *packManager) restoreReplacedPackLocked(pruned, replacement *packManifest) error {
 	var restoreErr error
 	restoreErr = errors.Join(restoreErr, m.persistLocked(pruned))
+	if m.server.elevation.tiles != nil {
+		m.server.elevation.tiles.setPackPins(pruned.ID, pruned.ElevationKeys)
+	}
 	for _, key := range pruned.CacheKeys {
 		restoreErr = errors.Join(restoreErr, m.server.cache.pin(key, pruned.ID, true))
 	}
@@ -1206,6 +1269,10 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 	}
 	markIncomplete := func(code string) {
 		m.update(manifest, func(p *packManifest) {
+			if p.State == "incomplete" && p.ErrorCode != "" {
+				p.cancel = nil
+				return
+			}
 			p.State = "incomplete"
 			p.ErrorCode = code
 			p.cancel = nil
@@ -1253,7 +1320,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			pack.Done++
 			pack.Bytes += response.AdmittedBytes
 			updatePackResource(pack, category, false, response.AdmittedBytes, packResponseItems(category, response.Body))
-			pack.CacheKeys = appendUnique(pack.CacheKeys, response.Key)
+			pack.addCacheKey(response.Key)
 		})
 		m.releaseRejectedPin(manifest, response.Key, nil, applied)
 		return applied
@@ -1266,13 +1333,13 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		applied := m.update(manifest, func(pack *packManifest) {
 			pack.Done++
 			updatePackResource(pack, category, false, 0, 0)
-			pack.CacheKeys = appendUnique(pack.CacheKeys, key)
+			pack.addCacheKey(key)
 		})
 		m.releaseRejectedPin(manifest, key, nil, applied)
 		return applied
 	}
 	var elevationPackBytes int64
-	elevationByteLimit := int64(maxElevationPackBytes)
+	_, elevationByteLimit := packElevationLimits(manifest.Input)
 	if m.server.elevation.tiles != nil {
 		elevationByteLimit = min(elevationByteLimit, m.server.elevation.tiles.diskQuota())
 	}
@@ -1371,15 +1438,18 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			m.server.openFreeMap.mu.RLock()
 			template := m.server.openFreeMap.tiles[source]
 			m.server.openFreeMap.mu.RUnlock()
-			for _, key := range tiles {
+			if !runTileBatches(ctx, tiles, manifest.Input.Regional, func(workCtx context.Context, key tileKey) bool {
 				if fail() {
-					return
+					return false
 				}
 				endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
-				response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream"}, budget.admit)
-				if !acceptResponse(packResourceVectorMap, response, err) {
-					return
+				response, err := m.server.openFreeMap.fetchWithAdmission(workCtx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream"}, budget.admit)
+				return acceptResponse(packResourceVectorMap, response, err)
+			}) {
+				if ctx.Err() != nil {
+					fail()
 				}
+				return
 			}
 		}
 		for source, tiles := range estimate.RasterMapTiles {
@@ -1407,23 +1477,17 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		}
 	}
 	m.update(manifest, func(p *packManifest) {
-		if p.Failures == 0 && p.Done == p.Total {
+		if p.Failures == 0 && p.Done == p.Total && len(p.Unavailable) == 0 {
 			p.State = "complete"
 		} else {
 			p.State = "incomplete"
 			p.ErrorCode = "resource_failures"
+			if p.Failures == 0 && p.Done == p.Total {
+				p.ErrorCode = "provider_limits"
+			}
 		}
 		p.cancel = nil
 	})
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, current := range values {
-		if current == value {
-			return values
-		}
-	}
-	return append(values, value)
 }
 
 func (m *packManager) releaseRejectedPin(manifest *packManifest, key string, pinErr error, applied bool) {
@@ -1438,8 +1502,14 @@ func (m *packManager) update(manifest *packManifest, change func(*packManifest))
 	if manifest.deleted {
 		return false
 	}
+	previousState := manifest.State
 	change(manifest)
 	manifest.UpdatedAt = time.Now().UTC()
+	// Regional packs checkpoint bounded batches instead of rewriting an
+	// ever-growing multi-megabyte manifest for every individual tile.
+	if manifest.Input.Regional && previousState == "running" && manifest.State == "running" && manifest.Done-manifest.checkpointDone < regionalBatchSize && time.Since(manifest.lastCheckpoint) < 5*time.Second {
+		return true
+	}
 	if err := m.persistLocked(manifest); err != nil {
 		manifest.State = "incomplete"
 		manifest.ErrorCode = "storage_error"
@@ -1492,13 +1562,23 @@ func (m *packManager) summaryLocked(p *packManifest) packSummary {
 		copy := *p.Input.BBox
 		bounds = &copy
 	}
-	return packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	summary := packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Unavailable: append([]blockedPackResource(nil), p.Unavailable...)}
+	if p.Input.Regional {
+		summary.BatchesTotal = (p.Total + regionalBatchSize - 1) / regionalBatchSize
+		summary.BatchesDone = p.Done / regionalBatchSize
+		if p.Done == p.Total {
+			summary.BatchesDone = summary.BatchesTotal
+		}
+	}
+	return summary
 }
 
 func (m *packManager) publicCopyLocked(p *packManifest) packManifest {
 	copyManifest := *p
 	copyManifest.Input = packInput{}
 	copyManifest.CacheKeys = nil
+	copyManifest.ElevationKeys = nil
+	copyManifest.cacheKeySet = nil
 	copyManifest.Resources = clonePackResources(p.Resources)
 	return copyManifest
 }
@@ -1533,6 +1613,9 @@ func (m *packManager) delete(id string) (bool, error) {
 }
 
 func (m *packManager) cleanupPack(p *packManifest) error {
+	if m.server.elevation.tiles != nil {
+		m.server.elevation.tiles.setPackPins(p.ID, nil)
+	}
 	var persistenceErr error
 	for _, key := range p.CacheKeys {
 		persistenceErr = errors.Join(persistenceErr, m.server.cache.pin(key, p.ID, false))

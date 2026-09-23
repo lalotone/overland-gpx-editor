@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["frontend/src", "../src/lib", "../src/components/MapLayers.tsx", "../src/components/ColoredTrack.tsx"],
+  "references": []
+}

@@ -5,6 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mobile": "vite --config mobile/vite.config.ts",
+    "build:mobile": "tsc -p mobile/tsconfig.json && npm run clean:mobile && vite build --config mobile/vite.config.ts",
+    "clean:mobile": "node -e \"require('fs').rmSync('mobile/frontend/dist/assets',{recursive:true,force:true})\"",
+    "check:mobile": "tsc -p mobile/tsconfig.json",
+    "test:mobile": "playwright test --config mobile/playwright.config.ts",
     "build": "tsc && npm run clean && vite build",
     "clean": "node -e \"require('fs').rmSync('web/dist/assets',{recursive:true,force:true})\"",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",

@@ -1264,6 +1264,8 @@ func requirePackDiskSpace(path string, required int64) error {
 func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manifest *packManifest, estimate packEstimate) {
 	defer m.server.wg.Done()
 	defer cancel()
+	ctx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
 	if !m.update(manifest, func(p *packManifest) { p.State = "running" }) {
 		return
 	}
@@ -1301,7 +1303,8 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			return false
 		}
 		var budgetErr packBudgetError
-		if errors.As(err, &budgetErr) || strings.Contains(err.Error(), "admission") || strings.Contains(err.Error(), "quota") || strings.Contains(err.Error(), "entry limit") {
+		var storageErr cacheStorageLimitError
+		if errors.As(err, &budgetErr) || errors.As(err, &storageErr) || errors.Is(err, errTileQuotaPinned) {
 			markIncomplete("resource_limit")
 			return false
 		}
@@ -1338,143 +1341,154 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		m.releaseRejectedPin(manifest, key, nil, applied)
 		return applied
 	}
-	var elevationPackBytes int64
-	_, elevationByteLimit := packElevationLimits(manifest.Input)
-	if m.server.elevation.tiles != nil {
-		elevationByteLimit = min(elevationByteLimit, m.server.elevation.tiles.diskQuota())
-	}
-	for _, key := range estimate.ElevationTiles {
-		if fail() {
-			return
+	elevation := func() bool {
+		_, limit := packElevationLimits(manifest.Input)
+		if m.server.elevation.tiles != nil {
+			limit = min(limit, m.server.elevation.tiles.diskQuota())
 		}
-		wasCached := m.server.elevation.tiles.have(key)
-		_, err := m.server.elevation.tiles.grid(ctx, key)
-		var tileBytes int64
-		if err == nil {
-			if size, ok := m.server.elevation.tiles.diskFileSize(key); ok {
-				tileBytes = size
+		elevationBudget := &packAdmissionBudget{limit: limit}
+		// Leave slots for interactive elevation lookups. The tile store also
+		// applies its global six-request bound across packs and other callers.
+		return runTileBatchesWithWorkers(ctx, estimate.ElevationTiles, 4, func(workCtx context.Context, key tileKey) bool {
+			if fail() {
+				return false
 			}
-			if elevationPackBytes+tileBytes > elevationByteLimit {
-				err = errors.New("elevation pack exceeded its byte limit")
+			wasCached := m.server.elevation.tiles.have(key)
+			_, err := m.server.elevation.tiles.grid(workCtx, key)
+			var tileBytes int64
+			if err == nil {
+				tileBytes, _ = m.server.elevation.tiles.diskFileSize(key)
+				err = elevationBudget.admit(tileBytes)
 			}
-		}
-		newBytes := tileBytes
-		if wasCached {
-			newBytes = 0
-		}
-		if !m.update(manifest, func(p *packManifest) {
-			p.Done++
+			newBytes := tileBytes
+			if wasCached {
+				newBytes = 0
+			}
+			if !m.update(manifest, func(p *packManifest) {
+				p.Done++
+				if err != nil {
+					p.Failures++
+				}
+				p.Bytes += newBytes
+				updatePackResource(p, packResourceElevation, err != nil, newBytes, 0)
+			}) {
+				return false
+			}
 			if err != nil {
-				p.Failures++
-			}
-			p.Bytes += newBytes
-			updatePackResource(p, packResourceElevation, err != nil, newBytes, 0)
-		}) {
-			return
-		}
-		if err != nil {
-			if fail() {
-				return
-			}
-			if elevationPackBytes+tileBytes > elevationByteLimit {
-				markIncomplete("resource_limit")
-				return
-			}
-			continue
-		}
-		elevationPackBytes += tileBytes
-	}
-	if estimate.Counts["fuel"] > 0 {
-		if fail() {
-			return
-		}
-		p := m.server.providers["fuel"]
-		response, err := m.server.outbound.do(ctx, cachedRequest{policy: p, method: http.MethodGet, url: p.baseURL.String(), params: "national-snapshot", cacheable: true, headers: map[string]string{"Accept": "application/json"}, validate: validateFuelResponse, admit: budget.admit, cancelWithCaller: true})
-		if !acceptResponse(packResourceFuelPrices, response, err) {
-			return
-		}
-	}
-	for _, resource := range estimate.POIRequests {
-		if fail() {
-			return
-		}
-		request := resource.Request
-		request.admit = budget.admit
-		request.cancelWithCaller = true
-		response, err := m.server.outbound.do(ctx, request)
-		if !acceptResponse(resource.Category, response, err) {
-			return
-		}
-	}
-	if m.server.openFreeMap != nil {
-		m.server.openFreeMap.mu.RLock()
-		coreKeys := append([]string(nil), m.server.openFreeMap.coreKeys...)
-		generation := m.server.openFreeMap.generation
-		m.server.openFreeMap.mu.RUnlock()
-		if estimate.Counts["openfreemap-core"] > 0 {
-			for _, key := range coreKeys {
-				if fail() {
-					return
-				}
-				if !pinExisting(packResourceVectorMap, key) {
-					return
-				}
-			}
-		}
-		m.server.openFreeMap.mu.RLock()
-		glyphTemplate := m.server.openFreeMap.glyphs
-		m.server.openFreeMap.mu.RUnlock()
-		for _, glyph := range estimate.Glyphs {
-			if fail() {
-				return
-			}
-			endpoint := strings.NewReplacer("{fontstack}", url.PathEscape(glyph.Font), "{range}", glyph.Range).Replace(glyphTemplate)
-			response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, generation+":glyph:"+glyph.Font+":"+glyph.Range, []string{"application/x-protobuf", "application/octet-stream", "application/vnd.mapbox-vector-tile"}, budget.admit)
-			if !acceptResponse(packResourceVectorMap, response, err) {
-				return
-			}
-		}
-		for source, tiles := range estimate.MapTiles {
-			m.server.openFreeMap.mu.RLock()
-			template := m.server.openFreeMap.tiles[source]
-			m.server.openFreeMap.mu.RUnlock()
-			if !runTileBatches(ctx, tiles, manifest.Input.Regional, func(workCtx context.Context, key tileKey) bool {
 				if fail() {
 					return false
 				}
-				endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
-				response, err := m.server.openFreeMap.fetchWithAdmission(workCtx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream"}, budget.admit)
-				return acceptResponse(packResourceVectorMap, response, err)
-			}) {
-				if ctx.Err() != nil {
-					fail()
-				}
-				return
-			}
-		}
-		for source, tiles := range estimate.RasterMapTiles {
-			m.server.openFreeMap.mu.RLock()
-			template := m.server.openFreeMap.rasters[source]
-			m.server.openFreeMap.mu.RUnlock()
-			for _, key := range tiles {
-				if fail() {
-					return
-				}
-				endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
-				response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"image/png", "image/jpeg", "image/webp"}, budget.admit)
-				if !acceptResponse(packResourceVectorMap, response, err) {
-					return
+				var budgetErr packBudgetError
+				var storageErr cacheStorageLimitError
+				if errors.As(err, &budgetErr) || errors.As(err, &storageErr) || errors.Is(err, errTileQuotaPinned) {
+					markIncomplete("resource_limit")
+					return false
 				}
 			}
-		}
+			return true
+		})
 	}
-	for _, resource := range estimate.ExistingKeys {
-		if fail() {
-			return
+	auxiliary := func() bool {
+		if estimate.Counts["fuel"] > 0 {
+			if fail() {
+				return false
+			}
+			p := m.server.providers["fuel"]
+			response, err := m.server.outbound.do(ctx, cachedRequest{policy: p, method: http.MethodGet, url: p.baseURL.String(), params: "national-snapshot", cacheable: true, headers: map[string]string{"Accept": "application/json"}, validate: validateFuelResponse, admit: budget.admit, cancelWithCaller: true})
+			if !acceptResponse(packResourceFuelPrices, response, err) {
+				return false
+			}
 		}
-		if !pinExisting(resource.Category, resource.Key) {
-			return
+		for _, resource := range estimate.POIRequests {
+			if fail() {
+				return false
+			}
+			request := resource.Request
+			request.admit = budget.admit
+			request.cancelWithCaller = true
+			response, err := m.server.outbound.do(ctx, request)
+			if !acceptResponse(resource.Category, response, err) {
+				return false
+			}
 		}
+		for _, resource := range estimate.ExistingKeys {
+			if fail() || !pinExisting(resource.Category, resource.Key) {
+				return false
+			}
+		}
+		return true
+	}
+	maps := func() bool {
+		if m.server.openFreeMap != nil {
+			m.server.openFreeMap.mu.RLock()
+			coreKeys := append([]string(nil), m.server.openFreeMap.coreKeys...)
+			generation := m.server.openFreeMap.generation
+			m.server.openFreeMap.mu.RUnlock()
+			if estimate.Counts["openfreemap-core"] > 0 {
+				for _, key := range coreKeys {
+					if fail() {
+						return false
+					}
+					if !pinExisting(packResourceVectorMap, key) {
+						return false
+					}
+				}
+			}
+			m.server.openFreeMap.mu.RLock()
+			glyphTemplate := m.server.openFreeMap.glyphs
+			m.server.openFreeMap.mu.RUnlock()
+			for _, glyph := range estimate.Glyphs {
+				if fail() {
+					return false
+				}
+				endpoint := strings.NewReplacer("{fontstack}", url.PathEscape(glyph.Font), "{range}", glyph.Range).Replace(glyphTemplate)
+				response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, generation+":glyph:"+glyph.Font+":"+glyph.Range, []string{"application/x-protobuf", "application/octet-stream", "application/vnd.mapbox-vector-tile"}, budget.admit)
+				if !acceptResponse(packResourceVectorMap, response, err) {
+					return false
+				}
+			}
+			for source, tiles := range estimate.MapTiles {
+				m.server.openFreeMap.mu.RLock()
+				template := m.server.openFreeMap.tiles[source]
+				m.server.openFreeMap.mu.RUnlock()
+				if !runTileBatches(ctx, tiles, manifest.Input.Regional, func(workCtx context.Context, key tileKey) bool {
+					if fail() {
+						return false
+					}
+					endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
+					response, err := m.server.openFreeMap.fetchWithAdmission(workCtx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream"}, budget.admit)
+					return acceptResponse(packResourceVectorMap, response, err)
+				}) {
+					if ctx.Err() != nil {
+						fail()
+					}
+					return false
+				}
+			}
+			for source, tiles := range estimate.RasterMapTiles {
+				m.server.openFreeMap.mu.RLock()
+				template := m.server.openFreeMap.rasters[source]
+				m.server.openFreeMap.mu.RUnlock()
+				for _, key := range tiles {
+					if fail() {
+						return false
+					}
+					endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
+					response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"image/png", "image/jpeg", "image/webp"}, budget.admit)
+					if !acceptResponse(packResourceVectorMap, response, err) {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
+	if !runPackStages(stopWork, elevation, maps, auxiliary) {
+		fail()
+		return
+	}
+	if fail() {
+		return
 	}
 	m.update(manifest, func(p *packManifest) {
 		if p.Failures == 0 && p.Done == p.Total && len(p.Unavailable) == 0 {

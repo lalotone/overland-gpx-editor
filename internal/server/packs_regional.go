@@ -48,7 +48,15 @@ func (m *packManager) regionalControlReserve() int64 {
 // ordinary per-pack tile limit without creating dozens of evictable child packs.
 // Batch workers share the existing provider queue, admission budget and progress.
 func runTileBatches(ctx context.Context, keys []tileKey, regional bool, fetch func(context.Context, tileKey) bool) bool {
-	if !regional {
+	workers := 1
+	if regional {
+		workers = regionalWorkers
+	}
+	return runTileBatchesWithWorkers(ctx, keys, workers, fetch)
+}
+
+func runTileBatchesWithWorkers(ctx context.Context, keys []tileKey, workerCount int, fetch func(context.Context, tileKey) bool) bool {
+	if workerCount == 1 {
 		for _, key := range keys {
 			if !fetch(ctx, key) {
 				return false
@@ -65,7 +73,7 @@ func runTileBatches(ctx context.Context, keys []tileKey, regional bool, fetch fu
 		var next atomic.Int64
 		var failed atomic.Bool
 		var workers sync.WaitGroup
-		for range regionalWorkers {
+		for range workerCount {
 			workers.Go(func() {
 				for batchCtx.Err() == nil {
 					index := start + int(next.Add(1)) - 1
@@ -87,6 +95,23 @@ func runTileBatches(ctx context.Context, keys []tileKey, regional bool, fetch fu
 		}
 	}
 	return true
+}
+
+// Every stage shares a cancellation context. A fatal error stops its siblings,
+// and the coordinator waits for all workers before publishing a terminal state.
+func runPackStages(stop context.CancelFunc, stages ...func() bool) bool {
+	var failed atomic.Bool
+	var workers sync.WaitGroup
+	for _, stage := range stages {
+		workers.Go(func() {
+			if !stage() {
+				failed.Store(true)
+				stop()
+			}
+		})
+	}
+	workers.Wait()
+	return !failed.Load()
 }
 
 // Called under packManager.mu; a set keeps whole-region pin bookkeeping linear.

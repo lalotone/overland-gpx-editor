@@ -86,14 +86,25 @@ func TestRegionalVectorPackCompletesAndRestoresAllBatchPins(t *testing.T) {
 	cfg := Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true}
 	s, err := New(cfg)
 	require.NoError(t, err)
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = s.Close()
+		}
+	})
 	input := packInput{Regional: true, Name: "Batched region", BBox: &bbox{South: -20, West: -80, North: 60, East: 80}, ZoomMin: 5, ZoomMax: 5, Layers: []string{"openfreemap"}}
 	pack, _, err := s.packs.startContext(t.Context(), input)
 	require.NoError(t, err)
-	summary := waitForPackState(t, s.packs, pack.ID, "complete")
+	var summary packSummary
+	require.Eventually(t, func() bool {
+		summary, _ = s.packs.publicManifest(pack.ID)
+		return summary.State == "complete"
+	}, 30*time.Second, 10*time.Millisecond)
 	assert.Greater(t, summary.BatchesTotal, 1)
 	assert.Equal(t, summary.BatchesTotal, summary.BatchesDone)
 	assert.Equal(t, summary.Total, summary.Done)
 	require.NoError(t, s.Close())
+	closed = true
 	before := calls.Load()
 	cfg.OfflineMode = "cache-only"
 	reopened, err := New(cfg)

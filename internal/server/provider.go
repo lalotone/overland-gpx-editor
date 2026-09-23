@@ -320,13 +320,7 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 		if request.cancelWithCaller {
 			fetchParent = ctx
 		}
-		fetchTimeout := o.fetchTimeout
-		if request.policy.fetchTimeout > 0 {
-			fetchTimeout = request.policy.fetchTimeout
-		}
-		fetchCtx, cancel := context.WithTimeout(fetchParent, fetchTimeout)
-		defer cancel()
-		networkCtx, release, online := o.modes.networkContext(fetchCtx)
+		networkCtx, release, online := o.modes.networkContext(fetchParent)
 		if !online {
 			if stale != nil && staleAllowed(stale.Meta, o.now().UTC()) {
 				fetch.resp = responseFromEntry(stale, key, "stale")
@@ -375,6 +369,12 @@ func responseFromEntry(entry *cacheEntry, key, state string) cachedResponse {
 
 func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key string, stale *cacheEntry) (cachedResponse, error) {
 	p := request.policy
+	fetchTimeout := o.fetchTimeout
+	if p.fetchTimeout > 0 {
+		fetchTimeout = p.fetchTimeout
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
 	now := o.now().UTC()
 	requestURL, err := url.Parse(request.url)
 	if err != nil || !strings.EqualFold(requestURL.Scheme, p.baseURL.Scheme) {
@@ -389,15 +389,17 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 		}
 		return cachedResponse{}, errors.New("upstream temporarily unavailable")
 	}
+	releaseProvider := func() {}
 	if p.group != nil {
-		release, err := p.group.acquire(ctx)
+		release, err := p.group.acquire(fetchCtx)
 		if err != nil {
 			return cachedResponse{}, err
 		}
-		defer release()
+		releaseProvider = sync.OnceFunc(release)
+		defer releaseProvider()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, request.method, request.url, bytes.NewReader(request.body))
+	req, err := http.NewRequestWithContext(fetchCtx, request.method, request.url, bytes.NewReader(request.body))
 	if err != nil {
 		return cachedResponse{}, err
 	}
@@ -495,6 +497,10 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 	}
 	o.recordSuccess(p.name, now)
 
+	// The provider request is finished; local admission may wait a full window.
+	_ = resp.Body.Close()
+	cancel()
+	releaseProvider()
 	meta := cacheMetadata{
 		Key: key, Scope: p.scope, Provider: p.name, SourceFingerprint: p.sourceFingerprint,
 		Status: resp.StatusCode, Headers: safeResponseHeaders(resp.Header), ContentType: contentType,
@@ -505,7 +511,7 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 	state := "bypass"
 	permitted := cachePermitted(resp.Header, p.applicationData)
 	if request.cacheable && permitted {
-		admitted, putErr := o.store.putWithAdmission(meta, body, request.admit)
+		admitted, putErr := o.store.putForRequest(ctx, meta, body, request.admit)
 		if putErr == nil {
 			state = "miss"
 			return cachedResponse{Status: resp.StatusCode, Headers: meta.Headers, Body: body, State: state, Meta: meta, Key: key, AdmittedBytes: admitted}, nil

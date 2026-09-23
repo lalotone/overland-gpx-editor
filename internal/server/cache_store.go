@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -54,6 +55,14 @@ type cacheEntry struct {
 	Body []byte
 }
 
+type cacheStorageLimitError string
+
+func (e cacheStorageLimitError) Error() string { return string(e) }
+
+type cacheAdmissionRateError struct{ retryAfter time.Duration }
+
+func (e *cacheAdmissionRateError) Error() string { return "cache distinct-key admission rate exceeded" }
+
 type cacheStore struct {
 	dir        string
 	entriesDir string
@@ -74,6 +83,7 @@ type cacheStore struct {
 	entries         map[string]*cacheMetadata
 	bytes           int64
 	now             func() time.Time
+	waitAdmission   func(context.Context, time.Duration) error // optional test clock
 	admissionWindow time.Time
 	admissions      int
 	getHits         atomic.Uint64
@@ -672,6 +682,40 @@ func (s *cacheStore) put(meta cacheMetadata, body []byte) error {
 	return err
 }
 
+// Bulk requests retain their already-fetched body while waiting, rather than
+// repeating provider traffic. No cache lock is held during the cancellable wait.
+// Passive requests still fail admission immediately and serve the uncached body.
+func (s *cacheStore) putForRequest(ctx context.Context, meta cacheMetadata, body []byte, admit func(int64) error) (int64, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		bytes, err := s.putWithAdmission(meta, body, admit)
+		var rateErr *cacheAdmissionRateError
+		if admit == nil || !errors.As(err, &rateErr) {
+			return bytes, err
+		}
+		wait := s.waitAdmission
+		if wait == nil {
+			wait = waitCacheAdmission
+		}
+		if err := wait(ctx, rateErr.retryAfter); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func waitCacheAdmission(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit func(int64) error) (int64, error) {
 	if !s.writable {
 		return 0, nil
@@ -704,19 +748,13 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 	meta.metadataLength = int64(len(raw))
 	required := meta.Length + meta.metadataLength
 	if required > s.maxBytes {
-		return 0, errors.New("cache entry exceeds quota")
+		return 0, cacheStorageLimitError("cache entry exceeds quota")
 	}
 	oldBytes := int64(0)
 	if old != nil {
 		oldBytes = old.Length + old.metadataLength
 	}
 	admitted := max(int64(0), required-oldBytes)
-	if admit != nil {
-		if err := admit(admitted); err != nil {
-			return 0, err
-		}
-	}
-
 	s.mu.Lock()
 	if s.entries[meta.Key] == nil {
 		now := s.now()
@@ -725,16 +763,22 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 		}
 		limit := max(64, min(1000, s.maxEntries/100))
 		if s.admissions >= limit {
+			retryAfter := s.admissionWindow.Add(time.Minute).Sub(now)
 			s.mu.Unlock()
-			return 0, errors.New("cache distinct-key admission rate exceeded")
+			return 0, &cacheAdmissionRateError{retryAfter: retryAfter}
 		}
-		s.admissions++
 	}
 	if err := s.admitLocked(meta.Scope, meta.Key, required); err != nil {
 		s.mu.Unlock()
 		return 0, err
 	}
 	s.mu.Unlock()
+	// Rate/quota rejections must not charge the pack's shared byte budget.
+	if admit != nil {
+		if err := admit(admitted); err != nil {
+			return 0, err
+		}
+	}
 
 	bodyPath, metaPath, _ := s.relativePaths(meta.Scope, meta.Key)
 	if err := s.root.MkdirAll(filepath.Dir(bodyPath), 0o700); err != nil {
@@ -752,6 +796,9 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 	copyMeta := meta
 	s.entries[meta.Key] = &copyMeta
 	s.bytes += required
+	if !replacing {
+		s.admissions++
+	}
 	s.mu.Unlock()
 	return admitted, nil
 }
@@ -905,10 +952,10 @@ func (s *cacheStore) admitLocked(scope, replacing string, required int64) error 
 		}
 	}
 	if len(s.entries)-oldCount >= s.maxEntries || s.scopeCountLocked(scope)-oldCount >= perScopeCap {
-		return errors.New("cache entry limit reached by pinned data")
+		return cacheStorageLimitError("cache entry limit reached by pinned data")
 	}
 	if s.bytes-oldBytes+required > s.maxBytes-s.reserved {
-		return errors.New("cache byte quota reached by pinned data")
+		return cacheStorageLimitError("cache byte quota reached by pinned data")
 	}
 	return nil
 }

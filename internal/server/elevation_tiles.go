@@ -580,7 +580,7 @@ func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
 	s.diskFiles[path] = tileDiskFile{key: key, size: int64(len(raw)), lastAccess: time.Now().UTC()}
 	s.diskBytes += int64(len(raw))
 	if s.diskBytes > s.maxDiskBytes {
-		return errors.New("elevation tile cache quota exceeded after write")
+		return cacheStorageLimitError("elevation tile cache quota exceeded after write")
 	}
 	return nil
 }
@@ -651,7 +651,7 @@ func tileKeyFromPath(path string) (tileKey, bool) {
 
 func (s *tileStore) makeDiskRoomLocked(path string, size int64) error {
 	if size > s.maxDiskBytes {
-		return errors.New("elevation tile exceeds cache quota")
+		return cacheStorageLimitError("elevation tile exceeds cache quota")
 	}
 	old := s.diskFiles[path]
 	for s.diskBytes-old.size+size > s.maxDiskBytes {

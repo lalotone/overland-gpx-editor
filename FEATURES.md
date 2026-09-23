@@ -135,7 +135,7 @@ the service is down, the OSM fuel layer answers as before.
 
 - Loading or selecting a GPX automatically estimates and prepares its bounded
   route pack; edits do not restart the job. Recent packs remain available, with
-  the oldest completed automatic pack released at the manifest limit.
+  storage-based manifest accounting and interrupted-pack retries that reuse their identity.
 - A compact readiness pill sits in the same map-control stack as Terrain. Its
   detail panel reports vector maps, elevation, fuel, water and campsites with
   independent progress, item counts and unavailable reasons.

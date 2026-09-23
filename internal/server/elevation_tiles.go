@@ -80,18 +80,19 @@ type tileFetch struct {
 }
 
 type tileStore struct {
-	url          string
-	zoom         int
-	cacheDir     string
-	cacheRoot    *os.Root
-	cacheErr     error
-	maxDiskBytes int64
-	client       *http.Client
-	userAgent    string
-	sem          chan struct{}
-	modes        *offlineModeController
-	ctx          context.Context
-	wg           *sync.WaitGroup
+	url                 string
+	zoom                int
+	cacheDir            string
+	cacheRoot           *os.Root
+	cacheErr            error
+	maxDiskBytes        int64
+	useAvailableStorage bool
+	client              *http.Client
+	userAgent           string
+	sem                 chan struct{}
+	modes               *offlineModeController
+	ctx                 context.Context
+	wg                  *sync.WaitGroup
 
 	mu       sync.Mutex
 	lru      *list.List // front = most recently used, values are lruEntry
@@ -467,7 +468,7 @@ func (s *tileStore) stats() tileCacheStats {
 	diskEntries, diskBytes := len(s.diskFiles), s.diskBytes
 	s.diskMu.Unlock()
 	return tileCacheStats{
-		MemoryEntries: memoryEntries, DiskEntries: diskEntries, DiskBytes: diskBytes, DiskQuota: s.maxDiskBytes, InFlight: inFlight,
+		MemoryEntries: memoryEntries, DiskEntries: diskEntries, DiskBytes: diskBytes, DiskQuota: s.diskQuota(), InFlight: inFlight,
 		MemoryHits: s.memoryHits.Load(), DiskHits: s.diskHits.Load(), CacheMisses: s.cacheMisses.Load(), SharedLoads: s.sharedLoads.Load(), OfflineMisses: s.offlineMisses.Load(),
 		NetworkRequests: s.networkRequests.Load(), NetworkFailures: s.networkFailures.Load(), NetworkStatus2xx: s.networkStatus2xx.Load(), NetworkStatus4xx: s.networkStatus4xx.Load(), NetworkStatus5xx: s.networkStatus5xx.Load(),
 		NetworkDuration: time.Duration(s.networkDurationNS.Load()), NetworkMaxDuration: time.Duration(s.networkMaxDurationNS.Load()),
@@ -561,6 +562,11 @@ func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
 	_ = s.cacheRoot.Chmod(dir, 0o700)
 	if err := s.makeDiskRoomLocked(path, int64(len(raw))); err != nil {
 		return err
+	}
+	if s.useAvailableStorage {
+		if err := requirePackDiskSpace(s.cacheDir, int64(len(raw))); err != nil {
+			return err
+		}
 	}
 	tmp, err := writeTempFileAt(s.cacheRoot, dir, raw)
 	if err != nil {
@@ -876,7 +882,14 @@ func (s *tileStore) diskStats() (int64, int) {
 	return s.diskBytes, len(s.diskFiles)
 }
 
-func (s *tileStore) diskQuota() int64 { return s.maxDiskBytes }
+func (s *tileStore) diskQuota() int64 {
+	if !s.useAvailableStorage {
+		return s.maxDiskBytes
+	}
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	return availableStorageQuota(s.cacheDir, s.diskBytes)
+}
 
 func (s *tileStore) progress() prefetchProgress {
 	s.prefetch.mu.Lock()

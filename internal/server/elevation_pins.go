@@ -45,7 +45,11 @@ func (s *tileStore) canFitPack(keys []tileKey) bool {
 			required += 120 << 10
 		}
 	}
-	return required <= s.maxDiskBytes
+	quota := s.maxDiskBytes
+	if s.useAvailableStorage {
+		quota = availableStorageQuota(s.cacheDir, s.diskBytes)
+	}
+	return required <= quota
 }
 
 func (s *tileStore) finishPackRestore() error {

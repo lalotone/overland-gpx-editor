@@ -191,6 +191,12 @@ export function useDownloads(
       setPhase(`Preparing ${name}…`)
       await prepareRoutingData(runtime, regionId)
       const pack = await startPack(runtime, body)
+      if (pack) {
+        // Retries now keep their pack ID. Replace its old failed snapshot before
+        // allowing notifications for the new attempt.
+        setPacks((previous) => [pack, ...previous.filter((item) => item.id !== pack.id)])
+        notified.current.delete(pack.id)
+      }
       setTarget({ area: selected, region: regionId, pack: pack?.id })
       setPacks(await fetchPacks(runtime))
     } catch (reason) {

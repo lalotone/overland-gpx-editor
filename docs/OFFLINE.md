@@ -202,16 +202,24 @@ per server. This does not change the built-in profiles or saved GPX contents.
 Opening or selecting a GPX makes its route the active automatic pack. The
 frontend estimates first, then starts preparation without a second user action.
 The readiness control reports each resource independently and replaces the
-active status when another route is loaded. Recent packs remain pinned; once
-the manifest limit is reached, starting a new automatic pack releases the oldest
-completed automatic one. Editing an already loaded track does not restart the
-job.
+active status when another route is loaded. Packs remain pinned until removed;
+there is no fixed retained-pack count. Their metadata is charged to storage:
+running jobs reserve room to grow, completed manifests occupy their actual size,
+and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
+identity and preserves its pins. Editing an already loaded track does not
+restart the job.
 
 Estimates perform no provider traffic. They report resource counts, estimated
 and reusable bytes, remaining quota, and every blocked provider. Long and
 antimeridian routes are split into bounded corridor POI searches. Jobs have hard
 count, byte, zoom, coordinate and worker limits, can be cancelled through the
 API, and persist progress after each resource.
+
+Android uses available filesystem space instead of fixed map/elevation cache
+byte quotas, rechecks free space on writes, and keeps a 64 MiB safety margin.
+The two caches share that free space; their reported capacities are not additive.
+The global entry/index bound, per-job enumeration limits, concurrent-job bound
+and provider-worker limits still protect memory and upstream services.
 
 A completed pack may contain Terrarium corridor tiles, one fuel snapshot,
 bounded trip POIs, selected exact cached data and bounded OpenFreeMap coverage.

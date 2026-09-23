@@ -65,19 +65,20 @@ type cacheAdmissionRateError struct{ retryAfter time.Duration }
 func (e *cacheAdmissionRateError) Error() string { return "cache distinct-key admission rate exceeded" }
 
 type cacheStore struct {
-	dir        string
-	entriesDir string
-	packsDir   string
-	tmpDir     string
-	entriesRel string
-	packsRel   string
-	tmpRel     string
-	root       *os.Root
-	removeFile func(string) error
-	maxBytes   int64
-	maxEntries int
-	reserved   int64
-	writable   bool
+	dir                 string
+	entriesDir          string
+	packsDir            string
+	tmpDir              string
+	entriesRel          string
+	packsRel            string
+	tmpRel              string
+	root                *os.Root
+	removeFile          func(string) error
+	maxBytes            int64
+	maxEntries          int
+	reserved            int64
+	writable            bool
+	useAvailableStorage bool
 
 	mu                  sync.Mutex
 	writeMu             sync.Mutex
@@ -106,6 +107,31 @@ func (s *cacheStore) setReservedBytes(bytes int64) error {
 	}
 	if bytes < 0 || bytes > s.maxBytes {
 		return fmt.Errorf("offline cache quota is smaller than required control storage")
+	}
+	s.reserved = bytes
+	return nil
+}
+
+// Reserve growing control files against the same storage quota as responses.
+// Existing downloaded data stays pinned; only unpinned cache entries may move.
+func (s *cacheStore) reserveControlStorage(bytes int64) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bytes < 0 || bytes > s.maxBytes {
+		return cacheStorageLimitError("pack metadata exceeds cache storage quota")
+	}
+	if bytes > s.reserved {
+		for s.bytes > s.maxBytes-bytes {
+			evicted, err := s.evictLRULocked("")
+			if err != nil {
+				return err
+			}
+			if !evicted {
+				return cacheStorageLimitError("cache storage quota is occupied by downloaded packs")
+			}
+		}
 	}
 	s.reserved = bytes
 	return nil
@@ -446,7 +472,7 @@ func (s *cacheStore) evictLoadedGlobalLocked(candidates []*cacheMetadata, counts
 }
 
 func (s *cacheStore) evictLoadedScopesLocked(candidates []*cacheMetadata, counts map[string]int) error {
-	perScopeCap := max(1, s.maxEntries/4)
+	perScopeCap := s.scopeEntryLimit()
 	for _, candidate := range candidates {
 		if counts[candidate.Scope] <= perScopeCap {
 			continue
@@ -786,6 +812,11 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 	}
 	s.mu.Unlock()
 	// Rate/quota rejections must not charge the pack's shared byte budget.
+	if s.useAvailableStorage {
+		if err := requirePackDiskSpace(s.dir, required); err != nil {
+			return 0, err
+		}
+	}
 	if admit != nil {
 		if err := admit(admitted); err != nil {
 			return 0, err
@@ -971,7 +1002,7 @@ func (s *cacheStore) makeRoomLocked(scope, replacing string, required int64) err
 		oldBytes = old.Length + old.metadataLength
 		oldCount = 1
 	}
-	perScopeCap := max(1, s.maxEntries/4)
+	perScopeCap := s.scopeEntryLimit()
 	for len(s.entries)-oldCount >= s.maxEntries || s.scopeCountLocked(scope)-oldCount >= perScopeCap ||
 		s.bytes-oldBytes+required > s.maxBytes-s.reserved {
 		evicted, err := s.evictLRULocked(replacing)
@@ -993,6 +1024,13 @@ func (s *cacheStore) makeRoomLocked(scope, replacing string, required int64) err
 
 func (s *cacheStore) scopeCountLocked(scope string) int {
 	return s.scopeCounts[scope]
+}
+
+func (s *cacheStore) scopeEntryLimit() int {
+	if s.useAvailableStorage {
+		return s.maxEntries
+	}
+	return max(1, s.maxEntries/4)
 }
 
 func earlierCacheExpiry(current time.Time, meta *cacheMetadata) time.Time {
@@ -1216,6 +1254,9 @@ func (s *cacheStore) stats() cacheStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stats := cacheStats{Writable: s.writable, Bytes: s.bytes, Quota: s.maxBytes, Reserved: s.reserved, Entries: len(s.entries), Hits: s.getHits.Load(), Misses: s.getMisses.Load(), Scopes: map[string]cacheScopeStat{}}
+	if s.useAvailableStorage {
+		stats.Quota = availableStorageQuota(s.dir, s.bytes+s.reserved)
+	}
 	for _, meta := range s.entries {
 		scope := stats.Scopes[meta.Scope]
 		scope.Bytes += meta.Length + meta.metadataLength

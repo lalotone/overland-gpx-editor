@@ -205,7 +205,8 @@ The Go server keeps policy-permitted provider responses in
 pack for that route. The **Offline** pill appears directly below Terrain and
 shows live readiness for the vector map, elevation, fuel, water and campsites;
 open it for per-resource progress and item counts. Recent prepared routes remain
-pinned; at the manifest limit the oldest completed automatic pack is released.
+pinned until removed. Pack metadata counts against storage rather than a fixed
+number of saved packs, and interrupted downloads reuse their existing manifest.
 
 Explore can also download a rectangular area without a GPX. Draw the bounds and
 the estimate updates automatically before download. Completed bounds are shown

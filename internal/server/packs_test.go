@@ -541,7 +541,7 @@ func TestPackStartReusesIdenticalActiveRoute(t *testing.T) {
 	}
 }
 
-func TestPackStartEnforcesActiveAndStoredCeilingsBeforeEstimating(t *testing.T) {
+func TestPackStartEnforcesActiveCeilingBeforeEstimating(t *testing.T) {
 	s := newPackTestServer(t)
 	input := packInput{Name: "capacity", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}}
 	s.packs.mu.Lock()
@@ -554,23 +554,13 @@ func TestPackStartEnforcesActiveAndStoredCeilingsBeforeEstimating(t *testing.T) 
 		t.Fatalf("active capacity error = %v", err)
 	}
 
-	s.packs.mu.Lock()
-	s.packs.packs = make(map[string]*packManifest)
-	for i := 0; i < maxStoredPackManifests; i++ {
-		id := fmt.Sprintf("%032x", i+1)
-		s.packs.packs[id] = &packManifest{ID: id, State: "complete"}
-	}
-	s.packs.mu.Unlock()
-	if _, _, err := s.packs.start(input); err == nil || !strings.Contains(err.Error(), "manifests") {
-		t.Fatalf("stored capacity error = %v", err)
-	}
 }
 
-func TestAutomaticPackReleasesOldestAutomaticManifestAtCapacity(t *testing.T) {
+func TestAutomaticPacksDoNotEvictAtFormerCountLimit(t *testing.T) {
 	s := newPackTestServer(t)
 	oldestID := fmt.Sprintf("%032x", 1)
 	s.packs.mu.Lock()
-	for i := 0; i < maxStoredPackManifests; i++ {
+	for i := 0; i < 32; i++ {
 		id := fmt.Sprintf("%032x", i+1)
 		s.packs.packs[id] = &packManifest{
 			ID: id, State: "complete", UpdatedAt: time.Unix(int64(i+1), 0),
@@ -589,102 +579,12 @@ func TestAutomaticPackReleasesOldestAutomaticManifestAtCapacity(t *testing.T) {
 	_, keptCreated := s.packs.packs[created.ID]
 	stored := len(s.packs.packs)
 	s.packs.mu.Unlock()
-	if keptOldest || !keptCreated || stored != maxStoredPackManifests {
+	if !keptOldest || !keptCreated || stored != 33 {
 		t.Fatalf("automatic retention: oldest=%v created=%v stored=%d", keptOldest, keptCreated, stored)
 	}
 }
 
-func TestAutomaticPackReplacementRollsBackCleanupFailure(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
-	}))
-	defer upstream.Close()
-	cacheDir := t.TempDir()
-	config := Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir, FuelURL: upstream.URL,
-	}
-	s, err := New(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldest, _, err := s.packs.start(packInput{
-		Name: "oldest", Automatic: true, BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitForPackState(t, s.packs, oldest.ID, "complete")
-	keys := s.cache.keysForScope("fuel")
-	if len(keys) != 1 {
-		t.Fatalf("fuel keys = %v", keys)
-	}
-
-	s.packs.mu.Lock()
-	s.packs.packs[oldest.ID].UpdatedAt = time.Unix(1, 0)
-	if err := s.packs.persistLocked(s.packs.packs[oldest.ID]); err != nil {
-		s.packs.mu.Unlock()
-		t.Fatal(err)
-	}
-	for i := 1; i < maxStoredPackManifests; i++ {
-		id := fmt.Sprintf("%032x", i)
-		manifest := &packManifest{
-			ID: id, Name: fmt.Sprintf("automatic %d", i), State: "complete", CreatedAt: time.Unix(int64(i+1), 0), UpdatedAt: time.Unix(int64(i+1), 0),
-			Resources: map[string]packResourceProgress{packResourceFuelPrices: {Done: 1, Total: 1}}, Input: packInput{Automatic: true},
-		}
-		s.packs.packs[id] = manifest
-		if err := s.packs.persistLocked(manifest); err != nil {
-			s.packs.mu.Unlock()
-			t.Fatal(err)
-		}
-	}
-	s.packs.replacementCleanup = func(manifest *packManifest) error {
-		if err := s.packs.cleanupPack(manifest); err != nil {
-			return err
-		}
-		return fmt.Errorf("injected cleanup failure")
-	}
-	s.packs.mu.Unlock()
-
-	if _, _, err := s.packs.start(packInput{
-		Name: "replacement", Automatic: true, BBox: &bbox{South: 42, West: -1, North: 43, East: 0}, Scopes: []string{"fuel"},
-	}); err == nil || !strings.Contains(err.Error(), "injected cleanup failure") {
-		t.Fatalf("replacement error = %v", err)
-	}
-	s.packs.mu.Lock()
-	_, keptOldest := s.packs.packs[oldest.ID]
-	stored := len(s.packs.packs)
-	s.packs.replacementCleanup = nil
-	s.packs.mu.Unlock()
-	if !keptOldest || stored != maxStoredPackManifests {
-		t.Fatalf("rollback retention: oldest=%v stored=%d", keptOldest, stored)
-	}
-	entries, err := os.ReadDir(s.cache.packsDir)
-	if err != nil || len(entries) != maxStoredPackManifests {
-		t.Fatalf("manifest files = %d, %v", len(entries), err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	config.OfflineMode = "cache-only"
-	restarted, err := New(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restarted.Close()
-	if _, ok := restarted.packs.publicManifest(oldest.ID); !ok || len(restarted.packs.summaries()) != maxStoredPackManifests {
-		t.Fatalf("restarted rollback: oldest=%v stored=%d", ok, len(restarted.packs.summaries()))
-	}
-	restarted.cache.mu.Lock()
-	pins := append([]string(nil), restarted.cache.entries[keys[0]].Pins...)
-	restarted.cache.mu.Unlock()
-	if len(pins) != 1 || pins[0] != oldest.ID {
-		t.Fatalf("restored pins = %v", pins)
-	}
-}
-
-func TestPackManagerRepairsInterruptedAutomaticReplacement(t *testing.T) {
+func TestPackManagerRetainsMoreThanSixteenManifestsAfterRestart(t *testing.T) {
 	cacheDir := t.TempDir()
 	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
 	s, err := New(config)
@@ -693,7 +593,7 @@ func TestPackManagerRepairsInterruptedAutomaticReplacement(t *testing.T) {
 	}
 	oldestID := fmt.Sprintf("%032x", 1)
 	s.packs.mu.Lock()
-	for i := 0; i <= maxStoredPackManifests; i++ {
+	for i := 0; i < 40; i++ {
 		id := fmt.Sprintf("%032x", i+1)
 		manifest := &packManifest{
 			ID: id, Name: fmt.Sprintf("automatic %d", i), State: "complete", CreatedAt: time.Unix(int64(i+1), 0), UpdatedAt: time.Unix(int64(i+1), 0),
@@ -714,11 +614,11 @@ func TestPackManagerRepairsInterruptedAutomaticReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if _, ok := restarted.packs.publicManifest(oldestID); ok || len(restarted.packs.summaries()) != maxStoredPackManifests {
+	if _, ok := restarted.packs.publicManifest(oldestID); !ok || len(restarted.packs.summaries()) != 40 {
 		t.Fatalf("repaired manifests: oldest=%v stored=%d", ok, len(restarted.packs.summaries()))
 	}
 	entries, err := os.ReadDir(restarted.cache.packsDir)
-	if err != nil || len(entries) != maxStoredPackManifests {
+	if err != nil || len(entries) != 40 {
 		t.Fatalf("repaired manifest files = %d, %v", len(entries), err)
 	}
 }
@@ -726,7 +626,7 @@ func TestPackManagerRepairsInterruptedAutomaticReplacement(t *testing.T) {
 func TestPackReservesManifestQuota(t *testing.T) {
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
-		OfflineCacheMaxBytes: int64(maxStoredPackManifests * maxPackManifestBytes),
+		OfflineCacheMaxBytes: int64(maxRegionalManifestBytes),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -851,7 +751,7 @@ func TestPackHardStopsWhenActualResourceExceedsBudget(t *testing.T) {
 	defer upstream.Close()
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
-		OfflineCacheMaxBytes: int64(maxStoredPackManifests*maxPackManifestBytes + 5<<20), OverpassURL: upstream.URL,
+		OfflineCacheMaxBytes: int64(maxRegionalManifestBytes + maxPackManifestBytes + 5<<20), OverpassURL: upstream.URL,
 	})
 	if err != nil {
 		t.Fatal(err)

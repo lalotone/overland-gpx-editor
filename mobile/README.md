@@ -171,8 +171,12 @@ that Wails' Android asset transport does not carry fully.
 `host` adds only native import/share/location endpoints and atomic draft storage.
 GPX files, responses, elevation tiles and Broom data live under Android's private
 files directory; downloaded data is not placed in the OS-evictable cache. The
-generic response cache defaults to 4 GiB (200,000 entries), and elevation to
-2 GiB. Admission checks quota and free disk space; downloaded pack entries and
+map and elevation caches use available device storage rather than fixed GiB
+budgets. Writes retain a 64 MiB free-space margin; both caches share the same
+filesystem space. There is no fixed saved-pack count, and retries reuse an
+incomplete pack's identity. Metadata is included in storage accounting. The
+200,000-entry index bound and per-job/worker limits still bound memory and
+provider traffic. Downloaded pack entries and
 terrain tiles are pinned, including across restarts. Broom retains its
 own independent managed cache. Android preparation uses one builder job and one
 concurrent route query.

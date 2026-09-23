@@ -36,12 +36,19 @@ func packElevationLimits(input packInput) (int, int64) {
 	return maxElevationPackEntries, maxElevationPackBytes
 }
 
-func (m *packManager) regionalControlReserve() int64 {
-	reserve := int64(maxStoredPackManifests * maxRegionalManifestBytes)
+func (m *packManager) controlBaseReserve() int64 {
+	// One atomic manifest replacement, not a fixed number of retained packs.
+	reserve := int64(maxRegionalManifestBytes)
 	if m.server.openFreeMap != nil {
 		reserve += maxMapGenerationBytes
 	}
 	return reserve
+}
+
+func (m *packManager) controlReserve() int64 {
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	return m.controlBaseReserve() + m.controlBytes
 }
 
 // One regional manifest owns all pins. Processing bounded batches avoids the

@@ -25,7 +25,6 @@ import (
 const (
 	maxPackResources        = 10000
 	maxActivePackJobs       = 2
-	maxStoredPackManifests  = 16
 	maxPackManifestBytes    = 1 << 20
 	maxMapGenerationBytes   = 4 << 20
 	maxElevationPackEntries = 2048
@@ -182,6 +181,7 @@ type packManifest struct {
 	cacheKeySet    map[string]struct{}
 	lastCheckpoint time.Time
 	checkpointDone int
+	working        bool
 }
 
 type packSummary struct {
@@ -205,11 +205,13 @@ type packSummary struct {
 }
 
 type packManager struct {
-	server             *Server
-	mu                 sync.Mutex
-	packs              map[string]*packManifest
-	jobTimeout         time.Duration
-	replacementCleanup func(*packManifest) error
+	server       *Server
+	mu           sync.Mutex
+	packs        map[string]*packManifest
+	jobTimeout   time.Duration
+	controlMu    sync.Mutex
+	controlAlloc map[string]int64
+	controlBytes int64
 }
 
 type packBudgetError struct{}
@@ -233,7 +235,7 @@ func (b *packAdmissionBudget) admit(bytes int64) error {
 }
 
 func newPackManager(server *Server) (*packManager, error) {
-	m := &packManager{server: server, packs: make(map[string]*packManifest), jobTimeout: defaultPackJobTimeout}
+	m := &packManager{server: server, packs: make(map[string]*packManifest), controlAlloc: make(map[string]int64), jobTimeout: defaultPackJobTimeout}
 	if !server.cache.writable {
 		if server.elevation.tiles != nil {
 			if err := server.elevation.tiles.finishPackRestore(); err != nil {
@@ -246,16 +248,8 @@ func newPackManager(server *Server) (*packManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := m.pruneExcessStoredPacks(changed); err != nil {
+	if err := server.cache.setReservedBytes(m.controlReserve()); err != nil {
 		return nil, err
-	}
-	for _, pack := range m.packs {
-		if pack.Input.Regional {
-			if err := server.cache.setReservedBytes(m.regionalControlReserve()); err != nil {
-				return nil, err
-			}
-			break
-		}
 	}
 	if err := m.restoreElevationPins(changed); err != nil {
 		return nil, err
@@ -288,12 +282,16 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !validPackID(filenameID) {
 			continue
 		}
+		if info, err := entry.Info(); err == nil {
+			m.controlAlloc[filenameID] = info.Size()
+			m.controlBytes += info.Size()
+		}
 		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxRegionalManifestBytes)
 		if err != nil {
 			continue
 		}
 		var manifest packManifest
-		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(manifest.CacheKeys) > packResourceLimit(manifest.Input) || len(raw) > packManifestLimit(manifest.Input) || len(manifest.ElevationKeys) > 16384 {
+		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(raw) > packManifestLimit(manifest.Input) {
 			continue
 		}
 		if manifest.State == "running" || manifest.State == "queued" {
@@ -311,23 +309,6 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		m.packs[manifest.ID] = &copyManifest
 	}
 	return changed, nil
-}
-
-func (m *packManager) pruneExcessStoredPacks(changed map[string]bool) error {
-	for len(m.packs) > maxStoredPackManifests {
-		pruneID := m.oldestAutomaticPackLocked()
-		if pruneID == "" {
-			break
-		}
-		pruned := m.packs[pruneID]
-		if err := m.removeManifestFile(pruned.ID); err != nil {
-			return fmt.Errorf("repair interrupted automatic pack replacement: %w", err)
-		}
-		pruned.deleted = true
-		delete(m.packs, pruneID)
-		delete(changed, pruneID)
-	}
-	return nil
 }
 
 func (m *packManager) desiredStoredPins() (map[string][]string, map[string]struct{}) {
@@ -398,9 +379,27 @@ func (m *packManager) persistLocked(manifest *packManifest) error {
 	if len(raw) > packManifestLimit(manifest.Input) {
 		return errors.New("pack manifest exceeds storage limit")
 	}
-	if err := atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw); err != nil {
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	allocation := int64(len(raw))
+	if manifest.State == "queued" || manifest.State == "running" {
+		allocation = int64(packManifestLimit(manifest.Input))
+	}
+	previous := m.controlBaseReserve() + m.controlBytes
+	next := previous - m.controlAlloc[manifest.ID] + allocation
+	if err := m.server.cache.reserveControlStorage(next); err != nil {
 		return err
 	}
+	if err := requirePackDiskSpace(m.server.cache.dir, int64(len(raw))); err != nil {
+		_ = m.server.cache.setReservedBytes(previous)
+		return err
+	}
+	if err := atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw); err != nil {
+		_ = m.server.cache.setReservedBytes(previous)
+		return err
+	}
+	m.controlBytes += allocation - m.controlAlloc[manifest.ID]
+	m.controlAlloc[manifest.ID] = allocation
 	manifest.lastCheckpoint, manifest.checkpointDone = time.Now(), manifest.Done
 	return nil
 }
@@ -409,10 +408,17 @@ func (m *packManager) removeManifestFile(id string) error {
 	if !m.server.cache.writable {
 		return nil
 	}
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
 	if err := m.server.cache.root.Remove(filepath.Join(m.server.cache.packsRel, id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncRootDir(m.server.cache.root, m.server.cache.packsRel)
+	if err := syncRootDir(m.server.cache.root, m.server.cache.packsRel); err != nil {
+		return err
+	}
+	m.controlBytes -= m.controlAlloc[id]
+	delete(m.controlAlloc, id)
+	return m.server.cache.setReservedBytes(m.controlBaseReserve() + m.controlBytes)
 }
 
 func validatePackInput(input packInput) (bbox, error) {
@@ -967,6 +973,9 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			return packEstimate{}, err
 		}
 		maxEntries, maxBytes := packElevationLimits(input)
+		if input.Regional && m.server.cache.useAvailableStorage {
+			maxBytes = m.server.elevation.tiles.diskQuota()
+		}
 		if len(tiles) > maxEntries {
 			return packEstimate{}, fmt.Errorf("elevation pack exceeds %d tiles", maxEntries)
 		}
@@ -1077,10 +1086,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
 	}
 	stats := m.server.cache.stats()
-	reserved := stats.Reserved
-	if input.Regional {
-		reserved = max(reserved, m.regionalControlReserve())
-	}
+	reserved := m.controlReserve() + int64(packManifestLimit(input))
 	estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-reserved)
 	estimate.FinalBytes = stats.Bytes + estimate.GenericBytes
 	estimate.Detail = strings.Join(estimate.Dynamic, "; ")
@@ -1103,17 +1109,10 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		estimate, err := m.estimateContext(ctx, input)
 		return &copyManifest, estimate, err
 	}
-	active, stored := m.activeLocked(), len(m.packs)
-	pruneID := ""
-	if input.Automatic && stored >= maxStoredPackManifests {
-		pruneID = m.oldestAutomaticPackLocked()
-	}
+	active := m.activeLocked()
 	m.mu.Unlock()
 	if active >= maxActivePackJobs {
 		return nil, packEstimate{}, fmt.Errorf("at most %d pack jobs may be active", maxActivePackJobs)
-	}
-	if stored >= maxStoredPackManifests && pruneID == "" {
-		return nil, packEstimate{}, fmt.Errorf("at most %d pack manifests may be retained", maxStoredPackManifests)
 	}
 	estimate, err := m.estimateContext(ctx, input)
 	if err != nil {
@@ -1140,9 +1139,6 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		if err := requirePackDiskSpace(m.server.cache.dir, estimate.EstimatedBytes); err != nil {
 			return nil, estimate, err
 		}
-		if err := m.server.cache.setReservedBytes(m.regionalControlReserve()); err != nil {
-			return nil, estimate, err
-		}
 	}
 	id, err := newPackID()
 	if err != nil {
@@ -1159,7 +1155,6 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 	}
 	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
 	manifest.cancel = cancel
-	var pruned *packManifest
 	m.mu.Lock()
 	if existing := m.matchingPackLocked(input); existing != nil {
 		copyManifest := m.publicCopyLocked(existing)
@@ -1172,16 +1167,26 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		cancel()
 		return nil, estimate, errors.New("pack capacity was reached while estimating")
 	}
-	if len(m.packs) >= maxStoredPackManifests {
-		if input.Automatic {
-			pruneID = m.oldestAutomaticPackLocked()
-		}
-		if pruneID == "" {
+	if previous := m.retryPackLocked(input); previous != nil {
+		if previous.working {
 			m.mu.Unlock()
 			cancel()
-			return nil, estimate, errors.New("pack capacity was reached while estimating")
+			return nil, estimate, errors.New("previous download attempt is still stopping; try again shortly")
 		}
-		pruned = m.packs[pruneID]
+		id, manifest.ID, manifest.CreatedAt = previous.ID, previous.ID, previous.CreatedAt
+		// Keep the old ownership until every resource is rechecked. A retry must
+		// never open a window in which its cached tiles can be evicted.
+		manifest.CacheKeys = append([]string(nil), previous.CacheKeys...)
+		terrainKeys := make(map[string]struct{}, len(manifest.ElevationKeys))
+		for _, key := range manifest.ElevationKeys {
+			terrainKeys[key] = struct{}{}
+		}
+		for _, key := range previous.ElevationKeys {
+			if _, exists := terrainKeys[key]; !exists {
+				manifest.ElevationKeys = append(manifest.ElevationKeys, key)
+				terrainKeys[key] = struct{}{}
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		m.mu.Unlock()
@@ -1193,21 +1198,8 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		cancel()
 		return nil, estimate, err
 	}
-	if pruned != nil {
-		cleanup := m.cleanupPack
-		if m.replacementCleanup != nil {
-			cleanup = m.replacementCleanup
-		}
-		if err := cleanup(pruned); err != nil {
-			rollbackErr := m.restoreReplacedPackLocked(pruned, manifest)
-			m.mu.Unlock()
-			cancel()
-			return nil, estimate, errors.Join(fmt.Errorf("replace oldest automatic pack: %w", err), rollbackErr)
-		}
-		pruned.deleted = true
-		delete(m.packs, pruned.ID)
-	}
 	m.packs[id] = manifest
+	manifest.working = true
 	if m.server.elevation.tiles != nil {
 		m.server.elevation.tiles.setPackPins(id, manifest.ElevationKeys)
 	}
@@ -1234,43 +1226,32 @@ func (m *packManager) matchingPackLocked(input packInput) *packManifest {
 	return nil
 }
 
-func (m *packManager) restoreReplacedPackLocked(pruned, replacement *packManifest) error {
-	var restoreErr error
-	restoreErr = errors.Join(restoreErr, m.persistLocked(pruned))
-	if m.server.elevation.tiles != nil {
-		m.server.elevation.tiles.setPackPins(pruned.ID, pruned.ElevationKeys)
+func (m *packManager) retryPackLocked(input packInput) *packManifest {
+	var newest *packManifest
+	for _, pack := range m.packs {
+		if pack.State != "incomplete" {
+			continue
+		}
+		candidate, requested := pack.Input, input
+		// Display labels changed between releases; geometry and resources, not
+		// their presentation, identify a resumable download.
+		candidate.Name, requested.Name = "", ""
+		candidate.CoverageKind, requested.CoverageKind = "", ""
+		if reflect.DeepEqual(candidate, requested) && (newest == nil || pack.UpdatedAt.After(newest.UpdatedAt)) {
+			newest = pack
+		}
 	}
-	for _, key := range pruned.CacheKeys {
-		restoreErr = errors.Join(restoreErr, m.server.cache.pin(key, pruned.ID, true))
-	}
-	restoreErr = errors.Join(restoreErr, m.cleanupPack(replacement))
-	return restoreErr
+	return newest
 }
 
 func (m *packManager) activeLocked() int {
 	active := 0
 	for _, manifest := range m.packs {
-		if manifest.State == "queued" || manifest.State == "running" {
+		if manifest.working || manifest.State == "queued" || manifest.State == "running" {
 			active++
 		}
 	}
 	return active
-}
-
-func (m *packManager) oldestAutomaticPackLocked() string {
-	var oldest *packManifest
-	for _, manifest := range m.packs {
-		if !manifest.Input.Automatic || manifest.State == "queued" || manifest.State == "running" {
-			continue
-		}
-		if oldest == nil || manifest.UpdatedAt.Before(oldest.UpdatedAt) {
-			oldest = manifest
-		}
-	}
-	if oldest == nil {
-		return ""
-	}
-	return oldest.ID
 }
 
 func requirePackDiskSpace(path string, required int64) error {
@@ -1281,15 +1262,19 @@ func requirePackDiskSpace(path string, required int64) error {
 	if err != nil {
 		return fmt.Errorf("check available disk space: %w", err)
 	}
-	const safetyMargin = uint64(64 << 20)
-	if supported && available < uint64(required)+safetyMargin {
-		return errors.New("pack would leave less than 64 MiB of free disk space")
+	if supported && available < uint64(required)+offlineDiskSafetyMargin {
+		return cacheStorageLimitError("download would leave less than 64 MiB of free disk space")
 	}
 	return nil
 }
 
 func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manifest *packManifest, estimate packEstimate) {
 	defer m.server.wg.Done()
+	defer func() {
+		m.mu.Lock()
+		manifest.working = false
+		m.mu.Unlock()
+	}()
 	defer cancel()
 	ctx, stopWork := context.WithCancel(ctx)
 	defer stopWork()
@@ -1373,7 +1358,11 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 	elevation := func() bool {
 		_, limit := packElevationLimits(manifest.Input)
 		if m.server.elevation.tiles != nil {
-			limit = min(limit, m.server.elevation.tiles.diskQuota())
+			if manifest.Input.Regional && m.server.cache.useAvailableStorage {
+				limit = m.server.elevation.tiles.diskQuota()
+			} else {
+				limit = min(limit, m.server.elevation.tiles.diskQuota())
+			}
 		}
 		elevationBudget := &packAdmissionBudget{limit: limit}
 		// Leave slots for interactive elevation lookups. The tile store also

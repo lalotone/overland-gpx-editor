@@ -238,7 +238,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |
-| `GET /offline/routing` | Broom readiness, preparation progress, installed generations and cache inventory |
+| `GET /offline/routing` | Cheap Broom readiness/progress, installed generations and last storage snapshots; `?summary=1` refreshes advisory metadata-only bytes, `?inventory=1` explicitly verifies ownership/inventory |
 | `GET /offline/routing/regions` | Provider country/region hierarchy, public bounds and downloaded/in-use flags; cached-region fallback offline |
 | `POST /offline/routing/suggest` | Smallest downloadable region covering a viewport bbox; catalogue lookup only |
 | `POST /offline/routing/plan` | Broom acquisition estimate; no PBF or terrain downloads |

@@ -36,6 +36,16 @@ cannot evict earlier downloaded tiles. Ordinary desktop trip packs keep their
 10,000-resource limit. Region manifests checkpoint batches and always flush their
 terminal state; interrupted downloads can reuse existing cached resources.
 
+Elevation (four workers), maps (two workers) and auxiliary data download in
+parallel, under the shared provider limits. If the response cache reaches its
+distinct-key admission rate, packs wait cancellably for the next minute window
+without fetching those responses again or charging their byte budget twice.
+Actual byte/entry quota exhaustion still stops the pack.
+
+Routing progress polling does not inspect artifact contents. Broom 0.7's advisory
+cache summary exposes whether its byte count is known, stale and when measured;
+explicit verified inventory remains separate for storage management.
+
 Large areas still respect storage and provider limits. In particular, the app
 does not turn a large region into tiled Overpass harvesting: unsupported broad
 place searches are marked **Provider limit** while map/elevation downloads proceed.

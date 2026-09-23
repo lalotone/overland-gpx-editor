@@ -118,6 +118,12 @@ export interface RoutingDataRegion {
 }
 
 export interface RoutingDataStatus {
+  /** Byte counters are a verified snapshot, not recalculated by progress polls. */
+  inventoryUpdatedAt?: string
+  summaryBytes?: number
+  summaryKnown?: boolean
+  summaryStale?: boolean
+  summaryUpdatedAt?: string
   upgradePending?: boolean
   enabled: boolean
   ready: boolean
@@ -529,6 +535,11 @@ function decodeRoutingDataStatus(value: unknown): RoutingDataStatus {
   return {
     enabled: root?.enabled === true,
     ready: root?.ready === true,
+    inventoryUpdatedAt: text(root?.inventoryUpdatedAt),
+    summaryBytes: number(root?.summaryBytes),
+    summaryKnown: root?.summaryKnown === true,
+    summaryStale: root?.summaryStale === true,
+    summaryUpdatedAt: text(root?.summaryUpdatedAt),
     upgradePending: root?.upgradePending === true,
     regionId: text(root?.regionId),
     generationId: text(root?.generationId),
@@ -566,6 +577,15 @@ export async function fetchRoutingDataStatus(runtime: RuntimeConfig, signal?: Ab
   if (!runtime.offline?.routing) return null
   const response = await fetch(runtime.offline.routing, { signal })
   if (!response.ok) throw await responseError(response, `Routing data status returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
+}
+
+/** Explicit storage inspection; never call this from a progress polling loop. */
+export async function fetchRoutingSummary(runtime: RuntimeConfig, signal?: AbortSignal): Promise<RoutingDataStatus | null> {
+  if (!runtime.offline?.routing) return null
+  const endpoint = runtime.offline.routing
+  const response = await fetch(`${endpoint}${endpoint.includes('?') ? '&' : '?'}summary=1`, { signal })
+  if (!response.ok) throw await responseError(response, 'Could not inspect routing storage')
   return decodeRoutingDataStatus(await response.json())
 }
 

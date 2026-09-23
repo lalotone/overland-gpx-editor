@@ -113,6 +113,15 @@ and reused counts, retries, elapsed stage time and activity updates. Transfer
 percentages are per file; diagnostics don't replace current work. Only an open
 graph is reported as ready.
 
+Routing progress polling never calls Broom's artifact-verifying `CacheInfo`.
+`GET /offline/routing?summary=1` explicitly refreshes Broom's metadata-only
+measurement; `summaryBytes`, `summaryKnown`, `summaryStale` and
+`summaryUpdatedAt` distinguish unknown storage from a measured zero and expose
+freshness. Ordinary polls return that snapshot without traversing files.
+`?inventory=1` remains the explicit verified inventory path for ownership,
+pinned/in-use/reclaimable counts; `inventoryUpdatedAt` dates those separate
+counters. An advisory summary never authorizes pruning.
+
 `GET /offline/routing/regions` exposes the provider's region hierarchy and bounds
 with installed/in-use flags. It starts no preparation. Without the full provider
 catalogue, installed generations remain browsable from local metadata. City

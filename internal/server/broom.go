@@ -108,22 +108,30 @@ type broomCachedRegion struct {
 }
 
 type broomRoutingStatus struct {
-	UpgradePending bool                `json:"upgradePending,omitempty"`
-	Enabled        bool                `json:"enabled"`
-	Ready          bool                `json:"ready"`
-	RegionID       string              `json:"regionId,omitempty"`
-	GenerationID   string              `json:"generationId,omitempty"`
-	Name           string              `json:"name,omitempty"`
-	Error          string              `json:"error,omitempty"`
-	Job            *broomPreparation   `json:"job,omitempty"`
-	Cached         []broomCachedRegion `json:"cached"`
-	CacheBytes     int64               `json:"cacheBytes"`
-	PinnedBytes    int64               `json:"pinnedBytes"`
-	InUseBytes     int64               `json:"inUseBytes"`
-	Reclaimable    int64               `json:"reclaimableBytes"`
+	SummaryBytes       int64               `json:"summaryBytes"`
+	SummaryKnown       bool                `json:"summaryKnown"`
+	SummaryStale       bool                `json:"summaryStale"`
+	SummaryUpdatedAt   string              `json:"summaryUpdatedAt,omitempty"`
+	InventoryUpdatedAt string              `json:"inventoryUpdatedAt,omitempty"`
+	UpgradePending     bool                `json:"upgradePending,omitempty"`
+	Enabled            bool                `json:"enabled"`
+	Ready              bool                `json:"ready"`
+	RegionID           string              `json:"regionId,omitempty"`
+	GenerationID       string              `json:"generationId,omitempty"`
+	Name               string              `json:"name,omitempty"`
+	Error              string              `json:"error,omitempty"`
+	Job                *broomPreparation   `json:"job,omitempty"`
+	Cached             []broomCachedRegion `json:"cached"`
+	CacheBytes         int64               `json:"cacheBytes"`
+	PinnedBytes        int64               `json:"pinnedBytes"`
+	InUseBytes         int64               `json:"inUseBytes"`
+	Reclaimable        int64               `json:"reclaimableBytes"`
 }
 
 type broomRoutingService struct {
+	inspectCache  func(context.Context) (broom.CacheInventory, error)
+	inventoryMu   sync.Mutex
+	inventory     broomCacheUsage // guarded by mu
 	sessions      map[string]*sessionBroomProfile
 	uploads       chan struct{}
 	selectionPath string
@@ -268,7 +276,8 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		return nil, err
 	}
 	service := &broomRoutingService{
-		sessions: make(map[string]*sessionBroomProfile), uploads: make(chan struct{}, 1),
+		inspectCache: manager.CacheInfo,
+		sessions:     make(map[string]*sessionBroomProfile), uploads: make(chan struct{}, 1),
 		selectionPath: filepath.Join(cfg.CacheDir, "overland-active-region"),
 		manager:       manager, profiles: profiles, warmup: warmup, modes: modes,
 		ctx: ctx, wg: wg, jobs: cfg.Jobs, timeout: cfg.Timeout,
@@ -543,6 +552,9 @@ func (s *broomRoutingService) cancelPreparation() bool {
 func (s *broomRoutingService) status(ctx context.Context) broomRoutingStatus {
 	s.mu.RLock()
 	status := broomRoutingStatus{Enabled: true, Error: s.lastErr, Cached: []broomCachedRegion{}}
+	status.CacheBytes, status.PinnedBytes = s.inventory.bytes, s.inventory.pinned
+	status.InUseBytes, status.Reclaimable = s.inventory.inUse, s.inventory.reclaimable
+	status.InventoryUpdatedAt = s.inventory.updatedAt
 	if s.current != nil {
 		status.UpgradePending = s.current.needsUpgrade
 		status.Ready = true
@@ -554,6 +566,12 @@ func (s *broomRoutingService) status(ctx context.Context) broomRoutingStatus {
 		status.Job = &copy
 	}
 	s.mu.RUnlock()
+	if summary, err := s.manager.CacheSummary(ctx); err == nil {
+		status.SummaryBytes, status.SummaryKnown, status.SummaryStale = summary.Bytes, summary.Known, summary.Stale
+		if summary.Known {
+			status.SummaryUpdatedAt = summary.AsOf.UTC().Format(time.RFC3339Nano)
+		}
+	}
 	regions, err := s.manager.CachedRegions(ctx)
 	if err == nil {
 		for _, region := range regions {
@@ -563,13 +581,27 @@ func (s *broomRoutingService) status(ctx context.Context) broomRoutingStatus {
 			})
 		}
 	}
-	if inventory, inventoryErr := s.manager.CacheInfo(ctx); inventoryErr == nil {
-		status.CacheBytes = inventory.Bytes
-		status.PinnedBytes = inventory.PinnedBytes
-		status.InUseBytes = inventory.InUseBytes
-		status.Reclaimable = inventory.ReclaimableBytes
-	}
 	return status
+}
+
+type broomCacheUsage struct {
+	bytes, pinned, inUse, reclaimable int64
+	updatedAt                         string
+}
+
+// CacheInfo verifies a full inventory and can hash gigabytes of source aliases.
+// Only explicit storage-management requests pay that cost, never progress polls.
+func (s *broomRoutingService) refreshInventory(ctx context.Context) error {
+	s.inventoryMu.Lock()
+	defer s.inventoryMu.Unlock()
+	inventory, err := s.inspectCache(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.inventory = broomCacheUsage{bytes: inventory.Bytes, pinned: inventory.PinnedBytes, inUse: inventory.InUseBytes, reclaimable: inventory.ReclaimableBytes, updatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *broomRoutingService) close() error {
@@ -796,6 +828,18 @@ func (s *Server) handleBroomStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Local routing is disabled")
 		return
 	}
+	if r.URL.Query().Get("summary") == "1" {
+		if _, err := s.broom.manager.RefreshCacheSummary(r.Context()); err != nil {
+			writeBroomError(w, err)
+			return
+		}
+	}
+	if r.URL.Query().Get("inventory") == "1" {
+		if err := s.broom.refreshInventory(r.Context()); err != nil {
+			writeBroomError(w, err)
+			return
+		}
+	}
 	noStoreJSON(w, http.StatusOK, s.broom.status(r.Context()))
 }
 
@@ -859,6 +903,10 @@ func (s *Server) handleBroomPin(w http.ResponseWriter, r *http.Request) {
 		writeBroomError(w, err)
 		return
 	}
+	if err := s.broom.refreshInventory(r.Context()); err != nil {
+		writeBroomError(w, err)
+		return
+	}
 	noStoreJSON(w, http.StatusOK, s.broom.status(r.Context()))
 }
 
@@ -897,6 +945,10 @@ func (s *Server) handleBroomPrune(w http.ResponseWriter, r *http.Request) {
 		KeepGenerations: request.KeepGenerations, RemoveSources: request.RemoveSources,
 		RemoveMetrics: request.RemoveMetrics,
 	}); err != nil {
+		writeBroomError(w, err)
+		return
+	}
+	if err := s.broom.refreshInventory(r.Context()); err != nil {
 		writeBroomError(w, err)
 		return
 	}

@@ -11,7 +11,7 @@ const (
 	maxRegionalResources     = 100000
 	maxRegionalManifestBytes = 8 << 20
 	regionalBatchSize        = 128
-	regionalWorkers          = 2
+	regionalWorkers          = 4 // matches the shared OpenFreeMap provider concurrency ceiling
 	regionalJobTimeout       = 6 * time.Hour
 )
 

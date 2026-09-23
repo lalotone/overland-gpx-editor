@@ -28,6 +28,7 @@ func TestBulkAdmissionOutlivesProviderTimeout(t *testing.T) {
 	policy.fetchTimeout = 100 * time.Millisecond
 	policy.group = newRateGroup(0)
 	store.admissionWindow, store.admissions = time.Now(), 1000
+	store.bulkAdmissionWindow, store.bulkAdmissions = time.Now(), maxBulkAdmissions
 	waiting, resume := make(chan struct{}), make(chan struct{})
 	store.waitAdmission = func(ctx context.Context, _ time.Duration) error {
 		close(waiting)
@@ -41,7 +42,7 @@ func TestBulkAdmissionOutlivesProviderTimeout(t *testing.T) {
 			return ctx.Err()
 		}
 		store.mu.Lock()
-		store.admissionWindow = store.admissionWindow.Add(-time.Minute)
+		store.bulkAdmissionWindow = store.bulkAdmissionWindow.Add(-time.Minute)
 		store.mu.Unlock()
 		return nil
 	}
@@ -76,6 +77,7 @@ func TestBulkCacheAdmissionContinuesAfterWindow(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	store.now = func() time.Time { return now }
+	store.bulkAdmissionWindow, store.bulkAdmissions = now, maxBulkAdmissions-1000
 	budget := &packAdmissionBudget{limit: 8 << 20}
 	var admitted int64
 	for i := range 1000 {
@@ -92,6 +94,7 @@ func TestBulkCacheAdmissionContinuesAfterWindow(t *testing.T) {
 		assert.Equal(t, admitted, budget.used, "rejections must not charge the budget")
 	}
 	// Passive admission remains protected, without invoking the bulk wait.
+	store.admissionWindow, store.admissions = now, 1000
 	_, err = store.putForRequest(t.Context(), meta, []byte(`{}`), nil)
 	require.ErrorAs(t, err, &rateErr)
 	waits := 0
@@ -111,7 +114,7 @@ func TestBulkCacheAdmissionContinuesAfterWindow(t *testing.T) {
 func TestBulkCacheAdmissionCancellation(t *testing.T) {
 	store, err := newCacheStore(t.TempDir(), 8<<20, 200000)
 	require.NoError(t, err)
-	store.admissionWindow, store.admissions = time.Now(), 1000
+	store.bulkAdmissionWindow, store.bulkAdmissions = time.Now(), maxBulkAdmissions
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	waiting := make(chan struct{})
@@ -169,4 +172,65 @@ func TestBulkCacheStorageLimitsDoNotWait(t *testing.T) {
 			assert.Zero(t, budget.used)
 		})
 	}
+}
+
+func TestCacheAdmissionIndexesPreserveExpiryAndPins(t *testing.T) {
+	store, err := newCacheStore(t.TempDir(), 8<<20, 1000)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	store.now = func() time.Time { return now }
+	write := func(id int, scope string, deadline bool) cacheMetadata {
+		meta := testMetadata(fmt.Sprintf("%064x", id), scope, now)
+		meta.StaleUntil = now.Add(time.Minute)
+		if deadline {
+			meta.DeleteNoLaterThan = now.Add(2 * time.Minute)
+		}
+		require.NoError(t, store.put(meta, []byte(`{}`)))
+		return meta
+	}
+	pinned := write(1, "places", true)
+	require.NoError(t, store.pin(pinned.Key, "pack", true))
+	unpinned := write(2, "pois", false)
+	now = now.Add(time.Minute)
+	write(3, "places", false) // admission triggers the due cleanup
+	_, exists := store.entries[unpinned.Key]
+	assert.False(t, exists, "stale unpinned data must expire on admission")
+	_, exists = store.entries[pinned.Key]
+	assert.True(t, exists, "pin protects stale data before mandatory deletion")
+	assert.Equal(t, 2, store.scopeCountLocked("places"))
+	assert.Zero(t, store.scopeCountLocked("pois"))
+	now = now.Add(time.Minute)
+	write(4, "pois", false)
+	_, exists = store.entries[pinned.Key]
+	assert.False(t, exists, "mandatory retention deadline must override pins")
+	assert.Zero(t, store.scopeCountLocked("places"))
+	assert.Equal(t, 1, store.scopeCountLocked("pois"))
+	// Removing a pin must schedule an already-stale entry for cleanup.
+	meta := write(5, "places", false)
+	require.NoError(t, store.pin(meta.Key, "pack", true))
+	now = now.Add(time.Minute)
+	write(6, "pois", false)
+	require.NoError(t, store.pin(meta.Key, "pack", false))
+	write(7, "pois", false)
+	_, exists = store.entries[meta.Key]
+	assert.False(t, exists)
+	assert.Zero(t, store.scopeCountLocked("places"))
+}
+
+func TestBulkAdmissionDoesNotConsumePassiveAllowance(t *testing.T) {
+	store, err := newCacheStore(t.TempDir(), 8<<20, 200000)
+	require.NoError(t, err)
+	now := time.Now()
+	store.now = func() time.Time { return now }
+	store.admissionWindow, store.admissions = now, 1000
+	budget := &packAdmissionBudget{limit: 8 << 20}
+	meta := testMetadata(fmt.Sprintf("%064x", 1), "places", now)
+	_, err = store.putWithAdmission(meta, []byte(`{}`), budget.admit)
+	require.NoError(t, err, "a full passive window must not block an explicit pack")
+	assert.Equal(t, 1000, store.admissions)
+	assert.Equal(t, 1, store.bulkAdmissions)
+	meta.Key = fmt.Sprintf("%064x", 2)
+	_, err = store.putWithAdmission(meta, []byte(`{}`), nil)
+	var rateErr *cacheAdmissionRateError
+	require.ErrorAs(t, err, &rateErr, "bulk admission must not relax passive protection")
 }

@@ -23,6 +23,7 @@ import (
 const (
 	cacheSchemaVersion = 1
 	maxMetadataBytes   = 64 << 10
+	maxBulkAdmissions  = 4000 // per minute; passive requests retain their separate 1000 ceiling
 )
 
 // cacheMetadata is deliberately self-contained. The index can be rebuilt from
@@ -78,16 +79,20 @@ type cacheStore struct {
 	reserved   int64
 	writable   bool
 
-	mu              sync.Mutex
-	writeMu         sync.Mutex
-	entries         map[string]*cacheMetadata
-	bytes           int64
-	now             func() time.Time
-	waitAdmission   func(context.Context, time.Duration) error // optional test clock
-	admissionWindow time.Time
-	admissions      int
-	getHits         atomic.Uint64
-	getMisses       atomic.Uint64
+	mu                  sync.Mutex
+	writeMu             sync.Mutex
+	entries             map[string]*cacheMetadata
+	scopeCounts         map[string]int
+	nextExpiry          time.Time // conservative earliest unpinned stale or mandatory deletion deadline
+	bytes               int64
+	now                 func() time.Time
+	waitAdmission       func(context.Context, time.Duration) error // optional test clock
+	admissionWindow     time.Time
+	admissions          int
+	bulkAdmissionWindow time.Time
+	bulkAdmissions      int
+	getHits             atomic.Uint64
+	getMisses           atomic.Uint64
 }
 
 func (s *cacheStore) setReservedBytes(bytes int64) error {
@@ -273,7 +278,7 @@ func (s *cacheStore) load() error {
 			s.bytes -= old.Length + old.metadataLength
 		}
 		copyMeta := meta
-		s.entries[meta.Key] = &copyMeta
+		s.setEntryLocked(&copyMeta)
 		s.bytes += meta.Length + meta.metadataLength
 		return nil
 	}); err != nil {
@@ -616,7 +621,7 @@ func (s *cacheStore) updatePinsLocked(current *cacheMetadata, pins []string) (bo
 	}
 	s.bytes -= current.metadataLength
 	copyMeta.metadataLength = int64(len(raw))
-	s.entries[current.Key] = &copyMeta
+	s.setEntryLocked(&copyMeta)
 	s.bytes += copyMeta.metadataLength
 	return true, nil
 }
@@ -756,14 +761,21 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 	}
 	admitted := max(int64(0), required-oldBytes)
 	s.mu.Lock()
+	window, admissions := &s.admissionWindow, &s.admissions
+	limit := max(64, min(1000, s.maxEntries/100))
+	if admit != nil {
+		// Explicit, byte-budgeted packs already have bounded workers, resource
+		// counts and provider queues. They must not consume passive admission.
+		window, admissions = &s.bulkAdmissionWindow, &s.bulkAdmissions
+		limit = max(64, min(maxBulkAdmissions, s.maxEntries/25))
+	}
 	if s.entries[meta.Key] == nil {
 		now := s.now()
-		if s.admissionWindow.IsZero() || now.Sub(s.admissionWindow) >= time.Minute {
-			s.admissionWindow, s.admissions = now, 0
+		if window.IsZero() || now.Sub(*window) >= time.Minute {
+			*window, *admissions = now, 0
 		}
-		limit := max(64, min(1000, s.maxEntries/100))
-		if s.admissions >= limit {
-			retryAfter := s.admissionWindow.Add(time.Minute).Sub(now)
+		if *admissions >= limit {
+			retryAfter := window.Add(time.Minute).Sub(now)
 			s.mu.Unlock()
 			return 0, &cacheAdmissionRateError{retryAfter: retryAfter}
 		}
@@ -794,10 +806,10 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 		s.bytes -= old.Length + old.metadataLength
 	}
 	copyMeta := meta
-	s.entries[meta.Key] = &copyMeta
+	s.setEntryLocked(&copyMeta)
 	s.bytes += required
 	if !replacing {
-		s.admissions++
+		*admissions++
 	}
 	s.mu.Unlock()
 	return admitted, nil
@@ -917,8 +929,21 @@ func syncRootDir(root *os.Root, path string) error {
 
 func (s *cacheStore) admitLocked(scope, replacing string, required int64) error {
 	now := s.now()
+	if !s.nextExpiry.IsZero() && !now.Before(s.nextExpiry) {
+		if err := s.expireLocked(now, replacing); err != nil {
+			return err
+		}
+	}
+	return s.makeRoomLocked(scope, replacing, required)
+}
+
+func (s *cacheStore) expireLocked(now time.Time, replacing string) error {
+	// Only scan when an entry can actually have expired. If a removal fails,
+	// keep the previous deadline so the next admission retries the cleanup.
+	next := time.Time{}
 	for key, meta := range s.entries {
 		if key == replacing {
+			next = earlierCacheExpiry(next, meta)
 			continue
 		}
 		if !meta.DeleteNoLaterThan.IsZero() && !now.Before(meta.DeleteNoLaterThan) {
@@ -931,9 +956,15 @@ func (s *cacheStore) admitLocked(scope, replacing string, required int64) error 
 			if _, err := s.removeLocked(meta.Scope, key); err != nil {
 				return fmt.Errorf("remove stale cache entry: %w", err)
 			}
+			continue
 		}
+		next = earlierCacheExpiry(next, meta)
 	}
+	s.nextExpiry = next
+	return nil
+}
 
+func (s *cacheStore) makeRoomLocked(scope, replacing string, required int64) error {
 	oldBytes := int64(0)
 	oldCount := 0
 	if old := s.entries[replacing]; old != nil {
@@ -961,13 +992,33 @@ func (s *cacheStore) admitLocked(scope, replacing string, required int64) error 
 }
 
 func (s *cacheStore) scopeCountLocked(scope string) int {
-	count := 0
-	for _, meta := range s.entries {
-		if meta.Scope == scope {
-			count++
-		}
+	return s.scopeCounts[scope]
+}
+
+func earlierCacheExpiry(current time.Time, meta *cacheMetadata) time.Time {
+	deadline := meta.DeleteNoLaterThan
+	if len(meta.Pins) == 0 && !meta.StaleUntil.IsZero() && (deadline.IsZero() || meta.StaleUntil.Before(deadline)) {
+		deadline = meta.StaleUntil
 	}
-	return count
+	if !deadline.IsZero() && (current.IsZero() || deadline.Before(current)) {
+		return deadline
+	}
+	return current
+}
+
+// Keep derived admission indexes in sync at every metadata publication, including
+// startup recovery and pin changes. Removing/extending a deadline may cause one
+// extra scan, but never lets an expired entry escape cleanup.
+func (s *cacheStore) setEntryLocked(meta *cacheMetadata) {
+	if s.scopeCounts == nil {
+		s.scopeCounts = make(map[string]int)
+	}
+	if old := s.entries[meta.Key]; old != nil {
+		s.scopeCounts[old.Scope]--
+	}
+	s.entries[meta.Key] = meta
+	s.scopeCounts[meta.Scope]++
+	s.nextExpiry = earlierCacheExpiry(s.nextExpiry, meta)
 }
 
 func (s *cacheStore) evictLRULocked(exclude string) (bool, error) {
@@ -1018,6 +1069,7 @@ func (s *cacheStore) removeLocked(scope, key string) (bool, error) {
 		return false, fmt.Errorf("sync cache deletion: %w", err)
 	}
 	s.bytes -= meta.Length + meta.metadataLength
+	s.scopeCounts[meta.Scope]--
 	delete(s.entries, key)
 	return true, nil
 }
@@ -1059,7 +1111,7 @@ func (s *cacheStore) updateMetadataLocked(meta cacheMetadata) error {
 		s.bytes -= old.metadataLength
 		meta.metadataLength = int64(len(raw))
 		copyMeta := meta
-		s.entries[meta.Key] = &copyMeta
+		s.setEntryLocked(&copyMeta)
 		s.bytes += meta.metadataLength
 	}
 	s.mu.Unlock()

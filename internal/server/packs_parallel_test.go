@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRegionalPackWaitsForCacheAdmission(t *testing.T) {
+func TestRegionalPackHasSeparateBulkAdmission(t *testing.T) {
 	var requests atomic.Int32
 	var upstream *httptest.Server
 	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +50,7 @@ func TestRegionalPackWaitsForCacheAdmission(t *testing.T) {
 		return status.State == "complete"
 	}, 90*time.Second, 10*time.Millisecond)
 	assert.Greater(t, status.Total, 1000)
-	assert.Positive(t, waits.Load())
+	assert.Zero(t, waits.Load(), "a bounded bulk pack must not hit the passive 1000-key ceiling")
 	assert.Zero(t, status.Failures)
 	assert.Empty(t, status.ErrorCode)
 	assert.Equal(t, status.Total, status.Done)

@@ -684,6 +684,13 @@ func openFreeMapValidator(params string, accepted []string) func([]byte) error {
 	if containsString(accepted, "image/png") {
 		return validateImageResponse
 	}
+	if strings.Contains(params, ":resource:") && containsString(accepted, "application/vnd.mapbox-vector-tile") {
+		// A protobuf Tile may have no layers: OpenFreeMap serves these as
+		// HTTP 200 with zero bytes. Cache and pin that valid empty tile so
+		// offline packs do not retry it forever. Status and MIME validation
+		// still happen in outbound.fetch; glyphs and images stay nonempty.
+		return nil
+	}
 	return func(body []byte) error {
 		if len(body) == 0 {
 			return errors.New("OpenFreeMap-compatible source returned an empty resource")

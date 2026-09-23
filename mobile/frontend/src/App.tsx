@@ -12,7 +12,7 @@ import {
 import { fetchElevationProfile } from '../../../src/lib/elevation'
 import {
   bootstrapRuntimeConfig,
-  loadRuntimeConfig,
+  decodeRuntimeConfig,
   fetchRoutingDataStatus,
   setRuntimeOfflineMode,
 } from '../../../src/lib/offline'
@@ -43,7 +43,10 @@ type Dialog = {
 }
 
 export default function App() {
-  const [runtime, setRuntime] = useState(() => bootstrapRuntimeConfig())
+  const [runtime, setRuntime] = useState(() => bootstrapRuntimeConfig('', 'cache-only'))
+  const [runtimeReady, setRuntimeReady] = useState(false)
+  const [startupError, setStartupError] = useState('')
+  const [startupAttempt, setStartupAttempt] = useState(0)
   const [native, setNative] = useState(false)
   const [tab, setTab] = useState<Tab>('explore')
   const [activeMap, setActiveMap] = useState<'plan' | 'track'>('plan')
@@ -140,9 +143,20 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    void loadRuntimeConfig('', controller.signal)
-      .then(setRuntime)
-      .catch(() => {})
+    void request<unknown>('/config', { signal: controller.signal })
+      .then((value) => {
+        if (controller.signal.aborted) return
+        setRuntime(decodeRuntimeConfig(value))
+        setRuntimeReady(true)
+        setStartupError('')
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setStartupError((error as Error).message)
+      })
+    return () => controller.abort()
+  }, [startupAttempt])
+  useEffect(() => {
+    const controller = new AbortController()
     void request<{ native: boolean }>('/mobile/capabilities', { signal: controller.signal })
       .then((value) => setNative(value.native))
       .catch(() => {})
@@ -494,6 +508,7 @@ export default function App() {
       <div className="map-stage">
         <MobileMap
           runtime={runtime}
+          ready={runtimeReady}
           coordinates={coordinates}
           points={tab === 'plan' ? plan.points : []}
           pins={pins}
@@ -524,7 +539,7 @@ export default function App() {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                 />
-                <button type="submit" disabled={busy} aria-label="Search">
+                <button type="submit" disabled={busy || !runtimeReady} aria-label="Search">
                   <Icon name="arrow" size={18} />
                 </button>
               </form>
@@ -555,7 +570,7 @@ export default function App() {
               </div>
               <button
                 className={`connection-pill ${runtime.offline?.mode === 'cache-only' ? 'offline' : ''}`}
-                disabled={busy}
+                disabled={busy || !runtimeReady}
                 onClick={() =>
                   void run(async () => {
                     const mode = await setRuntimeOfflineMode(
@@ -567,7 +582,7 @@ export default function App() {
                 }
               >
                 <i />
-                {runtime.offline?.mode === 'cache-only' ? 'Offline' : 'Online'}
+                {!runtimeReady ? 'Starting' : runtime.offline?.mode === 'cache-only' ? 'Offline' : 'Online'}
               </button>
             </>
           )}
@@ -659,7 +674,7 @@ export default function App() {
             ))}
           </div>
         )}
-        {tab === 'offline' && (
+        {tab === 'offline' && runtimeReady && (
           <OfflineMapControl
             runtime={runtime}
             status={routing}
@@ -704,6 +719,14 @@ export default function App() {
           </section>
         )}
       </div>
+
+      {!runtimeReady && (
+        <div className="startup-notice" role={startupError ? 'alert' : 'status'}>
+          {!startupError && <span className="spinner" />}
+          <span>{startupError || 'Opening saved maps and routing…'}</span>
+          {startupError && <button onClick={() => { setStartupError(''); setStartupAttempt((value) => value + 1) }}>Retry</button>}
+        </div>
+      )}
 
       {tab === 'plan' && planPanelOpen && (
         <PlanPanel
@@ -838,7 +861,7 @@ export default function App() {
                     </button>
                   </div>
                 ))}
-                {!files.length && (
+                {!files.length && runtimeReady && (
                   <div className="empty-state">
                     <Icon name="mountain" size={42} />
                     <h3>A little inspiration?</h3>

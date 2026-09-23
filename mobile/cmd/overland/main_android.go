@@ -30,7 +30,7 @@ func main() {
 			defer urlMu.RUnlock()
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if startURL == "" {
-				fmt.Fprint(w, `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="1"><body style="background:#f6f4ec;color:#24372e;font:20px sans-serif;padding:64px 28px"><h1>Overland</h1><p>Preparing your maps…</p>`)
+				fmt.Fprint(w, `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><script>setTimeout(()=>location.reload(),100)</script><body style="background:#f6f4ec;color:#24372e;font:20px sans-serif;padding:64px 28px"><h1>Overland</h1><p>Opening Overland…</p>`)
 				if startupError != "" {
 					fmt.Fprint(w, "<p>Could not start. Close and reopen Overland.</p>")
 				}

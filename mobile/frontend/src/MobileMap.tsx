@@ -80,6 +80,7 @@ function CreditsPosition() {
 
 export default function MobileMap({
   runtime,
+  ready,
   coordinates,
   points,
   pins,
@@ -93,6 +94,7 @@ export default function MobileMap({
   onError,
 }: {
   runtime: RuntimeConfig
+  ready: boolean
   coordinates: Coordinate[]
   points: Coordinate[]
   pins: GpxWaypoint[]
@@ -122,14 +124,14 @@ export default function MobileMap({
       className="mobile-map"
     >
       <CreditsPosition />
-      <MapTiles
+      {ready && <MapTiles
         layers={layers}
         baseLayerId={layer}
         hillshade={relief}
         hillshadeOpacity={0.25}
         hillshadeLayer={runtimeHillshadeLayer(runtime)}
         onVectorStatus={vectorStatus}
-      />
+      />}
       <Events points={points} onMovePoint={onMovePoint} onView={onView} onMap={onMap} />
       {coordinates.length > 1 && (
         <>

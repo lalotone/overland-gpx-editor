@@ -128,6 +128,12 @@ standard desktop backend on port 8000. Filesystem draft storage is available in
 the Android app and dedicated preview host, not the standard desktop server.
 Native file dialogs are Android-only; browser preview uses browser files.
 
+Startup serves the mobile UI and native draft/import endpoints immediately while
+the backend verifies local caches, restores download pins and opens routing in
+the background. Navigation and local GPX editing remain usable. A small notice
+reports startup progress or failure; map tiles wait for the backend configuration
+so startup cannot bypass offline policy through public-provider fallbacks.
+
 Mobile browser tests use two phone sizes. They check file identity, create-only
 imports, editing/undo, draft restoration, routing profiles and permits, unknown
 elevation preservation, map-first layout, and combined area downloads.

@@ -97,6 +97,31 @@ small {
 .mobile-app.map-only {
   --sheet: 0px;
 }
+.startup-notice {
+  position: absolute;
+  z-index: 1100;
+  bottom: calc(var(--nav) + 12px);
+  left: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  font-size: 13px;
+  box-shadow: 0 3px 15px #22372b14;
+}
+.startup-notice span:not(.spinner) {
+  flex: 1;
+}
+.startup-notice button {
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  padding: 10px;
+}
 .map-only .map-stage {
   bottom: var(--nav);
 }

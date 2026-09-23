@@ -82,6 +82,46 @@ async function setup(page: Page) {
   return { writes, routes, draft: () => draft }
 }
 
+test('app and local GPX editing remain usable while backend startup is pending', async ({ page }) => {
+  await setup(page)
+  let release!: () => void
+  const ready = new Promise<void>(resolve => { release = resolve })
+  const providerRequests: string[] = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.pathname === '/test/style.json' || url.hostname !== '127.0.0.1') providerRequests.push(url.href)
+  })
+  await page.route('**/config', async route => {
+    await ready
+    await route.fulfill({ json: { offline: { enabled: true, mode: 'cache-only' }, maps: { openfreemap: { style: '/test/style.json' } } } })
+  })
+  await page.goto('/')
+  await expect(page.getByText('Opening saved maps and routing…')).toBeVisible()
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByLabel('Open GPX file').setInputFiles({ name: 'local.gpx', mimeType: 'application/gpx+xml', buffer: Buffer.from(fixture) })
+  await expect(page.getByRole('button', { name: 'Save to library', exact: true })).toBeVisible()
+  expect(providerRequests).toEqual([])
+  release()
+  await expect(page.getByText('Opening saved maps and routing…')).toHaveCount(0)
+  await expect.poll(() => providerRequests.some(url => url.endsWith('/test/style.json'))).toBe(true)
+  await expect(page.getByRole('button', { name: 'Save to library', exact: true })).toBeVisible()
+})
+
+test('startup failures show an in-app error and configuration can be retried', async ({ page }) => {
+  await setup(page)
+  let failed = true
+  await page.route('**/config', route => failed
+    ? route.fulfill({ status: 503, body: 'Could not open local maps and routing' })
+    : route.fulfill({ json: { maps: { openfreemap: { style: '/test/style.json' } } } }))
+  await page.goto('/')
+  await expect(page.getByRole('alert')).toContainText('Could not open local maps and routing')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Import GPX', exact: true })).toBeVisible()
+  failed = false
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
 test('library deletes only the confirmed filename and retains tracks after a failure', async ({ page }) => {
   await setup(page)
   const filename = 'Ruta #1 & río.gpx'

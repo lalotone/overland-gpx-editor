@@ -44,6 +44,10 @@ type Host struct {
 	URL      string
 	StartURL string
 	api      *server.Server
+	assets   http.Handler
+	ready    chan struct{}
+	initErr  error // published with api by closing ready
+	ctx      context.Context
 	http     *http.Server
 	root     *os.Root
 	native   Native
@@ -57,6 +61,10 @@ type Host struct {
 // Start binds only loopback. The unguessable bootstrap capability becomes an
 // HttpOnly session cookie, protecting the API from other local Android apps.
 func Start(data, address string, assets fs.FS, native Native) (*Host, error) {
+	return start(data, address, assets, native, server.New)
+}
+
+func start(data, address string, assets fs.FS, native Native, openBackend func(server.Config) (*server.Server, error)) (*Host, error) {
 	if err := os.MkdirAll(data, 0700); err != nil {
 		return nil, err
 	}
@@ -74,27 +82,30 @@ func Start(data, address string, assets fs.FS, native Native) (*Host, error) {
 		root.Close()
 		return nil, errors.New("mobile host must listen on loopback")
 	}
-	h := &Host{URL: "http://" + listener.Addr().String(), root: root, native: native, token: rand.Text()}
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &Host{URL: "http://" + listener.Addr().String(), root: root, native: native, token: rand.Text(), ready: make(chan struct{}), ctx: ctx, cancel: cancel}
+	if assets != nil {
+		h.assets = http.FileServer(http.FS(assets))
+	}
 	h.StartURL = h.URL + "/mobile/start?token=" + h.token
-	h.api, err = server.New(server.Config{
+	config := server.Config{
 		GPXDir: filepath.Join(data, "gpx"), Assets: assets,
 		OfflineCacheDir: filepath.Join(data, "responses"), OfflineCacheMaxBytes: 4 << 30, OfflineCacheMaxEntries: 200000,
 		ElevationTiles: true, ElevationTileCache: filepath.Join(data, "terrain"), ElevationTileCacheMaxBytes: 2 << 30,
 		RoutingCacheDir: filepath.Join(data, "routing"), RoutingJobs: 1, RoutingConcurrency: 1,
 		OpenFreeMapURL: "https://tiles.openfreemap.org/styles/liberty", OpenFreeMapAllowBulk: true,
-	})
-	if err != nil {
-		listener.Close()
-		root.Close()
-		return nil, err
 	}
 	h.http = &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 32 << 10}
 	go func() { _ = h.http.Serve(listener) }()
-	if native.Background != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		h.cancel = cancel
-		h.workers.Go(func() { h.monitorDownloads(ctx) })
-	}
+	// Serve the embedded UI and native draft endpoints immediately. Cache
+	// verification and pin restoration still finish before any backend access.
+	h.workers.Go(func() {
+		h.api, h.initErr = openBackend(config)
+		close(h.ready)
+		if h.initErr == nil && native.Background != nil && ctx.Err() == nil {
+			h.monitorDownloads(ctx)
+		}
+	})
 	return h, nil
 }
 
@@ -105,7 +116,12 @@ func (h *Host) Close() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return errors.Join(h.http.Shutdown(ctx), h.api.Close(), h.root.Close())
+	shutdownErr := h.http.Shutdown(ctx)
+	var apiErr error
+	if h.api != nil {
+		apiErr = h.api.Close()
+	}
+	return errors.Join(shutdownErr, apiErr, h.root.Close())
 }
 
 func (h *Host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +151,22 @@ func (h *Host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/mobile/") {
 		w.Header().Set("Cache-Control", "no-store")
 		h.mobile(w, r)
+		return
+	}
+	if h.assets != nil && (r.URL.Path == "/" || r.URL.Path == "/index.html" || strings.HasPrefix(r.URL.Path, "/assets/")) {
+		h.assets.ServeHTTP(w, r)
+		return
+	}
+	select {
+	case <-r.Context().Done():
+		return
+	case <-h.ctx.Done():
+		http.Error(w, "Overland is closing", http.StatusServiceUnavailable)
+		return
+	case <-h.ready:
+	}
+	if h.initErr != nil {
+		http.Error(w, "Could not open local maps and routing: "+h.initErr.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	h.api.ServeHTTP(w, r)

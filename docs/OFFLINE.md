@@ -67,7 +67,7 @@ before changing an adapter or release default.
 | Fuel snapshot | Explicit open-data snapshot, dated by source and cache | One bounded snapshot |
 | Nominatim | Exact user searches, one server-wide request/second | No autocomplete, grid or area sweep |
 | Overpass | Exact bounded user POI query | No tiled sweeps or harvesting |
-| Broom routing data | Local OSM extract, DEM, graph and profile metrics | Explicit region preparation only |
+| Broom routing data | Local OSM extract, DEM, graph and profile metrics | Explicit region preparation; automatic migration of the active region after an engine upgrade |
 | API elevation | Exact source/dataset coordinates | Bounded requests subject to provider licence/quota |
 
 Policy sources: [OSMF tiles](https://operations.osmfoundation.org/policies/tiles/),
@@ -87,7 +87,8 @@ Broom routing data lives under `$XDG_CACHE_HOME/overland/routing`, outside the
 generic response-cache quota. `POST /offline/routing/prepare` explicitly
 downloads and builds one region; status and progress are available from
 `GET /offline/routing`, and cancellation is cooperative. A completed generation
-is opened and warmed for Road, Dirt, Trail and Enduro before it becomes active,
+is opened and warmed for Road, Dirt, Trail and Enduro, with both default and
+permit access policies, before it becomes active,
 so interactive route requests never trigger graph building or profile
 customization.
 
@@ -117,13 +118,41 @@ geometry. A real Catalonia plan and rebuild selected 55 tiles, versus 180 with
 0.4's all-node rectangle. Retained distant roads and ferries still require terrain;
 the extract polygon is not used to discard their elevations.
 
-Installed graphs remain usable after upgrading. To apply sparse acquisition to
-an existing region, explicitly rebuild with `--routing-region cataluna
---routing-update` (or the prepare API's `update: true`). Old generations and
-source tiles remain until explicitly pruned; an upgrade doesn't erase the cache.
+With Broom 0.6, build pipeline 3 corrects baked road-access reachability counts.
+At startup, an incompatible active managed generation is opened directly when
+still readable and warmed with the current profiles, then rebuilt in the
+background. Selecting another incompatible installed region through ordinary
+preparation also triggers migration. Source acquisition uses Broom's managed
+cache and revalidation; missing sources can be downloaded. A corrupt catalogue
+does not trigger automatic acquisition.
+
+`upgradePending` in the status identifies a still-active older graph;
+`job.upgrading` identifies migration progress. Cancellation or failure leaves
+that graph usable, with a **Resume routing update** action. Cache-only startup
+keeps it open without upstream requests, and switching back online resumes the
+update. Directly opened older graphs retain their old reachability counts until
+rebuilt. Old generations and source tiles remain until explicitly pruned.
 Entering `cache-only` cancels active acquisition and prevents new downloads, but
 installed graphs remain routable. A custom `--routing-graph` is opened directly
 and is not owned or pruned by the managed routing cache.
+
+### Access permits
+
+The planner's **Restricted access** checkbox sends `accessPermit: true`
+to `/routing/broom/route`. It selects a separately warmed metric for the chosen
+riding profile. The default is false. The permit bypasses way/node access tags
+and the affirmative motor-permission requirement on supported paths, and allows
+gates, lift/swing gates and chains. One-way and turn restrictions, solid barriers
+and `smoothness=impassable` remain effective. Enduro retains its supported road
+classes (including paths and bridleways, but not footways or steps).
+
+This is a route-wide rider declaration, not a geographically scoped permit.
+The UI resets it when clearing/resetting the planner and
+exposes its effective value in the MCP snapshot. Custom uploaded profiles own
+their access policy and reject the override. Broom's endpoint snapping still
+uses baked motor reachability counts: a newly allowed path can be traversed
+without being eligible as an endpoint. If snapping fails, place route controls
+on the connected road network on either side of the restricted section.
 
 ## Session BRF profiles
 

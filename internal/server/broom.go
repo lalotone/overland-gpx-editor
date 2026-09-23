@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	broomVersion        = "0.5.1"
+	broomVersion        = "0.6.0"
 	broomProfileName    = "overland-motorcycle"
 	maxBroomRouteBody   = 64 << 10
 	defaultRouteJobs    = 2
@@ -31,6 +31,9 @@ const (
 
 //go:embed broom_profile.brf
 var broomProfileSource string
+
+//go:embed broom_enduro.brf
+var broomEnduroSource string
 
 var errRoutingNotReady = errors.New("local routing data is not ready")
 var errRoutingPreparationRunning = errors.New("routing data preparation is already running")
@@ -58,6 +61,7 @@ type broomProfileSpec struct {
 }
 
 type broomDataset struct {
+	needsUpgrade bool
 	temporaryDir string
 	router       *broom.Router
 	regionID     string
@@ -70,6 +74,7 @@ type broomDataset struct {
 }
 
 type broomPreparation struct {
+	Upgrading       bool               `json:"upgrading,omitempty"`
 	Diagnostics     []broom.Diagnostic `json:"diagnostics,omitempty"`
 	ID              string             `json:"id"`
 	RegionID        string             `json:"regionId"`
@@ -103,18 +108,19 @@ type broomCachedRegion struct {
 }
 
 type broomRoutingStatus struct {
-	Enabled      bool                `json:"enabled"`
-	Ready        bool                `json:"ready"`
-	RegionID     string              `json:"regionId,omitempty"`
-	GenerationID string              `json:"generationId,omitempty"`
-	Name         string              `json:"name,omitempty"`
-	Error        string              `json:"error,omitempty"`
-	Job          *broomPreparation   `json:"job,omitempty"`
-	Cached       []broomCachedRegion `json:"cached"`
-	CacheBytes   int64               `json:"cacheBytes"`
-	PinnedBytes  int64               `json:"pinnedBytes"`
-	InUseBytes   int64               `json:"inUseBytes"`
-	Reclaimable  int64               `json:"reclaimableBytes"`
+	UpgradePending bool                `json:"upgradePending,omitempty"`
+	Enabled        bool                `json:"enabled"`
+	Ready          bool                `json:"ready"`
+	RegionID       string              `json:"regionId,omitempty"`
+	GenerationID   string              `json:"generationId,omitempty"`
+	Name           string              `json:"name,omitempty"`
+	Error          string              `json:"error,omitempty"`
+	Job            *broomPreparation   `json:"job,omitempty"`
+	Cached         []broomCachedRegion `json:"cached"`
+	CacheBytes     int64               `json:"cacheBytes"`
+	PinnedBytes    int64               `json:"pinnedBytes"`
+	InUseBytes     int64               `json:"inUseBytes"`
+	Reclaimable    int64               `json:"reclaimableBytes"`
 }
 
 type broomRoutingService struct {
@@ -186,8 +192,8 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		"mixed": {"overland_surface_bias": 0.5, "overland_road_bias": 0.6, "offroad_hard_factor": 1},
 		"trail": {"overland_surface_bias": 0.1, "overland_road_bias": 1.3, "offroad_hard_factor": 0.4},
 	}
-	profiles := make(map[string]broomProfileSpec, len(definitions))
-	warmup := make([]*broom.Profile, 0, len(definitions))
+	profiles := make(map[string]broomProfileSpec, 8)
+	warmup := make([]*broom.Profile, 0, 8)
 	for name, overrides := range definitions {
 		resolved, resolveErr := profile.With(overrides)
 		if resolveErr != nil {
@@ -196,12 +202,28 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		profiles[name] = broomProfileSpec{profile: resolved, overrides: overrides}
 		warmup = append(warmup, resolved)
 	}
-	enduro, ok := broom.BuiltinProfile("enduro")
-	if !ok {
-		return nil, errors.New("built-in Enduro profile is unavailable")
+	enduro, _, err := broom.ParseProfile(strings.NewReader(broomEnduroSource), "overland-enduro")
+	if err != nil {
+		return nil, fmt.Errorf("compile Enduro profile: %w", err)
 	}
 	profiles["enduro"] = broomProfileSpec{profile: enduro}
 	warmup = append(warmup, enduro)
+	// Both access policies are prepared before serving queries. An override has
+	// its own metric identity and must never reuse a restricted profile's costs.
+	for _, name := range []string{"road", "mixed", "trail", "enduro"} {
+		spec := profiles[name]
+		overrides := make(map[string]float64, len(spec.overrides)+1)
+		for key, value := range spec.overrides {
+			overrides[key] = value
+		}
+		overrides["overland_access_permit"] = 1
+		permitted, err := spec.profile.With(overrides)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s permit profile: %w", name, err)
+		}
+		profiles[name+"-permit"] = broomProfileSpec{profile: permitted, overrides: overrides}
+		warmup = append(warmup, permitted)
+	}
 	registered := []*broom.Profile{profile, enduro}
 	slices.SortFunc(warmup, func(a, b *broom.Profile) int { return strings.Compare(a.Hash(), b.Hash()) })
 	if cfg.Jobs <= 0 {
@@ -279,23 +301,21 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 	if region == "" {
 		return service, nil
 	}
+	dataset, openErr := service.openInstalledRegion(ctx, region)
+	if openErr == nil {
+		service.current = dataset
+	}
 	if cfg.Prepare || cfg.Update {
 		if startErr := service.startPreparation(region, cfg.Update); startErr != nil {
 			service.lastErr = startErr.Error()
 		}
 		return service, nil
 	}
-	ready, openErr := manager.OpenRegion(ctx, region, broom.OpenRegionOptions{})
 	if openErr != nil {
 		service.lastErr = openErr.Error()
 		return service, nil
 	}
-	if warmErr := service.warmRouter(ctx, ready.Router); warmErr != nil {
-		_ = ready.Router.Close()
-		service.lastErr = warmErr.Error()
-		return service, nil
-	}
-	service.current = datasetFromSetup(ready)
+	service.resumeUpgrade()
 	return service, nil
 }
 
@@ -411,15 +431,11 @@ func (s *broomRoutingService) startPreparation(region string, update bool) error
 		return errors.New("routing region must contain 1..200 characters")
 	}
 	if s.modes.mode() == modeCacheOnly {
-		ready, err := s.manager.OpenRegion(s.ctx, region, broom.OpenRegionOptions{})
+		dataset, err := s.openInstalledRegion(s.ctx, region)
 		if err != nil {
 			return fmt.Errorf("routing data is not installed and cannot be acquired in cache-only mode: %w", err)
 		}
-		if err := s.warmRouter(s.ctx, ready.Router); err != nil {
-			_ = ready.Router.Close()
-			return err
-		}
-		s.replaceDataset(datasetFromSetup(ready))
+		s.replaceDataset(dataset)
 		return nil
 	}
 	s.mu.Lock()
@@ -446,7 +462,7 @@ func (s *broomRoutingService) startPreparation(region string, update bool) error
 
 func (s *broomRoutingService) runPreparation(ctx context.Context, job *broomPreparation, update bool) {
 	s.updateJob(job, func(j *broomPreparation) { j.State = "running" })
-	ready, err := s.manager.EnsureRegion(ctx, job.RegionID, broom.EnsureOptions{
+	options := broom.EnsureOptions{
 		Update: update,
 		Setup: broom.SetupOptions{Jobs: s.jobs, Elevation: broom.Auto, WarmupProfiles: s.warmup, Progress: func(event broom.ProgressEvent) {
 			s.updateJob(job, func(j *broomPreparation) { j.recordProgress(event) })
@@ -457,7 +473,15 @@ func (s *broomRoutingService) runPreparation(ctx context.Context, job *broomPrep
 				}
 			})
 		}},
-	})
+	}
+	ready, err := s.manager.EnsureRegion(ctx, job.RegionID, options)
+	if errors.Is(err, broom.ErrIncompatibleGeneration) {
+		// An application upgrade is enough to require a new build. Users should
+		// not have to distinguish "use downloaded region" from "update".
+		s.updateJob(job, func(j *broomPreparation) { j.Upgrading = true })
+		options.Update = true
+		ready, err = s.manager.EnsureRegion(ctx, job.RegionID, options)
+	}
 	if err != nil {
 		state := "failed"
 		if errors.Is(err, context.Canceled) {
@@ -467,6 +491,12 @@ func (s *broomRoutingService) runPreparation(ctx context.Context, job *broomPrep
 		s.mu.Lock()
 		s.lastErr = err.Error()
 		s.mu.Unlock()
+		// A rapid offline -> online toggle can happen before the old network
+		// generation has unwound. The mode hook saw a running job in that case.
+		// Explicit cancellation cancels ctx too, and must stay paused.
+		if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+			s.resumeUpgrade()
+		}
 		return
 	}
 	if ctx.Err() != nil {
@@ -514,6 +544,7 @@ func (s *broomRoutingService) status(ctx context.Context) broomRoutingStatus {
 	s.mu.RLock()
 	status := broomRoutingStatus{Enabled: true, Error: s.lastErr, Cached: []broomCachedRegion{}}
 	if s.current != nil {
+		status.UpgradePending = s.current.needsUpgrade
 		status.Ready = true
 		status.RegionID, status.GenerationID, status.Name = s.current.regionID, s.current.generationID, s.current.name
 	}
@@ -572,6 +603,7 @@ func (c requiredCoordinate) coordinate() (coordinate, error) {
 }
 
 type broomRouteRequest struct {
+	AccessPermit   bool                 `json:"accessPermit,omitempty"`
 	SessionProfile string               `json:"sessionProfile,omitempty"`
 	Waypoints      []requiredCoordinate `json:"waypoints"`
 	Profile        string               `json:"profile"`
@@ -592,6 +624,7 @@ type broomRouteSegment struct {
 }
 
 type broomRouteResponse struct {
+	AccessPermit    bool                    `json:"accessPermit"`
 	SchemaVersion   int                     `json:"schemaVersion"`
 	Engine          string                  `json:"engine"`
 	EngineVersion   string                  `json:"engineVersion"`
@@ -609,10 +642,19 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 	if len(request.Waypoints) < 2 || len(request.Waypoints) > 100 {
 		return broomRouteResponse{}, errors.New("waypoints must contain 2..100 coordinates")
 	}
-	spec, ok := s.profiles[request.Profile]
-	if !ok && request.Profile != "custom" {
+	switch request.Profile {
+	case "road", "mixed", "trail", "enduro", "custom":
+	default:
 		return broomRouteResponse{}, errors.New("profile must be road, mixed, trail, enduro, or custom")
 	}
+	if request.Profile == "custom" && request.AccessPermit {
+		return broomRouteResponse{}, errors.New("access permit override is unavailable for uploaded profiles")
+	}
+	profileKey := request.Profile
+	if request.AccessPermit {
+		profileKey += "-permit"
+	}
+	spec := s.profiles[profileKey]
 	waypoints := make([]broom.Waypoint, len(request.Waypoints))
 	for i, raw := range request.Waypoints {
 		point, err := raw.coordinate()
@@ -657,7 +699,9 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 	if len(route.Geometry) < 2 {
 		return broomRouteResponse{}, errors.New("routing returned an empty geometry")
 	}
-	return broomResponse(route, request.Profile, dataset.regionID, dataset.generationID)
+	response, err := broomResponse(route, request.Profile, dataset.regionID, dataset.generationID)
+	response.AccessPermit = request.AccessPermit
+	return response, err
 }
 
 func broomResponse(route *broom.Route, profile, regionID, generationID string) (broomRouteResponse, error) {

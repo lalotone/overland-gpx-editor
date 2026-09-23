@@ -88,6 +88,7 @@ export interface OfflineStatus {
 }
 
 export interface RoutingDataJob {
+  upgrading?: boolean
   id: string
   regionId: string
   state: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled' | string
@@ -117,6 +118,7 @@ export interface RoutingDataRegion {
 }
 
 export interface RoutingDataStatus {
+  upgradePending?: boolean
   enabled: boolean
   ready: boolean
   regionId?: string
@@ -523,6 +525,7 @@ function decodeRoutingDataStatus(value: unknown): RoutingDataStatus {
   return {
     enabled: root?.enabled === true,
     ready: root?.ready === true,
+    upgradePending: root?.upgradePending === true,
     regionId: text(root?.regionId),
     generationId: text(root?.generationId),
     name: text(root?.name),
@@ -530,6 +533,7 @@ function decodeRoutingDataStatus(value: unknown): RoutingDataStatus {
     job: jobId && jobRegion ? {
       id: jobId,
       regionId: jobRegion,
+      upgrading: job?.upgrading === true,
       state: text(job?.state) ?? 'unknown',
       phase: text(job?.phase),
       item: text(job?.item),

@@ -1522,15 +1522,36 @@ html.dark .elev-api-banner svg {
   font-size: 0.78rem;
 }
 
+.routing-profile-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .routing-profile-toggle {
   display: flex;
   flex-wrap: wrap;
   max-width: 100%;
-  margin-top: 8px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   overflow: hidden;
   width: fit-content;
+}
+
+.routing-permit {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.routing-profile-upload {
+  padding: 5px;
+  flex-shrink: 0;
 }
 
 .profile-btn {

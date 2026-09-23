@@ -117,11 +117,14 @@ Two rules it is worth repeating here:
   `VITE_ELEVATION_API` adds an optional direct-from-browser fallback and is
   empty by default.
 - **Routing**: embedded Broom with an application-owned motorcycle BRF and
-  Road/Dirt/Trail overrides plus Broom's built-in Enduro profile. Session-uploaded BRFs
+  Road/Dirt/Trail overrides plus an adaptation of Broom's Enduro profile. Both
+  default and rider-declared permit variants are warmed before queries. Session-uploaded BRFs
   stay in memory with temporary metrics and never become library documents.
   Route queries use only an already-open graph;
   region acquisition, graph building, updates and cache pruning go through the
-  explicit `/offline/routing` lifecycle. There is no remote routing fallback.
+  `/offline/routing` lifecycle. Engine upgrades automatically migrate an incompatible
+  active managed region while keeping its readable old graph available; cache-only
+  mode defers acquisition until the user returns online. There is no remote routing fallback.
 - **Surface**: Broom returns OSM surface and road attributes aligned to route
   geometry. Untagged or unsupported surface values remain `unknown`; never infer
   a surface from highway class or track type.

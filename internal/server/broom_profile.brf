@@ -7,6 +7,7 @@ assign validForCars = 1
 assign overland_surface_bias = 0.5 # %overland_surface_bias% | Penalise unsealed surfaces | number
 assign overland_road_bias = 0.6 # %overland_road_bias% | Penalise larger road classes | number
 assign offroad_hard_factor = 1 # %offroad_hard_factor% | Penalise difficult trails | number
+assign overland_access_permit = 0 # %overland_access_permit% | Rider has permission for restricted ways and gates | boolean
 assign considerTurnRestrictions = 1
 assign continueStraight = 0
 assign waypointCatchingRange = 300
@@ -29,6 +30,10 @@ assign motoraccess = if motor_vehicle= then vehicleaccess else not motor_vehicle
 assign motorcycleaccess = if motorcycle= then motoraccess else not motorcycle=no|private
 assign hasway = or not highway= route=ferry
 assign badoneway = if reversedirection=yes then oneway=yes else oneway=-1
+# Broom 0.6 road-class defaults, with a separate rider-declared permit override.
+assign explicitmotor = if motorcycle= then if motor_vehicle= then vehicle=yes|permissive|designated else motor_vehicle=yes|permissive|designated else motorcycle=yes|permissive|designated
+assign motorclassaccess = or not highway=path|footway|cycleway|bridleway|pedestrian|steps explicitmotor
+assign permittedaccess = or overland_access_permit and motorcycleaccess motorclassaccess
 
 assign surfacepenalty = multiply overland_surface_bias
   switch surface=asphalt|paved|concrete 0
@@ -67,7 +72,7 @@ assign roadpenalty = multiply overland_road_bias
   switch route=ferry 5
   3
 
-assign costfactor = if or not hasway not motorcycleaccess then 10000 else if badoneway then 10000 else add 1 add roadpenalty add surfacepenalty add trackpenalty multiply scalepenalty offroad_hard_factor
+assign costfactor = if or not hasway not permittedaccess then 10000 else if or badoneway smoothness=impassable then 10000 else add 1 add roadpenalty add surfacepenalty add trackpenalty multiply scalepenalty offroad_hard_factor
 assign uphillcostfactor = costfactor
 assign downhillcostfactor = costfactor
 assign turncost = 50
@@ -129,4 +134,6 @@ assign vehicleaccess = if vehicle= then defaultaccess else not vehicle=no|privat
 assign motoraccess = if motor_vehicle= then vehicleaccess else not motor_vehicle=no|private
 assign motorcycleaccess = if motorcycle= then motoraccess else not motorcycle=no|private
 assign barrierok = or barrier= barrier=no
-assign initialcost = if or nodeaccessgranted=yes and motorcycleaccess barrierok then 0 else 1000000
+# A permit can include a gate key; solid obstacles still need a real detour.
+assign permitbarrier = and overland_access_permit barrier=gate|lift_gate|swing_gate|chain
+assign initialcost = if and or motorcycleaccess overland_access_permit or barrierok permitbarrier then 0 else 1000000

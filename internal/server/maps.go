@@ -168,6 +168,7 @@ type openFreeMapManager struct {
 	tiles                map[string]string
 	rasters              map[string]string
 	rasterMaxZoom        map[string]int
+	vectorMaxZoom        map[string]int
 	glyphs               string
 	sprite               string
 	primarySource        string
@@ -258,6 +259,7 @@ func (m *openFreeMapManager) loadGeneration() {
 	m.tiles = generation.Tiles
 	m.rasters = generation.Rasters
 	m.rasterMaxZoom = rewrittenRasterMaxZoom(generation.Style, generation.Sources)
+	m.vectorMaxZoom = rewrittenSourceMaxZoom(generation.Style, generation.Sources, "/map/openfreemap/tiles/")
 	m.glyphs = generation.Glyphs
 	m.sprite = generation.Sprite
 	m.primarySource = generation.PrimarySource
@@ -571,6 +573,7 @@ func (m *openFreeMapManager) activate(ctx context.Context) {
 	m.tiles = candidateTiles
 	m.rasters = candidateRasters
 	m.rasterMaxZoom = rewrittenRasterMaxZoom(rewritten, candidateSources)
+	m.vectorMaxZoom = rewrittenSourceMaxZoom(rewritten, candidateSources, "/map/openfreemap/tiles/")
 	m.glyphs = glyphs
 	m.sprite = sprite
 	m.primarySource = primary
@@ -749,6 +752,10 @@ func resourceTemplateString(value *url.URL) string {
 }
 
 func rewrittenRasterMaxZoom(style []byte, sources map[string][]byte) map[string]int {
+	return rewrittenSourceMaxZoom(style, sources, "/map/openfreemap/raster/")
+}
+
+func rewrittenSourceMaxZoom(style []byte, sources map[string][]byte, prefix string) map[string]int {
 	zooms := make(map[string]int)
 	readSource := func(raw json.RawMessage) {
 		var source struct {
@@ -762,7 +769,6 @@ func rewrittenRasterMaxZoom(style []byte, sources map[string][]byte) map[string]
 		if source.MaxZoom != nil {
 			maxZoom = max(0, min(*source.MaxZoom, 19))
 		}
-		const prefix = "/map/openfreemap/raster/"
 		for _, tile := range source.Tiles {
 			if !strings.HasPrefix(tile, prefix) {
 				continue

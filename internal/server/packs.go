@@ -827,9 +827,13 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				return packEstimate{}, fmt.Errorf("pack exceeds %d resources", maxPackResources)
 			}
 			m.server.openFreeMap.mu.RLock()
-			vectorSources := make([]string, 0, len(m.server.openFreeMap.tiles))
+			vectorSources := make(map[string]int, len(m.server.openFreeMap.tiles))
 			for source := range m.server.openFreeMap.tiles {
-				vectorSources = append(vectorSources, source)
+				maxZoom, ok := m.server.openFreeMap.vectorMaxZoom[source]
+				if !ok {
+					maxZoom = 19
+				}
+				vectorSources[source] = maxZoom
 			}
 			rasterSources := make(map[string]int, len(m.server.openFreeMap.rasters))
 			for source := range m.server.openFreeMap.rasters {
@@ -840,16 +844,14 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				rasterSources[source] = maxZoom
 			}
 			m.server.openFreeMap.mu.RUnlock()
-			var tiles []tileKey
-			if len(vectorSources) > 0 {
-				var err error
-				tiles, err = enumeratePackTiles(input, bounds, input.ZoomMin, input.ZoomMax, maxPackResources-estimate.Resources)
+			vectorMissing := 0
+			for source, sourceMaxZoom := range vectorSources {
+				// A WebView overzooms the source's native tiles. Fetch their
+				// ancestors rather than requesting nonexistent high-zoom tiles.
+				tiles, err := enumeratePackTiles(input, bounds, min(input.ZoomMin, sourceMaxZoom), min(input.ZoomMax, sourceMaxZoom), maxPackResources-estimate.Resources)
 				if err != nil {
 					return packEstimate{}, err
 				}
-			}
-			vectorMissing := 0
-			for _, source := range vectorSources {
 				estimate.MapTiles[source] = tiles
 				estimate.Counts["openfreemap"] += len(tiles)
 				estimate.Resources += len(tiles)

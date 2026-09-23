@@ -43,32 +43,34 @@ const (
 )
 
 type packInput struct {
-	Regional  bool         `json:"regional,omitempty"`
-	Name      string       `json:"name"`
-	Automatic bool         `json:"automatic,omitempty"`
-	BBox      *bbox        `json:"bbox,omitempty"`
-	Route     []coordinate `json:"route,omitempty"`
-	PaddingKM float64      `json:"paddingKm"`
-	ZoomMin   int          `json:"zoomMin"`
-	ZoomMax   int          `json:"zoomMax"`
-	Layers    []string     `json:"layers,omitempty"`
-	Scopes    []string     `json:"scopes,omitempty"`
+	CoverageKind string       `json:"coverageKind,omitempty"`
+	Regional     bool         `json:"regional,omitempty"`
+	Name         string       `json:"name"`
+	Automatic    bool         `json:"automatic,omitempty"`
+	BBox         *bbox        `json:"bbox,omitempty"`
+	Route        []coordinate `json:"route,omitempty"`
+	PaddingKM    float64      `json:"paddingKm"`
+	ZoomMin      int          `json:"zoomMin"`
+	ZoomMax      int          `json:"zoomMax"`
+	Layers       []string     `json:"layers,omitempty"`
+	Scopes       []string     `json:"scopes,omitempty"`
 }
 
 func (p *packInput) UnmarshalJSON(raw []byte) error {
 	type wireInput struct {
-		Regional  bool            `json:"regional"`
-		Name      string          `json:"name"`
-		Automatic bool            `json:"automatic"`
-		BBox      json.RawMessage `json:"bbox"`
-		Route     []coordinate    `json:"route"`
-		PaddingKM float64         `json:"paddingKm"`
-		ZoomMin   *int            `json:"zoomMin"`
-		ZoomMax   *int            `json:"zoomMax"`
-		MinZoom   *int            `json:"minZoom"`
-		MaxZoom   *int            `json:"maxZoom"`
-		Layers    []string        `json:"layers"`
-		Scopes    []string        `json:"scopes"`
+		CoverageKind string          `json:"coverageKind"`
+		Regional     bool            `json:"regional"`
+		Name         string          `json:"name"`
+		Automatic    bool            `json:"automatic"`
+		BBox         json.RawMessage `json:"bbox"`
+		Route        []coordinate    `json:"route"`
+		PaddingKM    float64         `json:"paddingKm"`
+		ZoomMin      *int            `json:"zoomMin"`
+		ZoomMax      *int            `json:"zoomMax"`
+		MinZoom      *int            `json:"minZoom"`
+		MaxZoom      *int            `json:"maxZoom"`
+		Layers       []string        `json:"layers"`
+		Scopes       []string        `json:"scopes"`
 	}
 	var wire wireInput
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
@@ -78,6 +80,7 @@ func (p *packInput) UnmarshalJSON(raw []byte) error {
 	}
 	p.Name, p.Automatic, p.Route, p.PaddingKM, p.Layers, p.Scopes = wire.Name, wire.Automatic, wire.Route, wire.PaddingKM, wire.Layers, wire.Scopes
 	p.Regional = wire.Regional
+	p.CoverageKind = wire.CoverageKind
 	if wire.ZoomMin != nil {
 		p.ZoomMin = *wire.ZoomMin
 	} else if wire.MinZoom != nil {
@@ -147,11 +150,14 @@ type poiPackResource struct {
 }
 
 type packResourceProgress struct {
-	Done   int   `json:"done"`
-	Total  int   `json:"total"`
-	Failed int   `json:"failed"`
-	Bytes  int64 `json:"bytes"`
-	Items  int   `json:"items,omitempty"`
+	Reused      int   `json:"reused,omitempty"`
+	Downloaded  int   `json:"downloaded,omitempty"`
+	Revalidated int   `json:"revalidated,omitempty"`
+	Done        int   `json:"done"`
+	Total       int   `json:"total"`
+	Failed      int   `json:"failed"`
+	Bytes       int64 `json:"bytes"`
+	Items       int   `json:"items,omitempty"`
 }
 
 type packManifest struct {
@@ -179,6 +185,7 @@ type packManifest struct {
 }
 
 type packSummary struct {
+	CoverageKind string                          `json:"coverageKind,omitempty"`
 	Unavailable  []blockedPackResource           `json:"unavailable,omitempty"`
 	BatchesDone  int                             `json:"batchesDone,omitempty"`
 	BatchesTotal int                             `json:"batchesTotal,omitempty"`
@@ -409,6 +416,11 @@ func (m *packManager) removeManifestFile(id string) error {
 }
 
 func validatePackInput(input packInput) (bbox, error) {
+	switch input.CoverageKind {
+	case "", "area", "city", "region", "country":
+	default:
+		return bbox{}, errors.New("unknown pack coverage kind")
+	}
 	if input.Regional && (input.BBox == nil || len(input.Route) != 0) {
 		return bbox{}, errors.New("regional packs require a bounding area")
 	}
@@ -676,6 +688,21 @@ func updatePackResource(pack *packManifest, category string, failed bool, bytes 
 	progress.Items += items
 	if failed {
 		progress.Failed++
+	}
+	pack.Resources[category] = progress
+}
+
+// Count response origins rather than admitted bytes: a network replacement can
+// consume zero additional storage. Older manifests have no transfer breakdown.
+func updatePackTransfer(pack *packManifest, category, state string) {
+	progress := pack.Resources[category]
+	switch state {
+	case "hit", "stale":
+		progress.Reused++
+	case "revalidated":
+		progress.Revalidated++
+	case "miss", "bypass":
+		progress.Downloaded++
 	}
 	pack.Resources[category] = progress
 }
@@ -1323,6 +1350,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			pack.Done++
 			pack.Bytes += response.AdmittedBytes
 			updatePackResource(pack, category, false, response.AdmittedBytes, packResponseItems(category, response.Body))
+			updatePackTransfer(pack, category, response.State)
 			pack.addCacheKey(response.Key)
 		})
 		m.releaseRejectedPin(manifest, response.Key, nil, applied)
@@ -1336,6 +1364,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		applied := m.update(manifest, func(pack *packManifest) {
 			pack.Done++
 			updatePackResource(pack, category, false, 0, 0)
+			updatePackTransfer(pack, category, "hit")
 			pack.addCacheKey(key)
 		})
 		m.releaseRejectedPin(manifest, key, nil, applied)
@@ -1577,6 +1606,7 @@ func (m *packManager) summaryLocked(p *packManifest) packSummary {
 		bounds = &copy
 	}
 	summary := packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Unavailable: append([]blockedPackResource(nil), p.Unavailable...)}
+	summary.CoverageKind = p.Input.CoverageKind
 	if p.Input.Regional {
 		summary.BatchesTotal = (p.Total + regionalBatchSize - 1) / regionalBatchSize
 		summary.BatchesDone = p.Done / regionalBatchSize

@@ -5,6 +5,7 @@ import type {
   PackSummary,
   PackEstimateRequest,
   PackBounds,
+  PackResourceProgress,
 } from '../../../src/lib/offline'
 import {
   cancelRoutingData,
@@ -42,6 +43,27 @@ export const RESOURCE_LABELS: Record<string, string> = {
   'fuel-stations': 'Fuel stations',
   water: 'Water',
   campsites: 'Campsites',
+}
+
+export function resourceTransferText(progress: PackResourceProgress | undefined): string | null {
+  if (!progress || (progress.reused === undefined && progress.downloaded === undefined && progress.revalidated === undefined)) return null
+  const parts = [`${(progress.reused ?? 0).toLocaleString()} cached`, `${(progress.downloaded ?? 0).toLocaleString()} downloaded`]
+  if (progress.revalidated) parts.push(`${progress.revalidated.toLocaleString()} checked online`)
+  return parts.join(' · ')
+}
+
+export function coverageLabel(kind: DownloadArea['kind'] | undefined): string {
+  switch (kind) {
+    case 'region': return 'Whole region'
+    case 'country': return 'Whole country'
+    case 'city': return 'City area'
+    case 'area': return 'Selected map area'
+    default: return 'Saved map extent'
+  }
+}
+
+export function boundsLabel(bounds: BoundingBox): string {
+  return `${bounds.south.toFixed(3)}, ${bounds.west.toFixed(3)} → ${bounds.north.toFixed(3)}, ${bounds.east.toFixed(3)}`
 }
 
 export function coversBounds(pack: PackBounds | undefined, area: BoundingBox): boolean {
@@ -144,12 +166,13 @@ export function useDownloads(
             'This area is not covered by one local routing region. Choose a smaller area or a named region.',
           )
         regionId = region.regionId
-        if (area.kind === 'area') name = region.name
+        if (area.kind === 'area') name = `Visible area near ${region.name}`
       }
       const selected = { ...area, name, bounds: box, regionId }
       setTarget({ area: selected, region: regionId })
       const body: PackEstimateRequest = {
         regional: true,
+        coverageKind: area.kind,
         name: `Map: ${name}`,
         bbox: [box.south, box.west, box.north, box.east],
         paddingKm: 0,

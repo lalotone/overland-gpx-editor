@@ -5,7 +5,7 @@ import { searchPlaces } from '../../../src/lib/geocoding'
 import type { PlaceResult } from '../../../src/lib/geocoding'
 import { request } from './model'
 import Icon from './Icon'
-import { coversBounds, RESOURCE_LABELS, packFailure } from './downloads'
+import { coversBounds, RESOURCE_LABELS, packFailure, resourceTransferText, coverageLabel, boundsLabel } from './downloads'
 import type { DownloadArea, DownloadRegion, Downloads } from './downloads'
 
 function normalized(value: string) {
@@ -189,7 +189,7 @@ export default function RegionBrowser({
     downloads.packs.find(
       (pack) => pack.id === matchingTarget?.pack || `pack:${pack.id}` === selected?.id,
     ) ??
-    fullPack(downloads.packs, selected) ??
+    downloads.packs.find((pack) => selected && coversBounds(pack.bbox, selected.bounds)) ??
     downloads.packs.find((pack) => pack.name === `Map: ${selected?.name}`)
   const coversSelection = selected ? coversBounds(matchingPack?.bbox, selected.bounds) : false
   const regionChildren = selectedRecord
@@ -295,8 +295,17 @@ export default function RegionBrowser({
                   : 'Download for offline use'}
               </small>
             </div>
-            {detailInstalled && <span className="region-badge">Downloaded</span>}
+            {detailInstalled && <span className="region-badge">Routing ready</span>}
           </div>
+          {selected && (
+            <p className="muted map-coverage">
+              Map coverage: {coverageLabel(selected.kind)}<br />
+              {boundsLabel(selected.bounds)}
+            </p>
+          )}
+          {matchingPack && !coversSelection && (
+            <p className="muted">This saved pack covers only part of the selected area.</p>
+          )}
           {selected?.kind === 'city' && (
             <p className="muted">
               Map downloads cover the city. Routing uses the provider's covering regional extract.
@@ -357,7 +366,7 @@ export default function RegionBrowser({
                 progress.done === progress.total &&
                 !progress.failed &&
                 !unavailable &&
-                (matchingPack?.status === 'complete' ||
+                (running || matchingPack?.status === 'complete' ||
                   matchingPack?.detail === 'provider_limits' ||
                   matchingPack?.detail === 'resource_failures') &&
                 coversSelection
@@ -391,10 +400,11 @@ export default function RegionBrowser({
                                 : 'Not downloaded'}
                     </span>
                   </div>
-                  {progress && running && (
+                  {progress && running && !done && !unavailable && (
                     <progress max={progress.total || 1} value={progress.done} />
                   )}
-                  {progress && progress.bytes > 0 && <small>{formatBytes(progress.bytes)}</small>}
+                  {resourceTransferText(progress) && <small>{resourceTransferText(progress)}</small>}
+                  {progress && progress.bytes > 0 && <small>{formatBytes(progress.bytes)} added to cache</small>}
                   {unavailable && <small>{unavailable.reason}</small>}
                 </div>
               )
@@ -554,7 +564,7 @@ export default function RegionBrowser({
                       setSelected({
                         id: `pack:${pack.id}`,
                         name: pack.name!.replace(/^Map: /, ''),
-                        kind: 'area',
+                        kind: pack.coverageKind ?? 'area',
                         bounds: pack.bbox!,
                       })
                     }}
@@ -562,6 +572,7 @@ export default function RegionBrowser({
                     <Icon name={pack.incomplete ? 'layers' : 'check'} />
                     <span>
                       {pack.name!.replace(/^Map: /, '')}
+                      <small>{coverageLabel(pack.coverageKind)} · {boundsLabel(pack.bbox!)}</small>
                       <small>
                         {pack.incomplete
                           ? 'Partial download · tap to finish'

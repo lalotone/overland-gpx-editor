@@ -16,6 +16,7 @@ continues to use its existing entry point.
 - **Library:** import GPX, reopen saved tracks, edit with undo, reverse, crop,
   simplify, split, day-stage, refresh elevation and add waypoints. Multi-track
   inputs are presented as separate selectable tracks rather than silently merged.
+  Each saved track has a trash button to delete its GPX file after confirmation.
 - **Offline:** a split map overlay downloads the visible area or opens a region
   browser. The browser has City, Region/comunidad and Country views, a prominent
   Downloaded section, in-use badges, saved map areas and explicit partial states.
@@ -31,16 +32,26 @@ continues to use its existing entry point.
   which can be much larger than the visible map area.
 
 Regional downloads process up to 100,000 resources in bounded batches of 128,
-with two vector-tile workers. One durable pack owns every batch, so later batches
+with four vector-tile workers under the shared four-request provider limit. One durable pack owns every batch, so later batches
 cannot evict earlier downloaded tiles. Ordinary desktop trip packs keep their
 10,000-resource limit. Region manifests checkpoint batches and always flush their
 terminal state; interrupted downloads can reuse existing cached resources.
 
-Elevation (four workers), maps (two workers) and auxiliary data download in
+Elevation (four workers), maps (four workers) and auxiliary data download in
 parallel, under the shared provider limits. If the response cache reaches its
 distinct-key admission rate, packs wait cancellably for the next minute window
 without fetching those responses again or charging their byte budget twice.
-Actual byte/entry quota exhaustion still stops the pack.
+Explicit byte-budgeted packs have a separate bounded allowance of up to 4,000
+new keys/minute; passive requests retain their up-to-1,000 allowance. Actual
+byte/entry quota exhaustion still stops the pack. Completed resource rows show
+Downloaded immediately while other pack stages continue.
+
+Map progress distinguishes cached resources, newly downloaded response bodies and
+responses checked online without downloading the body again. Byte counters are
+labelled as storage added, not network traffic. Retry progress includes checking
+and pinning cached tiles. Saved packs retain their area/city/region/country kind
+and show their bounding coordinates; older packs show their saved extent without
+guessing that a regional name means whole-region coverage.
 
 Routing progress polling does not inspect artifact contents. Broom 0.7's advisory
 cache summary exposes whether its byte count is known, stale and when measured;

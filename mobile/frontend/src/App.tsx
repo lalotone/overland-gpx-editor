@@ -372,6 +372,19 @@ export default function App() {
       label: 'Save track',
     })
   }
+  const deleteTrack = (filename: string) => {
+    ask({
+      title: 'Delete track?',
+      message: `Delete “${filename}” from your library? This cannot be undone.`,
+      label: 'Delete track',
+      action: async () => {
+        await request(`/gpx/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+        setFiles((current) => current.filter((file) => file !== filename))
+        refresh()
+        notify('Track deleted from your library')
+      },
+    })
+  }
   const share = async (track: Track) => {
     const filename = track.filename || toGpxFilename(track.name),
       content = trackGPX(track)
@@ -794,26 +807,36 @@ export default function App() {
                   />
                 </label>
                 {visibleFiles.map((filename) => (
-                  <button
-                    className="track-card"
-                    key={filename}
-                    onClick={() =>
-                      void run(async () => {
-                        const response = await fetch(`/gpx/${encodeURIComponent(filename)}`)
-                        if (!response.ok) throw new Error('Could not open track')
-                        importContent(await response.text(), filename, true)
-                      })
-                    }
-                  >
-                    <span className="track-art">
-                      <Icon name="mountain" size={30} />
-                    </span>
-                    <span>
-                      <strong>{fromGpxFilename(filename)}</strong>
-                      <small>GPX track · on this device</small>
-                    </span>
-                    <Icon name="arrow" size={18} />
-                  </button>
+                  <div className="track-card" key={filename}>
+                    <button
+                      className="track-open"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(async () => {
+                          const response = await fetch(`/gpx/${encodeURIComponent(filename)}`)
+                          if (!response.ok) throw new Error('Could not open track')
+                          importContent(await response.text(), filename, true)
+                        })
+                      }
+                    >
+                      <span className="track-art">
+                        <Icon name="mountain" size={30} />
+                      </span>
+                      <span>
+                        <strong>{fromGpxFilename(filename)}</strong>
+                        <small>GPX track · on this device</small>
+                      </span>
+                      <Icon name="arrow" size={18} />
+                    </button>
+                    <button
+                      className="icon-button track-delete"
+                      aria-label={`Delete ${filename}`}
+                      disabled={busy}
+                      onClick={() => deleteTrack(filename)}
+                    >
+                      <Icon name="trash" size={20} />
+                    </button>
+                  </div>
                 ))}
                 {!files.length && (
                   <div className="empty-state">

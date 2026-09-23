@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { RuntimeConfig, RoutingDataStatus } from '../../../src/lib/offline'
 import type { BoundingBox } from '../../../src/lib/poi'
 import Icon from './Icon'
-import { useDownloads } from './downloads'
+import { useDownloads, resourceTransferText } from './downloads'
 import RegionBrowser from './RegionBrowser'
 
 export default function OfflineMapControl({
@@ -29,7 +29,7 @@ export default function OfflineMapControl({
       ? `Routing · ${status?.job?.phase || 'starting'}`
       : active.length
         ? total
-          ? `Maps · ${active.reduce((sum, pack) => sum + (pack.done || 0), 0)} / ${total}${active[0]?.batchesTotal ? ` · batch ${Math.min((active[0].batchesDone ?? 0) + 1, active[0].batchesTotal)}/${active[0].batchesTotal}` : ''}`
+          ? `Preparing resources · ${active.reduce((sum, pack) => sum + (pack.done || 0), 0)} / ${total}`
           : 'Preparing maps…'
         : offline
           ? 'Go online to download'
@@ -60,6 +60,9 @@ export default function OfflineMapControl({
                   : 'Download this area'}
             </strong>
             <small>{detail}</small>
+            {!preparing && active.length === 1 && resourceTransferText(active[0].resources['vector-map']) && (
+              <small>Maps · {resourceTransferText(active[0].resources['vector-map'])}</small>
+            )}
           </span>
         </button>
         <button

@@ -140,6 +140,7 @@ export interface RoutingDataStatus {
 }
 
 export interface PackSummary extends OfflineJob {
+  coverageKind?: 'area' | 'city' | 'region' | 'country'
   unavailable?: { resource?: string; layer?: string; reason: string }[]
   batchesDone?: number
   batchesTotal?: number
@@ -153,6 +154,9 @@ export interface PackSummary extends OfflineJob {
 }
 
 export interface PackResourceProgress {
+  reused?: number
+  downloaded?: number
+  revalidated?: number
   done: number
   total: number
   failed: number
@@ -161,6 +165,7 @@ export interface PackResourceProgress {
 }
 
 export interface PackEstimateRequest {
+  coverageKind?: 'area' | 'city' | 'region' | 'country'
   regional?: boolean
   name: string
   automatic?: boolean
@@ -697,6 +702,9 @@ function decodePackResources(value: unknown): Record<string, PackResourceProgres
     const progress = record(entry)
     if (!progress) continue
     resources[category] = {
+      reused: number(progress.reused),
+      downloaded: number(progress.downloaded),
+      revalidated: number(progress.revalidated),
       done: number(progress.done) ?? 0,
       total: number(progress.total) ?? 0,
       failed: number(progress.failed) ?? number(progress.failures) ?? 0,
@@ -772,8 +780,11 @@ export function decodePacks(value: unknown): PackSummary[] {
     const job = decodeJob(entry)
     const item = record(entry)
     if (!job || !item) return []
+    const kind = item.coverageKind
+    const coverageKind: PackSummary['coverageKind'] = kind === 'area' || kind === 'city' || kind === 'region' || kind === 'country' ? kind : undefined
     return [{
       ...job,
+      coverageKind,
       unavailable: Array.isArray(item.unavailable) ? item.unavailable.flatMap(value => {
         const blocked = record(value)
         const reason = text(blocked?.reason)

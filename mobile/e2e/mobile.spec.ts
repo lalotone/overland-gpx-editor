@@ -82,6 +82,49 @@ async function setup(page: Page) {
   return { writes, routes, draft: () => draft }
 }
 
+test('library deletes only the confirmed filename and retains tracks after a failure', async ({ page }) => {
+  await setup(page)
+  const filename = 'Ruta #1 & río.gpx'
+  let files = [filename, 'another-track.gpx']
+  let fail = true
+  const deleted: string[] = []
+  await page.route('**/files', route => route.fulfill({ json: { files } }))
+  await page.route('**/gpx/**', async route => {
+    expect(route.request().method()).toBe('DELETE')
+    const path = new URL(route.request().url()).pathname
+    deleted.push(decodeURIComponent(path.slice('/gpx/'.length)))
+    if (fail) return route.fulfill({ status: 500, json: { error: 'Could not delete track' } })
+    files = files.filter(file => file !== deleted.at(-1))
+    return route.fulfill({ json: { message: 'File deleted successfully' } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  const remove = page.getByRole('button', { name: `Delete ${filename}`, exact: true })
+  await remove.click()
+  const dialog = page.getByRole('dialog', { name: 'Delete track?', exact: true })
+  await expect(dialog).toContainText(filename)
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect(deleted).toEqual([])
+  await expect(remove).toBeVisible()
+  await remove.click()
+  await dialog.getByRole('button', { name: 'Delete track', exact: true }).click()
+  await expect(page.locator('.toast')).toContainText('Could not delete track')
+  await expect(remove).toBeVisible()
+  await expect(dialog).toBeVisible()
+  fail = false
+  await dialog.getByRole('button', { name: 'Delete track', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(remove).toHaveCount(0)
+  expect(deleted).toEqual([filename, filename])
+  await expect(page.getByRole('button', { name: 'Delete another-track.gpx', exact: true })).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await expect(remove).toHaveCount(0)
+  await page.getByRole('button', { name: 'Delete another-track.gpx', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Delete track', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'A little inspiration?' })).toBeVisible()
+})
+
 test('Explore is a full map and one offline button downloads the complete area', async ({
   page,
 }) => {
@@ -123,6 +166,8 @@ test('Explore is a full map and one offline button downloads the complete area',
   expect(preparations).toEqual([{ regionId: 'test', update: false }])
   expect(packRequests[0]).toMatchObject({
     regional: true,
+    coverageKind: 'area',
+    name: 'Map: Visible area near Test region',
     layers: ['openfreemap'],
     scopes: ['elevation', 'pois', 'fuel'],
     minZoom: 5,
@@ -209,6 +254,7 @@ test('region browser clearly lists downloads, browses countries and shows every 
       pack = {
         id: 'region-pack',
         name: 'Map: Aragón',
+        coverageKind: 'region',
         state: 'running',
         batchesTotal: 172,
         batchesDone: 1,
@@ -216,7 +262,7 @@ test('region browser clearly lists downloads, browses countries and shows every 
         bbox: bounds,
         resources: Object.fromEntries(
           ['vector-map', 'elevation', 'fuel-prices', 'fuel-stations', 'water', 'campsites'].map(
-            (key) => [key, { done: 3, total: 10, failed: 0, bytes: 1024 }],
+            (key) => [key, { done: key === 'elevation' || key === 'fuel-prices' ? 10 : 3, total: 10, failed: 0, bytes: 1024, ...(key === 'vector-map' ? { reused: 3, downloaded: 0 } : {}) }],
           ),
         ),
       }
@@ -234,14 +280,27 @@ test('region browser clearly lists downloads, browses countries and shows every 
   await expect(screen.getByRole('heading', { name: 'Spain', exact: true })).toBeVisible()
   await screen.locator('.region-row-main').filter({ hasText: 'Aragón' }).click()
   await expect(screen.getByRole('heading', { name: 'Aragón', exact: true })).toBeVisible()
+  await expect(screen.locator('.map-coverage')).toContainText('Whole region')
+  await expect(screen.locator('.map-coverage')).toContainText('40.000, -2.000 → 43.000, 1.000')
   await screen.getByRole('button', { name: 'Download missing resources' }).click()
   await expect(
     screen.locator('.resource-download').filter({ hasText: 'Vector maps' }),
   ).toContainText('3 / 10')
+  const vectors = screen.locator('.resource-download').filter({ hasText: 'Vector maps' })
+  await expect(vectors).toContainText('3 cached · 0 downloaded')
+  const resources = pack!.resources as Record<string, Record<string, number>>
+  resources['vector-map'] = { done: 5, total: 10, failed: 0, bytes: 1024, reused: 3, downloaded: 1, revalidated: 1 }
+  await expect(vectors).toContainText('3 cached · 1 downloaded · 1 checked online')
+  await expect(vectors).toContainText('added to cache')
   await expect(screen.locator('.resource-download').filter({ hasText: 'Water' })).toContainText(
     'Provider limit',
   )
   await expect(screen.getByText('Batch 2 of 172')).toBeVisible()
+  for (const label of ['Elevation', 'Fuel prices']) {
+    const resource = screen.locator('.resource-download').filter({ hasText: label })
+    await expect(resource).toContainText('Downloaded')
+    await expect(resource.getByRole('progressbar')).toHaveCount(0)
+  }
   for (const label of [
     'Routing',
     'Vector maps',
@@ -254,6 +313,30 @@ test('region browser clearly lists downloads, browses countries and shows every 
     await expect(screen.getByText(label, { exact: true })).toBeVisible()
   await screen.getByRole('button', { name: 'Back to regions' }).click()
   await expect(screen.getByRole('heading', { name: 'Spain', exact: true })).toBeVisible()
+})
+
+test('saved map areas distinguish legacy extents from whole-region coverage', async ({ page }) => {
+  await setup(page)
+  await page.route('**/offline/routing/regions', route => route.fulfill({ json: { regions: [] } }))
+  await page.route('**/offline/packs', route => route.fulfill({ json: [
+    { id: 'small', name: 'Map: Cataluña', state: 'complete', bbox: { south: 41.4, west: 2.2, north: 41.6, east: 2.4 }, resources: { 'vector-map': { done: 10, total: 10, failed: 0, bytes: 0 } } },
+    { id: 'whole', name: 'Map: Cataluña', state: 'complete', coverageKind: 'region', bbox: { south: 40.2, west: 0.1, north: 42.8, east: 4.1 }, resources: { 'vector-map': { done: 100, total: 100, failed: 0, bytes: 0, reused: 100 } } },
+  ] }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Offline', exact: true }).click()
+  await page.getByRole('button', { name: 'Download region', exact: true }).click()
+  const screen = page.getByRole('region', { name: 'Download regions', exact: true })
+  const legacy = screen.getByRole('button').filter({ hasText: 'Saved map extent' })
+  await expect(legacy).toContainText('41.400, 2.200 → 41.600, 2.400')
+  const whole = screen.getByRole('button').filter({ hasText: 'Whole region' })
+  await expect(whole).toContainText('40.200, 0.100 → 42.800, 4.100')
+  await legacy.click()
+  await expect(screen.locator('.map-coverage')).toContainText('Selected map area')
+  await expect(screen.locator('.map-coverage')).not.toContainText('Whole region')
+  await screen.getByRole('button', { name: 'Back to regions' }).click()
+  await whole.click()
+  await expect(screen.locator('.map-coverage')).toContainText('Whole region')
+  await expect(screen.locator('.resource-download').filter({ hasText: 'Vector maps' })).toContainText('100 cached · 0 downloaded')
 })
 
 test('region browser can select a city boundary from place search', async ({ page }) => {

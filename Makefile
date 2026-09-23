@@ -12,6 +12,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 ## build: frontend + single self-contained binary
 all: build
 build: frontend backend
+install: frontend backend-install
 
 ## deps: install the npm toolchain (tsc, vite, eslint) if it is missing
 deps: node_modules
@@ -29,6 +30,9 @@ frontend: node_modules
 
 backend:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/$(BINARY)
+
+backend-install:
+	go install -trimpath -ldflags "$(LDFLAGS)" ./cmd/$(BINARY)
 
 ## run: build everything and serve on :8000
 run: build

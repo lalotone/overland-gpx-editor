@@ -118,7 +118,7 @@ export async function calculateRoute(
   waypoints: Coordinate[],
   profile: RoutingProfile,
   signal?: AbortSignal,
-  context: RuntimeRequestContext & { sessionProfile?: string } = {},
+  context: RuntimeRequestContext & { sessionProfile?: string; accessPermit?: boolean } = {},
 ): Promise<RouteResult> {
   if (waypoints.length < 2) throw new RoutingError('Need at least two waypoints')
   if (!context.runtime?.services.broomRoute) {
@@ -131,7 +131,7 @@ export async function calculateRoute(
     backendInit: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile, sessionProfile: context.sessionProfile, waypoints: waypoints.map(({ lat, lon }) => ({ lat, lon })) }),
+      body: JSON.stringify({ profile, sessionProfile: context.sessionProfile, accessPermit: context.accessPermit === true, waypoints: waypoints.map(({ lat, lon }) => ({ lat, lon })) }),
     },
     signal,
   })

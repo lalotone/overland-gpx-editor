@@ -117,12 +117,12 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
     return () => { controller.abort(); window.clearTimeout(timer) }
   }, [map, revision, runtime, status?.generationId])
 
-  const act = async (cancel: boolean) => {
-    if (busy || (!cancel && !region)) return
+  const act = async (cancel: boolean, regionId = region?.regionId) => {
+    if (busy || (!cancel && !regionId)) return
     setBusy(true)
     setError('')
     try {
-      publish(cancel ? await cancelRoutingData(runtime) : await prepareRoutingData(runtime, region!.regionId))
+      publish(cancel ? await cancelRoutingData(runtime) : await prepareRoutingData(runtime, regionId!))
     } catch (reason) { setError((reason as Error).message) }
     finally { setBusy(false) }
   }
@@ -137,6 +137,7 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
     {open && <section className="routing-download-panel" aria-label="Offline routing download">
       <header><div><small>OFFLINE ROUTING</small><strong>{running ? (region?.regionId === job?.regionId ? region?.name : job?.regionId) : region?.name ?? 'Routing data'}</strong></div><button className="routing-download-close" aria-label="Close routing download" onClick={() => setOpen(false)}>×</button></header>
       {running ? <>
+        {job?.upgrading && <p>Updating routing data for this version of Overland. {status?.ready ? 'Your downloaded region remains available while it rebuilds.' : 'Routing will be ready when preparation finishes.'}</p>}
         <ol className="routing-download-stages">{stages.map((stage, i) => <li key={stage.id} className={i < stageIndex ? 'complete' : i === stageIndex ? 'current' : ''}><span>{i < stageIndex ? '✓' : i + 1}</span>{stage.label}</li>)}</ol>
         <div className="routing-download-transfer" role="status">
           <strong>{job?.retrying ? `Retrying · attempt ${job.attempt ?? 1}` : phaseLabel}</strong>
@@ -149,8 +150,12 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
           <progress max={100} value={percent ?? undefined} aria-label="Routing download progress" />
           <small>{job?.phase === 'pbf' || job?.phase === 'elevation' ? `${formatBytes(job?.done ?? 0)}${job?.total ? ` of ${formatBytes(job.total)}` : ''} · current file` : percent !== null ? `${percent}% of current step` : 'Working…'}</small>
         </div>
-        <button className="routing-download-secondary" disabled={busy} onClick={() => void act(true)}>Cancel download</button>
+        <button className="routing-download-secondary" disabled={busy} onClick={() => void act(true)}>{job?.upgrading ? 'Pause routing update' : 'Cancel download'}</button>
       </> : <>
+        {status?.upgradePending && <>
+          <p>{runtime.offline.mode === 'cache-only' ? 'Your downloaded region is available. Its routing update will resume when you go online.' : 'Your downloaded region is available. Finish its routing update to refresh road-access connectivity.'}</p>
+          {runtime.offline.mode !== 'cache-only' && <button className="routing-download-primary" disabled={busy} onClick={() => void act(false, status.regionId)}>Resume routing update</button>}
+        </>}
         <p>{checking ? 'Finding routing data for this view…' : active ? 'Downloaded and ready to ride offline.' : region ? region.coversView === false ? 'Local extract for the map centre. It does not cover every edge of this view; neighbouring areas may need another download.' : 'Smallest available extract covering this view.' : 'No local routing extract found. Zoom in or move towards the area you want to ride.'}</p>
         {!active && <p className="routing-download-estimate">{planning ? 'Checking cached routing data…' : plan?.tilesKnown ? `${plan.tilesTotal} terrain tiles · ${plan.tilesCached} cached · ${plan.tilesMissing} to fetch` : 'Terrain requirements will be known after the road data is downloaded.'}
           {plan?.estimatedBytes != null && <><br />{formatBytes(plan.estimatedBytes)} remaining source downloads</>}
@@ -164,7 +169,7 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
       {!!status?.cacheBytes && <small>{formatBytes(status.cacheBytes)} cached for routing</small>}
     </section>}
     <button className="routing-download-pill" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-      {running ? `${phaseLabel}${job?.phase === 'elevation' ? ` · ${tiles}${job.itemsTotal ? `/${job.itemsTotal}` : ''} tiles` : '…'}` : job?.state === 'failed' ? 'Routing download failed' : active ? 'Routing ready' : 'Offline routing'}
+      {running ? `${job?.upgrading ? 'Updating routing · ' : ''}${phaseLabel}${job?.phase === 'elevation' ? ` · ${tiles}${job.itemsTotal ? `/${job.itemsTotal}` : ''} tiles` : '…'}` : status?.upgradePending ? 'Routing ready · update pending' : job?.state === 'failed' ? 'Routing download failed' : active ? 'Routing ready' : 'Offline routing'}
       {!running && region && !active && <span> · {region.name} ↓</span>}
     </button>
   </div>

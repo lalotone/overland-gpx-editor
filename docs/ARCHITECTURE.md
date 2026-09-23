@@ -76,6 +76,8 @@ internal/server/
 ├── data_endpoints.go           Narrow fuel/place/POI adapters
 ├── broom.go                    Local routing lifecycle, cache and HTTP contract
 ├── broom_profile.brf           Application-owned motorcycle cost profile
+├── broom_enduro.brf            Broom Enduro adaptation with a permit override
+├── broom_upgrade.go            Keep readable old graphs live during migration
 ├── maps.go                     Approved raster and compatible-style adapters
 ├── packs.go                    Trip-pack estimates, manifests and workers
 ├── offline.go                  Capabilities, status and management security
@@ -219,7 +221,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /fuel` | Persisted Spanish national fuel snapshot |
 | `GET /places/search` | Validated, server-rate-limited Nominatim search |
 | `POST /pois/search` | Allowlisted POI kind and bounded bbox |
-| `POST /routing/broom/route` | Local Road/Dirt/Trail route with aligned elevation provenance and OSM annotations |
+| `POST /routing/broom/route` | Local Road/Dirt/Trail/Enduro route; optional `accessPermit` selects a prepared access-override metric; aligned elevations and OSM annotations |
 | `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |

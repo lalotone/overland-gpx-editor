@@ -239,11 +239,25 @@ managed by region; use this for cross-border union graphs. Routing has no public
 provider fallback. Without prepared data it reports that routing data is needed
 while GPX loading and editing continue to work.
 
-**Enduro** uses Broom's built-in road-registered motorcycle BRF, favouring unsealed
-tracks and requiring explicit motor permission on paths. **Upload session BRF**
+Motorcycle profiles require explicit motor permission on non-motor paths by
+default. Enable **Restricted access** when you have a permit for restricted
+ways: it allows access-restricted roads and supported paths, including private
+access and gates/chains you have permission to pass. This applies to the whole
+planned route, defaults off, and resets when you clear the planner. One-way rules,
+turn restrictions and impassable obstacles still apply.
+
+**Enduro** uses an Overland adaptation of Broom's road-registered motorcycle BRF,
+with the same default preferences and the permit option. The **Upload session BRF** icon beside the profiles
 lets you prepare a custom profile for the currently open graph. It is temporary:
 no library file or browser storage is written, and it is released when removed,
 on page exit, or after two hours. Switching routing regions requires a new upload.
+Uploaded BRFs define their own access policy; the permit checkbox is disabled
+for them.
+
+After a Broom upgrade, the active managed region updates automatically when
+online. Its previous graph remains usable while it rebuilds, and **Offline
+routing** shows progress. In cache-only mode the update waits until you return
+online. Failed or paused updates can be resumed from the same panel.
 
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be

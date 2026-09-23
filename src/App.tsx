@@ -702,6 +702,8 @@ function App() {
   const [elevationApiError, setElevationApiError] = useState(false)
   const [elevationInterpolated, setElevationInterpolated] = useState(false)
   const [routingProfile, setRoutingProfile] = useState<RoutingProfile>('mixed')
+  const [accessPermit, setAccessPermit] = useState(false)
+  const routeAccessPermit = accessPermit && routingProfile !== 'custom'
   const [sessionProfile, setSessionProfile] = useState<{ id: string; name: string; generationId?: string } | null>(null)
   const [profileUploading, setProfileUploading] = useState(false)
   const profileInput = useRef<HTMLInputElement>(null)
@@ -1818,7 +1820,7 @@ function App() {
           creationWaypoints.map(w => ({ lat: w.lat, lon: w.lon })),
           routingProfile,
           controller.signal,
-          { runtime, sessionProfile: routingProfile === 'custom' ? sessionProfile?.id : undefined },
+          { runtime, accessPermit: routeAccessPermit, sessionProfile: routingProfile === 'custom' ? sessionProfile?.id : undefined },
         )
         if (!isCurrent()) return
         setRoutedCoordinates(result.coordinates)
@@ -1839,7 +1841,7 @@ function App() {
     }, ROUTE_DEBOUNCE_MS)
 
     return () => { clearTimeout(timer); controller.abort() }
-  }, [clearRouteDerived, creationWaypoints, routingData?.generationId, routingData?.ready, routingData?.error, routingProfile, runtime, viewMode, notify, sessionProfile?.id])
+  }, [clearRouteDerived, creationWaypoints, routingData?.generationId, routingData?.ready, routingData?.error, routingProfile, routeAccessPermit, runtime, viewMode, notify, sessionProfile?.id])
 
   const creationCoordinates = useMemo<Coordinate[]>(
     () =>
@@ -1949,6 +1951,7 @@ function App() {
 
   /** Wipe the route back to an empty map, staying on the planner. */
   const clearCreation = useCallback(() => {
+    setAccessPermit(false)
     routeSeqRef.current++
     setCreationWaypoints([])
     setCreationPins([])
@@ -1958,6 +1961,7 @@ function App() {
   }, [clearRouteDerived])
 
   const resetCreation = useCallback(() => {
+    setAccessPermit(false)
     routeSeqRef.current++
     setCreationWaypoints([])
     setCreationPins([])
@@ -2211,6 +2215,7 @@ function App() {
         routePoints: creationWaypoints,
         waypoints: creationPins,
         profile: routingProfile,
+        accessPermit: routeAccessPermit,
         displayCoordinates: creationCoordinates,
         routedCoordinates,
         distanceKm: creationDistance,
@@ -2748,30 +2753,38 @@ function App() {
               <div className="creation-title-row">
                 <h2>Create New Track</h2>
                 <p>Click on the map to add waypoints. Add at least 2 points to generate a route.</p>
-                <div className="routing-profile-toggle">
-                  {ROUTING_PROFILES.map(p => (
-                    <button
-                      key={p.id}
-                      className={`profile-btn${routingProfile === p.id ? ' active' : ''}`}
-                      onClick={() => setRoutingProfile(p.id)}
-                      title={p.hint}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                  {sessionProfile && <>
-                    <button className={`profile-btn${routingProfile === 'custom' ? ' active' : ''}`} onClick={() => setRoutingProfile('custom')} title="Uploaded BRF — current session only">{sessionProfile.name}</button>
-                    <button className="profile-btn" aria-label="Remove session profile" onClick={() => { setSessionProfile(null); if (routingProfile === 'custom') setRoutingProfile('mixed') }}>×</button>
-                  </>}
+                <div className="routing-profile-controls">
+                  <div className="routing-profile-toggle">
+                    {ROUTING_PROFILES.map(p => (
+                      <button
+                        key={p.id}
+                        className={`profile-btn${routingProfile === p.id ? ' active' : ''}`}
+                        onClick={() => setRoutingProfile(p.id)}
+                        title={p.hint}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                    {sessionProfile && <>
+                      <button className={`profile-btn${routingProfile === 'custom' ? ' active' : ''}`} onClick={() => setRoutingProfile('custom')} title="Uploaded BRF — current session only">{sessionProfile.name}</button>
+                      <button className="profile-btn" aria-label="Remove session profile" onClick={() => { setSessionProfile(null); if (routingProfile === 'custom') setRoutingProfile('mixed') }}>×</button>
+                    </>}
+                  </div>
+                  <button className="btn btn-ghost btn-xs routing-profile-upload" disabled={!routingData?.ready || profileUploading} aria-label={profileUploading ? 'Preparing profile…' : 'Upload session BRF'} title={profileUploading ? 'Preparing profile…' : 'Upload session BRF'} onClick={() => profileInput.current?.click()}>
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5" />
+                    </svg>
+                  </button>
+                  <label className="routing-permit">
+                    <input type="checkbox" checked={routeAccessPermit} disabled={routingProfile === 'custom'} onChange={event => setAccessPermit(event.target.checked)} />
+                    Restricted access
+                  </label>
                 </div>
                 <input ref={profileInput} type="file" accept=".brf" hidden aria-label="Session BRF profile" onChange={event => {
                   const file = event.target.files?.[0]
                   event.target.value = ''
                   if (file) void uploadProfile(file)
                 }} />
-                <button className="btn btn-ghost btn-xs" disabled={!routingData?.ready || profileUploading} title="Upload a temporary BRF for this browser session and routing region" onClick={() => profileInput.current?.click()}>
-                  {profileUploading ? 'Preparing profile…' : 'Upload session BRF'}
-                </button>
               </div>
               <div className="creation-controls">
                 <button

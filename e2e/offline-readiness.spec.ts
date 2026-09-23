@@ -345,9 +345,11 @@ test('Enduro and session BRF profiles are selectable without persisting the uplo
   await page.getByRole('button', { name: 'Plan a route' }).click()
   await page.getByRole('button', { name: 'Enduro', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Enduro', exact: true })).toHaveClass(/active/)
+  await expect(page.getByRole('checkbox', { name: 'Restricted access' })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Upload session BRF' })).toBeEnabled()
   await page.getByLabel('Session BRF profile').setInputFiles({ name: 'Weekend.brf', mimeType: 'text/plain', buffer: Buffer.from('session BRF test') })
   await expect(page.getByRole('button', { name: 'Weekend', exact: true })).toHaveClass(/active/)
+  await expect(page.getByRole('checkbox', { name: 'Restricted access' })).toBeDisabled()
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('session-test-token')
   await page.getByRole('button', { name: 'Remove session profile' }).click()
   await expect.poll(() => released).toBe(true)
@@ -355,6 +357,66 @@ test('Enduro and session BRF profiles are selectable without persisting the uplo
   await page.reload()
   await page.getByRole('button', { name: 'Plan a route' }).click()
   await expect(page.getByRole('button', { name: 'Weekend', exact: true })).toHaveCount(0)
+})
+
+test('permit access reroutes and routing upgrades keep the planner usable', async ({ page }) => {
+  await mockRuntime(page)
+  let upgrading = true
+  let paused = false
+  const requests: { profile: string; accessPermit: boolean }[] = []
+  const status = () => ({
+    enabled: true, ready: true, regionId: 'aragon', generationId: upgrading ? 'old' : 'new',
+    upgradePending: upgrading, cached: [], cacheBytes: 4096,
+    job: { id: 'upgrade', regionId: 'aragon', upgrading: true, state: upgrading ? paused ? 'cancelled' : 'running' : 'complete', phase: 'build' },
+  })
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', routing: '/offline/routing' },
+    services: { broomRoute: '/routing/broom/route' },
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing$/, route => json(route, status()))
+  await page.route(/\/offline\/routing\/suggest$/, route => json(route, { region: { regionId: 'aragon', name: 'Aragón', installed: true, active: true } }))
+  await page.route(/\/offline\/routing\/cancel$/, route => { paused = true; return json(route, status()) })
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    expect(route.request().postDataJSON()).toMatchObject({ regionId: 'aragon', update: false })
+    paused = false
+    return json(route, status(), 202)
+  })
+  await page.route(/\/routing\/broom\/route$/, route => {
+    requests.push(route.request().postDataJSON())
+    return json(route, {
+      schemaVersion: 1, engine: 'Broom', engineVersion: '0.6.0',
+      coordinates: [{ lat: 41.6, lon: -0.9 }, { lat: 41.7, lon: -0.8 }],
+      elevations: [null, null], segments: [], distanceMeters: 15000, durationSeconds: 900,
+    })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan a route' }).click()
+  const permit = page.getByRole('checkbox', { name: 'Restricted access' })
+  await expect(permit).not.toBeChecked()
+  const pill = page.locator('.routing-download-pill')
+  await expect(pill).toContainText('Updating routing')
+  await pill.click()
+  await expect(page.getByText('Your downloaded region remains available', { exact: false })).toBeVisible()
+  await page.getByRole('button', { name: 'Pause routing update' }).click()
+  await page.getByRole('button', { name: 'Resume routing update' }).click()
+  await pill.click()
+  await page.locator('.leaflet-container').click({ position: { x: 170, y: 150 } })
+  await page.locator('.leaflet-container').click({ position: { x: 240, y: 210 } })
+  await expect.poll(() => requests.at(-1)).toMatchObject({ profile: 'mixed', accessPermit: false })
+  await permit.check()
+  await expect.poll(() => requests.at(-1)).toMatchObject({ profile: 'mixed', accessPermit: true })
+  await page.getByRole('button', { name: 'Enduro', exact: true }).click()
+  await expect.poll(() => requests.at(-1)).toMatchObject({ profile: 'enduro', accessPermit: true })
+  await permit.uncheck()
+  await expect.poll(() => requests.at(-1)).toMatchObject({ profile: 'enduro', accessPermit: false })
+  const beforeUpgrade = requests.length
+  upgrading = false
+  await expect(pill).toHaveText('Routing ready')
+  await expect.poll(() => requests.length).toBeGreaterThan(beforeUpgrade)
+  await permit.check()
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  await expect(permit).not.toBeChecked()
 })
 
 test('planner suggests viewport routing downloads and reveals progress', async ({ page }, testInfo) => {

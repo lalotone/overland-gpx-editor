@@ -202,6 +202,9 @@ func (s *Server) handleOfflineMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if changed {
 		slog.Info("Offline mode changed", "mode", request.Mode)
+		if request.Mode == modeAuto && s.broom != nil {
+			s.broom.resumeUpgrade()
+		}
 		if request.Mode == modeAuto && s.openFreeMap != nil && !s.openFreeMap.isActive() {
 			s.wg.Add(1)
 			go func() {

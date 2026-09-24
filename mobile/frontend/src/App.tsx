@@ -30,8 +30,10 @@ import type { Document, Draft, Plan, Tab } from './model'
 import Icon from './Icon'
 import MobileMap from './MobileMap'
 import TrackSummary from './TrackSummary'
+import RouteSurface from './RouteSurface'
 import OfflineMapControl from './OfflineMapControl'
 import PlanPanel, { PlanHandle } from './PlanPanel'
+import { useIncomingGPX } from './useIncomingGPX'
 
 const emptyCoordinates: Coordinate[] = []
 type Dialog = {
@@ -48,6 +50,7 @@ export default function App() {
   const [startupError, setStartupError] = useState('')
   const [startupAttempt, setStartupAttempt] = useState(0)
   const [native, setNative] = useState(false)
+  const [incomingGPX, setIncomingGPX] = useState(false)
   const [tab, setTab] = useState<Tab>('explore')
   const [activeMap, setActiveMap] = useState<'plan' | 'track'>('plan')
   const [expanded, setExpanded] = useState(false)
@@ -157,8 +160,11 @@ export default function App() {
   }, [startupAttempt])
   useEffect(() => {
     const controller = new AbortController()
-    void request<{ native: boolean }>('/mobile/capabilities', { signal: controller.signal })
-      .then((value) => setNative(value.native))
+    void request<{ native: boolean; incomingGPX?: boolean }>('/mobile/capabilities', { signal: controller.signal })
+      .then((value) => {
+        setNative(value.native)
+        setIncomingGPX(value.incomingGPX === true)
+      })
       .catch(() => {})
     void request<unknown>('/mobile/draft', { signal: controller.signal })
       .then((raw) => {
@@ -349,6 +355,17 @@ export default function App() {
       )
       if (result.filename) importContent(result.content, result.filename)
     })
+  const shared = useIncomingGPX({
+    enabled: incomingGPX && hydrated,
+    blocked: busy || !!dialog || choices.length > 0,
+    dirty: document?.dirty === true,
+    onImport: (content, filename) => {
+      importContent(content, filename)
+      setRouteInfoOpen(false)
+      setLayersOpen(false)
+    },
+    onError: notify,
+  })
   const saveTrack = async (track: Track, filename: string, replace: boolean) => {
     const content = trackGPX(track)
     if (replace)
@@ -499,6 +516,8 @@ export default function App() {
     ? Math.round((range[1] / 100) * (activeTrack.coordinates.length - 1))
     : 0
   const terrainLayers = useMemo(() => runtimeTerrainLayers(runtime), [runtime])
+  const detailCoordinates = tab === 'plan' ? route?.coordinates
+    : tab === 'library' ? document?.track.coordinates : undefined
 
   const mapOnly = tab === 'explore' || tab === 'offline' || (tab === 'plan' && !planPanelOpen)
   return (
@@ -642,21 +661,6 @@ export default function App() {
                 <Icon name="info" size={24} />
               </button>
             )}
-            {route && routeInfoOpen && (
-              <section className="route-info-overlay" role="dialog" aria-label="Route details">
-                <div className="section-heading">
-                  <h2>Route details</h2>
-                  <button
-                    className="icon-button"
-                    aria-label="Close route details"
-                    onClick={() => setRouteInfoOpen(false)}
-                  >
-                    <Icon name="close" size={20} />
-                  </button>
-                </div>
-                <TrackSummary coordinates={route.coordinates} duration={route.durationSeconds} />
-              </section>
-            )}
           </>
         )}
         {tab === 'explore' && (
@@ -763,6 +767,23 @@ export default function App() {
             })
           }
         />
+      )}
+      {detailCoordinates && routeInfoOpen && (
+        <section className="route-info-overlay" role="dialog" aria-label="Route details">
+          <div className="section-heading">
+            <h2>Route details</h2>
+            <button className="icon-button" aria-label="Close route details" onClick={() => setRouteInfoOpen(false)}>
+              <Icon name="close" size={20} />
+            </button>
+          </div>
+          <TrackSummary coordinates={detailCoordinates} duration={tab === 'plan' ? route?.durationSeconds : undefined} />
+          <RouteSurface
+            coordinates={detailCoordinates}
+            surface={tab === 'plan' ? route?.surface : undefined}
+            runtime={runtime}
+            routing={routing}
+          />
+        </section>
       )}
       {tab === 'library' && (
         <section className="bottom-sheet" aria-label={`${tab} panel`}>
@@ -877,6 +898,13 @@ export default function App() {
             {tab === 'library' && document && (
               <div className="panel-stack">
                 <TrackSummary coordinates={document.track.coordinates} />
+                <button className="secondary" onClick={() => {
+                  setLayersOpen(false)
+                  setRouteInfoOpen(true)
+                }}>
+                  <Icon name="info" size={18} />
+                  Route details
+                </button>
                 <div className="track-meta">
                   {document.track.coordinates.length.toLocaleString()} points ·{' '}
                   {document.track.waypoints.length} saved places
@@ -1085,6 +1113,19 @@ export default function App() {
           </button>
         ))}
       </nav>
+      {shared.pending && (
+        <aside className="incoming-gpx" aria-label="Shared GPX">
+          <div>
+            <strong>{shared.working ? 'Opening shared GPX…' : 'Shared GPX received'}</strong>
+            <span>{shared.pending.filename}</span>
+            {shared.error && <small>{shared.error}</small>}
+          </div>
+          <button className="text-button" disabled={busy || shared.working || !!dialog || choices.length > 0}
+            onClick={() => confirmReplace(shared.open)}>Open shared GPX</button>
+          <button className="icon-button" aria-label="Dismiss shared GPX" disabled={shared.working}
+            onClick={() => void shared.dismiss()}><Icon name="close" size={18} /></button>
+        </aside>
+      )}
       {toast && (
         <div className="toast" role="status">
           <span>{toast}</span>

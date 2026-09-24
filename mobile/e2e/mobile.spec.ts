@@ -21,7 +21,7 @@ async function setup(page: Page) {
           packs: '/offline/packs',
           modeControl: '/offline/mode',
         },
-        services: { broomRoute: '/routing/broom/route', places: '/places/search' },
+        services: { broomRoute: '/routing/broom/route', broomAnnotate: '/routing/broom/annotate', places: '/places/search' },
         maps: { openfreemap: { style: '/test/style.json' } },
       })
     if (url.pathname === '/test/style.json')
@@ -81,6 +81,113 @@ async function setup(page: Page) {
   })
   return { writes, routes, draft: () => draft }
 }
+
+async function incomingInbox(page: Page) {
+  let items: { id: string; filename: string; content: string }[] = []
+  let reads = 0
+  let failAcknowledgement = false
+  await page.route('**/mobile/capabilities', route => route.fulfill({ json: { native: false, incomingGPX: true } }))
+  await page.route('**/mobile/incoming**', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/mobile/incoming') return route.fulfill({ json: items.map(({ id, filename }) => ({ id, filename })) })
+    const id = path.split('/').pop()
+    if (route.request().method() === 'DELETE') {
+      if (failAcknowledgement) return route.fulfill({ status: 503, body: 'Temporary cleanup error' })
+      items = items.filter(item => item.id !== id)
+      return route.fulfill({ status: 204 })
+    }
+    const item = items.find(item => item.id === id)
+    reads++
+    return item ? route.fulfill({ json: item }) : route.fulfill({ status: 404 })
+  })
+  return {
+    add: (filename: string, content = fixture) => items.push({ id: String(items.length + 1), filename, content }),
+    count: () => items.length,
+    reads: () => reads,
+    failAck: (value: boolean) => { failAcknowledgement = value },
+  }
+}
+
+test('cold-start shared GPX waits for draft restoration and remains create-only', async ({ page }) => {
+  const state = await setup(page)
+  const inbox = await incomingInbox(page)
+  inbox.add('original-filename.gpx')
+  let release!: () => void
+  const restored = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/mobile/draft', async route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    await restored
+    await route.fulfill({ json: null })
+  })
+  await page.goto('/')
+  await expect(page.getByRole('navigation')).toBeVisible()
+  expect(inbox.reads()).toBe(0)
+  release()
+  await expect(page.getByRole('heading', { name: 'Original filename', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save to library', exact: true })).toBeVisible()
+  await expect.poll(() => inbox.count()).toBe(0)
+  await expect.poll(() => state.draft()).toMatchObject({ document: { libraryFilename: null, dirty: true } })
+  expect(state.writes).toHaveLength(0)
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Open shared GPX', exact: true })).toHaveCount(0)
+})
+
+test('warm shared GPX preserves unsaved edits until replacement is confirmed', async ({ page }) => {
+  const state = await setup(page)
+  const inbox = await incomingInbox(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Edit track', exact: true }).click()
+  await page.getByRole('button', { name: 'Reverse', exact: true }).click()
+  inbox.add('received.gpx')
+  const banner = page.getByRole('complementary', { name: 'Shared GPX' })
+  await expect(banner).toContainText('received.gpx')
+  expect(inbox.reads()).toBe(0)
+  await banner.getByRole('button', { name: 'Open shared GPX' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Open another track?' })
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Original filename', exact: true })).toBeVisible()
+  expect(inbox.count()).toBe(1)
+  await banner.getByRole('button', { name: 'Open shared GPX' }).click()
+  await dialog.getByRole('button', { name: 'Open track', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Received', exact: true })).toBeVisible()
+  await expect.poll(() => inbox.count()).toBe(0)
+  expect(state.writes).toHaveLength(0)
+})
+
+test('a malformed shared GPX can be dismissed without replacing the current track', async ({ page }) => {
+  await setup(page)
+  const inbox = await incomingInbox(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  inbox.add('broken.gpx', '<gpx><not-a-track/></gpx>')
+  const banner = page.getByRole('complementary', { name: 'Shared GPX' })
+  await expect(banner).toContainText('No usable track')
+  await expect(page.getByRole('heading', { name: 'Original filename', exact: true })).toBeVisible()
+  await banner.getByRole('button', { name: 'Dismiss shared GPX' }).click()
+  await expect.poll(() => inbox.count()).toBe(0)
+  await expect(banner).toHaveCount(0)
+})
+
+test('shared multi-track GPX uses the existing chooser and retries cleanup without reopening', async ({ page }) => {
+  const state = await setup(page)
+  const inbox = await incomingInbox(page)
+  inbox.add('parts.gpx', fixture.replace('</gpx>', '<trk><name>Second part</name><trkseg><trkpt lat="42" lon="1"/><trkpt lat="42.1" lon="1.1"/></trkseg></trk></gpx>'))
+  inbox.failAck(true)
+  await page.goto('/')
+  const chooser = page.getByRole('dialog', { name: 'Choose track' })
+  await expect(chooser).toBeVisible()
+  await chooser.getByRole('button', { name: /Second part/ }).click()
+  await expect(page.getByRole('heading', { name: 'Parts 2', exact: true })).toBeVisible()
+  const reads = inbox.reads()
+  inbox.failAck(false)
+  await expect.poll(() => inbox.count()).toBe(0)
+  expect(inbox.reads()).toBe(reads)
+  expect(state.writes).toHaveLength(0)
+  await expect(chooser).toHaveCount(0)
+})
 
 test('app and local GPX editing remain usable while backend startup is pending', async ({ page }) => {
   await setup(page)
@@ -459,6 +566,127 @@ test('planner uses centre controls, riding profiles and explicit permits', async
   await expect.poll(() => state.writes.length).toBe(1)
   expect(state.writes[0].url).toBe('/upload')
   expect(state.writes[0].body).not.toContain('<ele>350.00</ele>')
+})
+
+test('route details show distance-weighted surfaces including unknown sections', async ({ page }) => {
+  await setup(page)
+  await page.route('**/routing/broom/route', route => route.fulfill({ json: {
+    schemaVersion: 1,
+    coordinates: [0, 0.06, 0.07, 0.08, 0.09, 0.1].map(lon => ({ lat: 0, lon })),
+    elevations: [null, null, null, null, null, null],
+    segments: ['asphalt', 'gravel', 'dirt', 'sand', ''].map((surface, i) => ({
+      geometryStart: i, geometryEnd: i + 1, surface,
+    })),
+    durationSeconds: 600,
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Plan', exact: true }).click()
+  await page.getByRole('button', { name: 'Start route here' }).click()
+  await page.getByRole('button', { name: 'Add next point here' }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  const info = page.getByRole('dialog', { name: 'Route details' })
+  for (const [label, percent] of [['Sealed road', '60%'], ['Gravel / compacted', '10%'], ['Dirt track', '10%'], ['Path / rough', '10%'], ['Unknown', '10%']]) {
+    await expect(info.getByRole('listitem').filter({ hasText: label })).toContainText(percent)
+  }
+  await expect(info.getByText('Unknown', { exact: true })).toBeVisible()
+  const bounds = await info.boundingBox()
+  expect(bounds!.y + bounds!.height).toBeLessThan(page.viewportSize()!.height - 68)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('imported track details annotate original geometry and refresh after edits', async ({ page }) => {
+  const state = await setup(page)
+  const requests: { coordinates: { lat: number; lon: number }[] }[] = []
+  await page.route('**/routing/broom/annotate', route => {
+    requests.push(route.request().postDataJSON())
+    return route.fulfill({ json: { schemaVersion: 1, distanceMeters: 1000, surfaces: [
+      { surface: route.request().postDataJSON().coordinates[0].lon === 1 ? 'asphalt' : 'dirt', distanceMeters: 600 },
+      { surface: 'gravel', distanceMeters: 100 },
+      { surface: '', distanceMeters: 300 },
+    ] } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  const info = page.getByRole('dialog', { name: 'Route details' })
+  await expect(info.getByRole('listitem').filter({ hasText: 'Sealed road' })).toContainText('60%')
+  await expect(info.getByRole('listitem').filter({ hasText: 'Unknown' })).toContainText('30%')
+  expect(requests[0].coordinates).toEqual(Array.from({ length: 10 }, (_, i) => ({ lat: 42 + i / 100, lon: 1 + i / 100 })))
+  await expect.poll(() => state.draft()).toMatchObject({ document: { dirty: false } })
+  expect(state.writes).toHaveLength(0)
+  await page.getByRole('button', { name: 'Close route details' }).click()
+  await page.getByRole('button', { name: 'Edit track', exact: true }).click()
+  await page.getByRole('button', { name: 'Reverse', exact: true }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  await expect(info.getByRole('listitem').filter({ hasText: 'Dirt track' })).toContainText('60%')
+  await expect(info.getByRole('listitem').filter({ hasText: 'Sealed road' })).toHaveCount(0)
+  expect(requests[requests.length - 1].coordinates).toEqual([...requests[0].coordinates].reverse())
+  expect(state.writes).toHaveLength(0)
+})
+
+test('surface lookup failure is advisory and can be retried', async ({ page }) => {
+  await setup(page)
+  let recovered = false
+  await page.route('**/routing/broom/annotate', route => {
+    if (!recovered) return route.fulfill({ status: 422, json: { detail: 'Split the track to fit the annotation limit' } })
+    return route.fulfill({ json: { schemaVersion: 1, distanceMeters: 1000, surfaces: [{ surface: '', distanceMeters: 1000 }] } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  const info = page.getByRole('dialog', { name: 'Route details' })
+  await expect(info.getByRole('status')).toContainText('Split the track')
+  await expect(info.getByText('Distance', { exact: true })).toBeVisible()
+  recovered = true
+  await info.getByRole('button', { name: 'Retry surface lookup' }).click()
+  await expect(info.getByRole('listitem').filter({ hasText: 'Unknown' })).toContainText('100%')
+})
+
+test('surface lookup ignores an old result after switching routing regions', async ({ page }) => {
+  await setup(page)
+  let generation = 'old'
+  let oldRequests = 0
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/offline/routing', route => route.fulfill({ json: {
+    enabled: true, ready: true, regionId: 'test', generationId: generation, cached: [],
+  } }))
+  await page.route('**/routing/broom/annotate', async route => {
+    const current = generation
+    if (current === 'old') { oldRequests++; await pending }
+    await route.fulfill({ json: { schemaVersion: 1, distanceMeters: 1000, surfaces: [
+      { surface: current === 'old' ? 'asphalt' : 'gravel', distanceMeters: 1000 },
+    ] } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  const info = page.getByRole('dialog', { name: 'Route details' })
+  try {
+    await expect.poll(() => oldRequests).toBeGreaterThan(0)
+    await expect(info.getByRole('status')).toContainText('Looking up')
+    generation = 'new'
+    await expect(info.getByRole('listitem').filter({ hasText: 'Gravel / compacted' })).toContainText('100%')
+  } finally { release() }
+  await expect(info.getByRole('listitem').filter({ hasText: 'Sealed road' })).toHaveCount(0)
+})
+
+test('track details remain available without a prepared routing region', async ({ page }) => {
+  await setup(page)
+  await page.route('**/offline/routing', route => route.fulfill({ json: { enabled: true, ready: false, cached: [] } }))
+  let requested = false
+  await page.route('**/routing/broom/annotate', route => { requested = true; return route.abort() })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  const info = page.getByRole('dialog', { name: 'Route details' })
+  await expect(info.getByText('Open or download a routing region', { exact: false })).toBeVisible()
+  await expect(info.getByText('Distance', { exact: true })).toBeVisible()
+  expect(requested).toBe(false)
 })
 
 test('Plan pins its profiles and actions while points scroll, and supports pulling up', async ({

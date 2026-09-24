@@ -538,6 +538,7 @@ func (s *Server) routes() http.Handler {
 	r.Post("/pois/search", s.protectOutboundResource(s.handlePOISearch))
 	if s.broom != nil {
 		r.Post("/routing/broom/route", s.protectOutboundResource(s.handleBroomRoute))
+		r.Post("/routing/broom/annotate", s.protectOutboundResource(s.handleBroomAnnotate))
 	}
 	r.Get("/map/raster/{layer}/{z}/{x}/{y}", s.protectOutboundResource(s.handleRasterMap))
 	r.Get("/map/openfreemap/style.json", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {

@@ -9,7 +9,8 @@ continues to use its existing entry point.
 - **Explore:** full-screen map, place search at the top, fuel/water/camp overlays
   at the bottom. Map layers, location and track fitting are floating controls.
 - **Plan:** map-first by default, with a round add-point button at the bottom
-  right and route-info button on the left. Tap or pull up the route-points handle to reveal a panel with pinned
+  right and route-info button on the left. Route details shows distance-weighted
+  surface percentages with unknown sections kept separate. Tap or pull up the route-points handle to reveal a panel with pinned
   Road/Dirt/Trail/Enduro profiles and save/share actions; only the point list
   scrolls. Drag numbered map controls to adjust the route. An info button opens
   distance, elevation and moving-time details over the map.
@@ -17,6 +18,10 @@ continues to use its existing entry point.
   simplify, split, day-stage, refresh elevation and add waypoints. Multi-track
   inputs are presented as separate selectable tracks rather than silently merged.
   Each saved track has a trash button to delete its GPX file after confirmation.
+  **Route details** also looks up imported GPX surfaces through Broom 0.9's
+  `AnnotateTrack` API using the open routing region. It works offline, keeps
+  ambiguous/unmatched sections unknown, and never changes the track. Surface
+  lookup failures leave the distance/elevation summary and editing available.
 - **Offline:** a split map overlay downloads the visible area or opens a region
   browser. The browser has City, Region/comunidad and Country views, a prominent
   Downloaded section, in-use badges, saved map areas and explicit partial states.
@@ -66,6 +71,18 @@ zooms are respected when preparing map packs.
 
 The Online/Offline pill switches the backend's strict cache-only mode. Native
 exports use Android's share sheet; opening a document uses the system picker.
+Other apps can also **Share** a GPX attachment or **Open with → Overland**. This
+works on a fresh launch and when Overland is already running. GPX, XML, plain-text
+and binary attachment MIME types are accepted when the display name ends in
+`.gpx`; unnamed attachments need an explicit GPX MIME type. Imports use granted
+`content://` URIs, not arbitrary filesystem paths or download URLs.
+
+Incoming files open after draft restoration. If a track has unsaved edits, a
+**Shared GPX received** card offers Open or Dismiss, and opening uses the normal
+replacement confirmation. Multi-track files use the existing track chooser.
+Receiving a file never saves over a library entry. The private inbox retains up
+to eight files of 16 MiB each until opened or dismissed; unfinished copies are
+not visible to the UI.
 
 Drafts are automatically saved to app-private storage, including planner controls
 and the current editor document. They survive process restarts and APK updates.
@@ -105,7 +122,8 @@ the Android debug keystore unless `ANDROID_KEYSTORE_FILE`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
 are supplied. Store submission/AAB packaging is not part of this build target.
 
-The script installs its pinned Wails CLI under `mobile/bin/tools`, generates the
+The script installs its pinned Wails CLI with CGO disabled under `mobile/bin/tools`
+(no Linux GTK/WebKit development packages needed), generates the
 Android shell under `mobile/build`, applies the checked adaptations in
 `android/configure.py`, builds the mobile frontend, compiles `libwails.so`, and
 runs Gradle. Generated output is ignored. It stays outside the root `build/`
@@ -124,7 +142,8 @@ select a JDK when more than one is installed.
 The **Mobile CI** workflow runs on pushes to `main` and pull requests. It builds
 and type-checks the mobile frontend, runs the mobile Go tests with the race
 detector and coverage, runs `go vet`, and runs the browser suite at both phone
-sizes. Browser failure traces are uploaded as workflow artifacts.
+sizes. Browser failure traces are uploaded as workflow artifacts. A native job
+builds the debug APK and runs the Java import-boundary unit tests with Java 25.
 
 Tags matching `v*` run the same mobile checks before publishing. The release
 workflow builds the ARM64 release APK with Java 25, attaches
@@ -148,6 +167,8 @@ npm run check:mobile
 npm run test:mobile
 go -C mobile test -race -cover ./host/...
 go -C mobile vet ./host/... ./cmd/preview/...
+make android-debug
+bash mobile/build/android/gradlew -p mobile/build/android testDebugUnitTest --console=plain
 ```
 
 `npm run dev:mobile` serves the UI on port 5174 and proxies API paths to the
@@ -196,6 +217,14 @@ preserves HTTP bodies, statuses, query parameters, cookies and binary map tiles
 that Wails' Android asset transport does not carry fully.
 
 `host` adds only native import/share/location endpoints and atomic draft storage.
+Android receives single-file `ACTION_SEND` and `ACTION_VIEW` intents through the
+single-task activity. A bounded background worker copies the granted URI into a
+private staging directory and atomically publishes it. The capability-protected
+`GET /mobile/incoming` and `GET /mobile/incoming/{id}` endpoints expose pending
+files independently of routing startup. `DELETE /mobile/incoming/{id}`
+acknowledges them; reads never consume an import. Original filenames are metadata,
+and generated IDs plus `os.Root` confine inbox access. This avoids losing cold
+shares before the WebView mounts or replaying a file on activity recreation.
 GPX files, responses, elevation tiles and Broom data live under Android's private
 files directory; downloaded data is not placed in the OS-evictable cache. The
 map and elevation caches use available device storage rather than fixed GiB

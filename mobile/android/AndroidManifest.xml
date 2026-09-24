@@ -8,8 +8,31 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
   <application android:allowBackup="false" android:icon="@drawable/overland_icon" android:label="Overland" android:supportsRtl="true" android:theme="@style/Theme.WailsApp" android:networkSecurityConfig="@xml/network_security_config">
-    <activity android:name="com.wails.app.MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden|uiMode" android:windowSoftInputMode="adjustResize">
+    <activity android:name="com.wails.app.MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|keyboardHidden|uiMode" android:windowSoftInputMode="adjustResize">
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="application/gpx+xml" />
+        <data android:mimeType="application/gpx" />
+        <data android:mimeType="application/x-gpx+xml" />
+        <data android:mimeType="application/xml" />
+        <data android:mimeType="text/xml" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="application/octet-stream" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:scheme="content" />
+        <data android:mimeType="application/gpx+xml" />
+        <data android:mimeType="application/gpx" />
+        <data android:mimeType="application/x-gpx+xml" />
+        <data android:mimeType="application/xml" />
+        <data android:mimeType="text/xml" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="application/octet-stream" />
+      </intent-filter>
     </activity>
     <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true">
       <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />

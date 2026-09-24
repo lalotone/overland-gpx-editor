@@ -113,6 +113,32 @@ small {
   font-size: 13px;
   box-shadow: 0 3px 15px #22372b14;
 }
+.incoming-gpx {
+  position: absolute;
+  z-index: 880;
+  top: calc(74px + env(safe-area-inset-top, 0px));
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 3px 15px #22372b14;
+  font-size: 12px;
+}
+.incoming-gpx > div {
+  flex: 1;
+  min-width: 0;
+}
+.incoming-gpx span,
+.incoming-gpx small {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
+}
 .startup-notice span:not(.spinner) {
   flex: 1;
 }
@@ -684,7 +710,7 @@ small {
 }
 .route-info-overlay {
   position: absolute;
-  z-index: 480;
+  z-index: 520;
   top: calc(76px + env(safe-area-inset-top, 0px));
   left: 20px;
   right: 20px;
@@ -692,9 +718,52 @@ small {
   border-radius: 20px;
   background: #fffef9f5;
   box-shadow: 0 8px 30px #233c3125;
+  max-height: calc(100% - var(--nav) - 96px - env(safe-area-inset-top, 0px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .route-info-overlay h2 {
   font-size: 18px;
+}
+.route-surface {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.surface-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+.surface-shares {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.surface-shares li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+.surface-shares i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.surface-shares strong {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.route-surface p {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 .route-map-status {
   position: absolute;

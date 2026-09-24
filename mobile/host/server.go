@@ -54,6 +54,7 @@ type Host struct {
 	token    string
 	mu       sync.Mutex
 	picker   sync.Mutex
+	incoming sync.Mutex
 	cancel   context.CancelFunc
 	workers  sync.WaitGroup
 }
@@ -184,7 +185,9 @@ func reply(w http.ResponseWriter, value any) {
 func (h *Host) mobile(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/mobile/capabilities" && r.Method == "GET":
-		reply(w, map[string]bool{"native": h.native.Open != nil})
+		reply(w, map[string]bool{"native": h.native.Open != nil, "incomingGPX": h.native.Open != nil})
+	case r.URL.Path == "/mobile/incoming" || strings.HasPrefix(r.URL.Path, "/mobile/incoming/"):
+		h.incomingGPX(w, r)
 	case r.URL.Path == "/mobile/draft":
 		h.draft(w, r)
 	case r.URL.Path == "/mobile/import" && r.Method == "POST" && h.native.Open != nil:

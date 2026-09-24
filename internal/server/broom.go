@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	broomVersion        = "0.7.1"
+	broomVersion        = "0.9.0"
 	broomProfileName    = "overland-motorcycle"
 	maxBroomRouteBody   = 64 << 10
 	defaultRouteJobs    = 2
@@ -788,6 +788,8 @@ func writeBroomError(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "routing_warmup_required"
 	case errors.Is(err, broom.ErrNoRoute), errors.Is(err, broom.ErrNoSegment):
 		status, code = http.StatusUnprocessableEntity, "no_route"
+	case errors.Is(err, broom.ErrTrackLimit):
+		status, code = http.StatusUnprocessableEntity, "track_annotation_limit"
 	case errors.Is(err, broom.ErrUnsupportedEndian):
 		status, code = http.StatusServiceUnavailable, "routing_platform_unsupported"
 	case errors.Is(err, broom.ErrCatalogue), errors.Is(err, broom.ErrIncompatibleGeneration), errors.Is(err, broom.ErrInvalidGraph):

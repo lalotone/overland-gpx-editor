@@ -235,6 +235,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /places/search` | Validated, server-rate-limited Nominatim search |
 | `POST /pois/search` | Allowlisted POI kind and bounded bbox |
 | `POST /routing/broom/route` | Local Road/Dirt/Trail/Enduro route; optional `accessPermit` selects a prepared access-override metric; aligned elevations and OSM annotations |
+| `POST /routing/broom/annotate` | Advisory surface lookup for original GPX geometry using Broom `AnnotateTrack`; `{coordinates:[{lat,lon},…]}`, max 50,001 points / 4 MiB; returns original-distance totals by surface, with uncertain spans unknown; uses only the open graph |
 | `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |

@@ -14,7 +14,9 @@ MODE="${1:-debug}"
 case "$MODE" in debug|release) ;; *) printf 'Usage: %s [debug|release]\n' "$0"; exit 1;; esac
 mkdir -p "$ROOT/bin/tools" "$ROOT/build"
 if [[ ! -x "$ROOT/bin/tools/wails3" ]]; then
-  GOBIN="$ROOT/bin/tools" go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
+  # The host CLI only generates build assets; it needs no GTK/WebKit linkage.
+  # CGO is enabled separately below for the Android shared library.
+  CGO_ENABLED=0 GOBIN="$ROOT/bin/tools" go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
 fi
 "$ROOT/bin/tools/wails3" generate build-assets -dir "$ROOT/build" -name overland-mobile -binaryname overland-mobile -productname Overland -productidentifier co.overland.mobile -silent
 python3 "$ROOT/android/configure.py"

@@ -8,6 +8,7 @@ export type RuntimeService =
   | 'places'
   | 'pois'
   | 'broomRoute'
+  | 'broomAnnotate'
 
 export type RuntimeRasterMap = 'osm' | 'opentopo' | 'cyclosm'
 
@@ -334,6 +335,7 @@ const SERVICE_KEYS: RuntimeService[] = [
   'places',
   'pois',
   'broomRoute',
+  'broomAnnotate',
 ]
 const RASTER_KEYS: RuntimeRasterMap[] = ['osm', 'opentopo', 'cyclosm']
 

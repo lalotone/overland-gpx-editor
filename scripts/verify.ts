@@ -27,6 +27,7 @@ const {
 } = await import('../src/lib/geo')
 const { simplifyToMaxPoints, trimTrack, reverseTrack, splitIntoStages, withElevations } = await import('../src/lib/edit')
 const { classifySurface, summarizeSurface } = await import('../src/lib/surface')
+const { annotateTrackSurface } = await import('../src/lib/trackSurface')
 const { boundingBoxSpanKm, boundsAround, MAX_SEARCH_SPAN_KM } = await import('../src/lib/poi')
 const {
   parseFuelStations,
@@ -1349,6 +1350,41 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 /* -- Surface classification and chunking ---------------------------- */
 
 console.log(`\nSurface checks\n${'='.repeat(78)}`)
+
+{
+  const runtime = decodeRuntimeConfig({ services: { broomAnnotate: '/routing/broom/annotate' } }, 'https://backend.example.test')
+  const coordinates = [{ lat: 42, lon: 1, elevation: 99 }, { lat: 42, lon: 1.001, elevation: 100 }]
+  const original = JSON.stringify(coordinates)
+  let requestBody = ''
+  const summary = await annotateTrackSurface(coordinates, undefined, {
+    runtime,
+    fetcher: async (url, init) => {
+      check('track annotation uses the authoritative backend', String(url) === 'https://backend.example.test/routing/broom/annotate')
+      requestBody = String(init?.body)
+      return new Response(JSON.stringify({ schemaVersion: 1, distanceMeters: 1000, surfaces: [
+        { surface: 'asphalt', distanceMeters: 200 },
+        { surface: 'gravel', distanceMeters: 300 },
+        { surface: 'fine_gravel', distanceMeters: 100 },
+        { surface: '', distanceMeters: 300 },
+        { surface: 'unsupported', distanceMeters: 100 },
+      ] }))
+    },
+  })
+  check('annotation does not edit coordinates or upload elevation', JSON.stringify(coordinates) === original && !requestBody.includes('elevation'))
+  check('track spans aggregate by surface class and original distance', Math.abs(summary.totalKm - 1) < 1e-9 && Math.abs(summary.unpavedFraction - 0.4) < 1e-9)
+  check('uncertain and unsupported surfaces stay in the denominator', Math.abs(summary.unknownKm - 0.4) < 1e-9)
+  for (const payload of [
+    { schemaVersion: 1, distanceMeters: 1000, surfaces: [{ surface: 'gravel', distanceMeters: 500 }] },
+    { schemaVersion: 1, distanceMeters: 1000, surfaces: [{ surface: 'gravel', distanceMeters: -1000 }] },
+    { schemaVersion: 1, distanceMeters: 1000, surfaces: [null] },
+  ]) {
+    let rejected = false
+    try {
+      await annotateTrackSurface(coordinates, undefined, { runtime, fetcher: async () => new Response(JSON.stringify(payload)) })
+    } catch { rejected = true }
+    check('invalid or incomplete track surface distances are rejected', rejected)
+  }
+}
 
 {
   check('asphalt is sealed road', classifySurface('asphalt') === 'paved')

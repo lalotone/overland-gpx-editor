@@ -380,6 +380,8 @@ make check     # tests plus go vet, gofmt, tsc, eslint
 make cross     # release binaries for linux/darwin/windows
 make packages  # .deb and .rpm (needs nfpm)
 make dist      # all of the above, archived with SHA256SUMS
+make android-debug    # build/android/overland-debug.apk (Android SDK/NDK required)
+make android-release  # build/android/overland-release.apk
 npm run dev    # frontend dev server with HMR (needs ./overland serve running)
 npx playwright install chromium  # once, for browser tests
 npm run test:e2e                 # desktop/mobile map and offline UI flows

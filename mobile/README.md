@@ -75,7 +75,7 @@ create-only. Native imports and draft/share requests are limited to 16 MiB.
 ## Build an APK
 
 The build script currently targets a **Linux x86-64 host and ARM64 Android**.
-It uses Wails **v3.0.0-beta.25**, Go 1.27+, npm, Python 3, a current JDK, Android
+It uses Wails **v3.0.0-beta.25**, Go 1.27+, npm, Python 3, JDK 21 or 25, Android
 SDK platform 36 and NDK r27c. Wails' generated Android host remains experimental.
 
 From the repository root:
@@ -86,20 +86,21 @@ sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.2.12479018'
 export ANDROID_HOME="$HOME/Android/Sdk"
 # Optional when the NDK is installed somewhere else:
 # export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
-bash mobile/build-android.sh debug
+make android-debug
 ```
 
-Output: **`mobile/bin/overland-debug.apk`**.
+Output: **`build/android/overland-debug.apk`**.
 
 ```sh
-adb install -r mobile/bin/overland-debug.apk
+adb install -r build/android/overland-debug.apk
 adb shell am start -n co.overland.mobile/com.wails.app.MainActivity
 ```
 
 Use `install -r`, not uninstall/install: uninstalling removes the library and
 downloaded regions. The application ID is `co.overland.mobile`.
 
-`bash mobile/build-android.sh release` builds a production-mode APK. Wails uses
+`make android-release` builds a production-mode APK at
+**`build/android/overland-release.apk`**. Wails uses
 the Android debug keystore unless `ANDROID_KEYSTORE_FILE`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
 are supplied. Store submission/AAB packaging is not part of this build target.
@@ -109,6 +110,14 @@ Android shell under `mobile/build`, applies the checked adaptations in
 `android/configure.py`, builds the mobile frontend, compiles `libwails.so`, and
 runs Gradle. Generated output is ignored. It stays outside the root `build/`
 directory, which the existing desktop cross-build deletes.
+
+The Makefile targets copy the finished APKs into `build/android/`. You can also
+run `bash mobile/build-android.sh debug` or `release` directly; the script leaves
+its APKs in `mobile/bin/`.
+
+The checked Android adaptations use Android Gradle Plugin **8.13.2** with Wails'
+Gradle **9.2.1** wrapper so release lint supports Java 25. Set `JAVA_HOME` to
+select a JDK when more than one is installed.
 
 ## Preview and checks
 

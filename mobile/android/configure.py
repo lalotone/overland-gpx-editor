@@ -20,6 +20,10 @@ def replace(path, old, new):
         raise SystemExit(f"Wails template drift in {path}: expected one {old!r}")
     path.write_text(text.replace(old, new))
 
+# Wails pins AGP 8.7.3, whose lint parser rejects Java 25. Keep its 8.x DSL
+# while updating lint/D8 for Java 25 and compileSdk 36.
+replace(project / "build.gradle", "version '8.7.3'", "version '8.13.2'")
+
 gradle = project / "app/build.gradle"
 replace(gradle, 'applicationId "com.wails.app"', 'applicationId "co.overland.mobile"')
 replace(gradle, 'compileSdk 35', 'compileSdk 36')

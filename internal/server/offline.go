@@ -267,6 +267,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	response.Services = map[string]string{"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search"}
 	if s.broom != nil {
 		response.Services["broomRoute"] = "/routing/broom/route"
+		response.Services["broomAnnotate"] = "/routing/broom/annotate"
 		response.Offline.Routing = "/offline/routing"
 	}
 	response.Maps.Raster = map[string]string{

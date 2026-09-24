@@ -9,7 +9,8 @@ continues to use its existing entry point.
 - **Explore:** full-screen map, place search at the top, fuel/water/camp overlays
   at the bottom. Map layers, location and track fitting are floating controls.
 - **Plan:** map-first by default, with a round add-point button at the bottom
-  right and route-info button on the left. Tap or pull up the route-points handle to reveal a panel with pinned
+  right and route-info button on the left. Route details shows distance-weighted
+  surface percentages with unknown sections kept separate. Tap or pull up the route-points handle to reveal a panel with pinned
   Road/Dirt/Trail/Enduro profiles and save/share actions; only the point list
   scrolls. Drag numbered map controls to adjust the route. An info button opens
   distance, elevation and moving-time details over the map.
@@ -17,6 +18,10 @@ continues to use its existing entry point.
   simplify, split, day-stage, refresh elevation and add waypoints. Multi-track
   inputs are presented as separate selectable tracks rather than silently merged.
   Each saved track has a trash button to delete its GPX file after confirmation.
+  **Route details** also looks up imported GPX surfaces through Broom 0.9's
+  `AnnotateTrack` API using the open routing region. It works offline, keeps
+  ambiguous/unmatched sections unknown, and never changes the track. Surface
+  lookup failures leave the distance/elevation summary and editing available.
 - **Offline:** a split map overlay downloads the visible area or opens a region
   browser. The browser has City, Region/comunidad and Country views, a prominent
   Downloaded section, in-use badges, saved map areas and explicit partial states.

@@ -30,6 +30,7 @@ import type { Document, Draft, Plan, Tab } from './model'
 import Icon from './Icon'
 import MobileMap from './MobileMap'
 import TrackSummary from './TrackSummary'
+import RouteSurface from './RouteSurface'
 import OfflineMapControl from './OfflineMapControl'
 import PlanPanel, { PlanHandle } from './PlanPanel'
 
@@ -499,6 +500,8 @@ export default function App() {
     ? Math.round((range[1] / 100) * (activeTrack.coordinates.length - 1))
     : 0
   const terrainLayers = useMemo(() => runtimeTerrainLayers(runtime), [runtime])
+  const detailCoordinates = tab === 'plan' ? route?.coordinates
+    : tab === 'library' ? document?.track.coordinates : undefined
 
   const mapOnly = tab === 'explore' || tab === 'offline' || (tab === 'plan' && !planPanelOpen)
   return (
@@ -642,21 +645,6 @@ export default function App() {
                 <Icon name="info" size={24} />
               </button>
             )}
-            {route && routeInfoOpen && (
-              <section className="route-info-overlay" role="dialog" aria-label="Route details">
-                <div className="section-heading">
-                  <h2>Route details</h2>
-                  <button
-                    className="icon-button"
-                    aria-label="Close route details"
-                    onClick={() => setRouteInfoOpen(false)}
-                  >
-                    <Icon name="close" size={20} />
-                  </button>
-                </div>
-                <TrackSummary coordinates={route.coordinates} duration={route.durationSeconds} />
-              </section>
-            )}
           </>
         )}
         {tab === 'explore' && (
@@ -763,6 +751,23 @@ export default function App() {
             })
           }
         />
+      )}
+      {detailCoordinates && routeInfoOpen && (
+        <section className="route-info-overlay" role="dialog" aria-label="Route details">
+          <div className="section-heading">
+            <h2>Route details</h2>
+            <button className="icon-button" aria-label="Close route details" onClick={() => setRouteInfoOpen(false)}>
+              <Icon name="close" size={20} />
+            </button>
+          </div>
+          <TrackSummary coordinates={detailCoordinates} duration={tab === 'plan' ? route?.durationSeconds : undefined} />
+          <RouteSurface
+            coordinates={detailCoordinates}
+            surface={tab === 'plan' ? route?.surface : undefined}
+            runtime={runtime}
+            routing={routing}
+          />
+        </section>
       )}
       {tab === 'library' && (
         <section className="bottom-sheet" aria-label={`${tab} panel`}>
@@ -877,6 +882,13 @@ export default function App() {
             {tab === 'library' && document && (
               <div className="panel-stack">
                 <TrackSummary coordinates={document.track.coordinates} />
+                <button className="secondary" onClick={() => {
+                  setLayersOpen(false)
+                  setRouteInfoOpen(true)
+                }}>
+                  <Icon name="info" size={18} />
+                  Route details
+                </button>
                 <div className="track-meta">
                   {document.track.coordinates.length.toLocaleString()} points ·{' '}
                   {document.track.waypoints.length} saved places

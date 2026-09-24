@@ -90,6 +90,22 @@ export function summarizeSurface(segments: SurfaceClass[], cumKm: number[]): Sur
     byClass.set(segments[i], (byClass.get(segments[i]) ?? 0) + km)
     totalKm += km
   }
+  return surfaceSummary(byClass, totalKm)
+}
+
+/** Original-track span lengths from Broom, including unmatched/ambiguous distance. */
+export function summarizeSurfaceDistances(distances: Pick<SurfaceShare, 'id' | 'km'>[]): SurfaceSummary {
+  const byClass = new Map<SurfaceClass, number>()
+  let totalKm = 0
+  for (const { id, km } of distances) {
+    if (!Number.isFinite(km) || !(km > 0)) continue
+    byClass.set(id, (byClass.get(id) ?? 0) + km)
+    totalKm += km
+  }
+  return surfaceSummary(byClass, totalKm)
+}
+
+function surfaceSummary(byClass: Map<SurfaceClass, number>, totalKm: number): SurfaceSummary {
   const shares = SURFACE_CLASSES
     .map(definition => ({ id: definition.id, km: byClass.get(definition.id) ?? 0 }))
     .filter(share => share.km > 0)

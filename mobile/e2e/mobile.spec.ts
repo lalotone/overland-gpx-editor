@@ -82,6 +82,113 @@ async function setup(page: Page) {
   return { writes, routes, draft: () => draft }
 }
 
+async function incomingInbox(page: Page) {
+  let items: { id: string; filename: string; content: string }[] = []
+  let reads = 0
+  let failAcknowledgement = false
+  await page.route('**/mobile/capabilities', route => route.fulfill({ json: { native: false, incomingGPX: true } }))
+  await page.route('**/mobile/incoming**', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/mobile/incoming') return route.fulfill({ json: items.map(({ id, filename }) => ({ id, filename })) })
+    const id = path.split('/').pop()
+    if (route.request().method() === 'DELETE') {
+      if (failAcknowledgement) return route.fulfill({ status: 503, body: 'Temporary cleanup error' })
+      items = items.filter(item => item.id !== id)
+      return route.fulfill({ status: 204 })
+    }
+    const item = items.find(item => item.id === id)
+    reads++
+    return item ? route.fulfill({ json: item }) : route.fulfill({ status: 404 })
+  })
+  return {
+    add: (filename: string, content = fixture) => items.push({ id: String(items.length + 1), filename, content }),
+    count: () => items.length,
+    reads: () => reads,
+    failAck: (value: boolean) => { failAcknowledgement = value },
+  }
+}
+
+test('cold-start shared GPX waits for draft restoration and remains create-only', async ({ page }) => {
+  const state = await setup(page)
+  const inbox = await incomingInbox(page)
+  inbox.add('original-filename.gpx')
+  let release!: () => void
+  const restored = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/mobile/draft', async route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    await restored
+    await route.fulfill({ json: null })
+  })
+  await page.goto('/')
+  await expect(page.getByRole('navigation')).toBeVisible()
+  expect(inbox.reads()).toBe(0)
+  release()
+  await expect(page.getByRole('heading', { name: 'Original filename', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save to library', exact: true })).toBeVisible()
+  await expect.poll(() => inbox.count()).toBe(0)
+  await expect.poll(() => state.draft()).toMatchObject({ document: { libraryFilename: null, dirty: true } })
+  expect(state.writes).toHaveLength(0)
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Open shared GPX', exact: true })).toHaveCount(0)
+})
+
+test('warm shared GPX preserves unsaved edits until replacement is confirmed', async ({ page }) => {
+  const state = await setup(page)
+  const inbox = await incomingInbox(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Edit track', exact: true }).click()
+  await page.getByRole('button', { name: 'Reverse', exact: true }).click()
+  inbox.add('received.gpx')
+  const banner = page.getByRole('complementary', { name: 'Shared GPX' })
+  await expect(banner).toContainText('received.gpx')
+  expect(inbox.reads()).toBe(0)
+  await banner.getByRole('button', { name: 'Open shared GPX' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Open another track?' })
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Original filename', exact: true })).toBeVisible()
+  expect(inbox.count()).toBe(1)
+  await banner.getByRole('button', { name: 'Open shared GPX' }).click()
+  await dialog.getByRole('button', { name: 'Open track', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Received', exact: true })).toBeVisible()
+  await expect.poll(() => inbox.count()).toBe(0)
+  expect(state.writes).toHaveLength(0)
+})
+
+test('a malformed shared GPX can be dismissed without replacing the current track', async ({ page }) => {
+  await setup(page)
+  const inbox = await incomingInbox(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  inbox.add('broken.gpx', '<gpx><not-a-track/></gpx>')
+  const banner = page.getByRole('complementary', { name: 'Shared GPX' })
+  await expect(banner).toContainText('No usable track')
+  await expect(page.getByRole('heading', { name: 'Original filename', exact: true })).toBeVisible()
+  await banner.getByRole('button', { name: 'Dismiss shared GPX' }).click()
+  await expect.poll(() => inbox.count()).toBe(0)
+  await expect(banner).toHaveCount(0)
+})
+
+test('shared multi-track GPX uses the existing chooser and retries cleanup without reopening', async ({ page }) => {
+  const state = await setup(page)
+  const inbox = await incomingInbox(page)
+  inbox.add('parts.gpx', fixture.replace('</gpx>', '<trk><name>Second part</name><trkseg><trkpt lat="42" lon="1"/><trkpt lat="42.1" lon="1.1"/></trkseg></trk></gpx>'))
+  inbox.failAck(true)
+  await page.goto('/')
+  const chooser = page.getByRole('dialog', { name: 'Choose track' })
+  await expect(chooser).toBeVisible()
+  await chooser.getByRole('button', { name: /Second part/ }).click()
+  await expect(page.getByRole('heading', { name: 'Parts 2', exact: true })).toBeVisible()
+  const reads = inbox.reads()
+  inbox.failAck(false)
+  await expect.poll(() => inbox.count()).toBe(0)
+  expect(inbox.reads()).toBe(reads)
+  expect(state.writes).toHaveLength(0)
+  await expect(chooser).toHaveCount(0)
+})
+
 test('app and local GPX editing remain usable while backend startup is pending', async ({ page }) => {
   await setup(page)
   let release!: () => void

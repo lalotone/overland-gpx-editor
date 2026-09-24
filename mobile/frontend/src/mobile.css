@@ -113,6 +113,32 @@ small {
   font-size: 13px;
   box-shadow: 0 3px 15px #22372b14;
 }
+.incoming-gpx {
+  position: absolute;
+  z-index: 880;
+  top: calc(74px + env(safe-area-inset-top, 0px));
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 3px 15px #22372b14;
+  font-size: 12px;
+}
+.incoming-gpx > div {
+  flex: 1;
+  min-width: 0;
+}
+.incoming-gpx span,
+.incoming-gpx small {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
+}
 .startup-notice span:not(.spinner) {
   flex: 1;
 }

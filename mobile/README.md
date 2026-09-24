@@ -71,6 +71,18 @@ zooms are respected when preparing map packs.
 
 The Online/Offline pill switches the backend's strict cache-only mode. Native
 exports use Android's share sheet; opening a document uses the system picker.
+Other apps can also **Share** a GPX attachment or **Open with → Overland**. This
+works on a fresh launch and when Overland is already running. GPX, XML, plain-text
+and binary attachment MIME types are accepted when the display name ends in
+`.gpx`; unnamed attachments need an explicit GPX MIME type. Imports use granted
+`content://` URIs, not arbitrary filesystem paths or download URLs.
+
+Incoming files open after draft restoration. If a track has unsaved edits, a
+**Shared GPX received** card offers Open or Dismiss, and opening uses the normal
+replacement confirmation. Multi-track files use the existing track chooser.
+Receiving a file never saves over a library entry. The private inbox retains up
+to eight files of 16 MiB each until opened or dismissed; unfinished copies are
+not visible to the UI.
 
 Drafts are automatically saved to app-private storage, including planner controls
 and the current editor document. They survive process restarts and APK updates.
@@ -129,7 +141,8 @@ select a JDK when more than one is installed.
 The **Mobile CI** workflow runs on pushes to `main` and pull requests. It builds
 and type-checks the mobile frontend, runs the mobile Go tests with the race
 detector and coverage, runs `go vet`, and runs the browser suite at both phone
-sizes. Browser failure traces are uploaded as workflow artifacts.
+sizes. Browser failure traces are uploaded as workflow artifacts. A native job
+builds the debug APK and runs the Java import-boundary unit tests with Java 25.
 
 Tags matching `v*` run the same mobile checks before publishing. The release
 workflow builds the ARM64 release APK with Java 25, attaches
@@ -153,6 +166,8 @@ npm run check:mobile
 npm run test:mobile
 go -C mobile test -race -cover ./host/...
 go -C mobile vet ./host/... ./cmd/preview/...
+make android-debug
+bash mobile/build/android/gradlew -p mobile/build/android testDebugUnitTest --console=plain
 ```
 
 `npm run dev:mobile` serves the UI on port 5174 and proxies API paths to the
@@ -201,6 +216,14 @@ preserves HTTP bodies, statuses, query parameters, cookies and binary map tiles
 that Wails' Android asset transport does not carry fully.
 
 `host` adds only native import/share/location endpoints and atomic draft storage.
+Android receives single-file `ACTION_SEND` and `ACTION_VIEW` intents through the
+single-task activity. A bounded background worker copies the granted URI into a
+private staging directory and atomically publishes it. The capability-protected
+`GET /mobile/incoming` and `GET /mobile/incoming/{id}` endpoints expose pending
+files independently of routing startup. `DELETE /mobile/incoming/{id}`
+acknowledges them; reads never consume an import. Original filenames are metadata,
+and generated IDs plus `os.Root` confine inbox access. This avoids losing cold
+shares before the WebView mounts or replaying a file on activity recreation.
 GPX files, responses, elevation tiles and Broom data live under Android's private
 files directory; downloaded data is not placed in the OS-evictable cache. The
 map and elevation caches use available device storage rather than fixed GiB

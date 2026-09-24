@@ -33,6 +33,7 @@ import TrackSummary from './TrackSummary'
 import RouteSurface from './RouteSurface'
 import OfflineMapControl from './OfflineMapControl'
 import PlanPanel, { PlanHandle } from './PlanPanel'
+import { useIncomingGPX } from './useIncomingGPX'
 
 const emptyCoordinates: Coordinate[] = []
 type Dialog = {
@@ -49,6 +50,7 @@ export default function App() {
   const [startupError, setStartupError] = useState('')
   const [startupAttempt, setStartupAttempt] = useState(0)
   const [native, setNative] = useState(false)
+  const [incomingGPX, setIncomingGPX] = useState(false)
   const [tab, setTab] = useState<Tab>('explore')
   const [activeMap, setActiveMap] = useState<'plan' | 'track'>('plan')
   const [expanded, setExpanded] = useState(false)
@@ -158,8 +160,11 @@ export default function App() {
   }, [startupAttempt])
   useEffect(() => {
     const controller = new AbortController()
-    void request<{ native: boolean }>('/mobile/capabilities', { signal: controller.signal })
-      .then((value) => setNative(value.native))
+    void request<{ native: boolean; incomingGPX?: boolean }>('/mobile/capabilities', { signal: controller.signal })
+      .then((value) => {
+        setNative(value.native)
+        setIncomingGPX(value.incomingGPX === true)
+      })
       .catch(() => {})
     void request<unknown>('/mobile/draft', { signal: controller.signal })
       .then((raw) => {
@@ -350,6 +355,17 @@ export default function App() {
       )
       if (result.filename) importContent(result.content, result.filename)
     })
+  const shared = useIncomingGPX({
+    enabled: incomingGPX && hydrated,
+    blocked: busy || !!dialog || choices.length > 0,
+    dirty: document?.dirty === true,
+    onImport: (content, filename) => {
+      importContent(content, filename)
+      setRouteInfoOpen(false)
+      setLayersOpen(false)
+    },
+    onError: notify,
+  })
   const saveTrack = async (track: Track, filename: string, replace: boolean) => {
     const content = trackGPX(track)
     if (replace)
@@ -1097,6 +1113,19 @@ export default function App() {
           </button>
         ))}
       </nav>
+      {shared.pending && (
+        <aside className="incoming-gpx" aria-label="Shared GPX">
+          <div>
+            <strong>{shared.working ? 'Opening shared GPX…' : 'Shared GPX received'}</strong>
+            <span>{shared.pending.filename}</span>
+            {shared.error && <small>{shared.error}</small>}
+          </div>
+          <button className="text-button" disabled={busy || shared.working || !!dialog || choices.length > 0}
+            onClick={() => confirmReplace(shared.open)}>Open shared GPX</button>
+          <button className="icon-button" aria-label="Dismiss shared GPX" disabled={shared.working}
+            onClick={() => void shared.dismiss()}><Icon name="close" size={18} /></button>
+        </aside>
+      )}
       {toast && (
         <div className="toast" role="status">
           <span>{toast}</span>

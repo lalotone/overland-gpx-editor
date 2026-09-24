@@ -44,3 +44,30 @@ jobs:
           path: test-results/mobile/
           if-no-files-found: ignore
           retention-days: 7
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mobile/go.mod
+          cache-dependency-path: |
+            go.sum
+            mobile/go.sum
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.2.12479018'
+      - name: Build Android debug APK
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" make android-debug
+      - name: Test native GPX import boundaries
+        run: bash mobile/build/android/gradlew -p mobile/build/android testDebugUnitTest --console=plain

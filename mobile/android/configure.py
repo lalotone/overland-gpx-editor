@@ -10,6 +10,8 @@ for name, dest in {
     "network_security_config.xml": main / "res/xml/network_security_config.xml",
     "file_paths.xml": main / "res/xml/file_paths.xml",
     "overland_icon.xml": main / "res/drawable/overland_icon.xml",
+    "IncomingGpx.java": main / "java/com/wails/app/IncomingGpx.java",
+    "test/IncomingGpxTest.java": project / "app/src/test/java/com/wails/app/IncomingGpxTest.java",
 }.items():
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / "android" / name, dest)
@@ -30,6 +32,7 @@ replace(gradle, 'compileSdk 35', 'compileSdk 36')
 replace(gradle, 'targetSdk 35', 'targetSdk 36')
 replace(gradle, 'minSdk 21', 'minSdk 26')
 replace(gradle, "abiFilters 'arm64-v8a', 'x86_64'", "abiFilters 'arm64-v8a'")
+replace(gradle, 'dependencies {', "dependencies {\n    testImplementation 'junit:junit:4.13.2'")
 
 # Wails' share API currently only shares text. Extend it with a constrained
 # FileProvider attachment under our export directory, using the same JNI API.
@@ -52,6 +55,15 @@ replace(bridge, 'String text = opts.optString("text", "");', '''String path = op
 
 # Native interfaces must never be exposed to a page from an external origin.
 activity = main / "java/com/wails/app/MainActivity.java"
+replace(activity, '        loadApplication();', '''        loadApplication();
+        if (savedInstanceState == null) IncomingGpx.receive(this, getIntent());''')
+replace(activity, '    private void loadApplication() {', '''    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        IncomingGpx.receive(this, intent);
+    }
+
+    private void loadApplication() {''')
 replace(activity, 'private WebView webView;', 'private WebView webView;\n    private String overlandOrigin;')
 replace(activity, 'webView.setWebViewClient(new WebViewClient() {', '''webView.setWebViewClient(new WebViewClient() {
             @Override

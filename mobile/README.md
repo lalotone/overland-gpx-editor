@@ -122,7 +122,8 @@ the Android debug keystore unless `ANDROID_KEYSTORE_FILE`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
 are supplied. Store submission/AAB packaging is not part of this build target.
 
-The script installs its pinned Wails CLI under `mobile/bin/tools`, generates the
+The script installs its pinned Wails CLI with CGO disabled under `mobile/bin/tools`
+(no Linux GTK/WebKit development packages needed), generates the
 Android shell under `mobile/build`, applies the checked adaptations in
 `android/configure.py`, builds the mobile frontend, compiles `libwails.so`, and
 runs Gradle. Generated output is ignored. It stays outside the root `build/`

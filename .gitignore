@@ -33,3 +33,9 @@ tiles/
 __pycache__/
 .kata.local.toml
 /overlandx
+
+# Android shell is generated from the pinned Wails templates at build time.
+/mobile/build/
+/mobile/bin/
+/mobile/frontend/dist/*
+!/mobile/frontend/dist/.gitkeep

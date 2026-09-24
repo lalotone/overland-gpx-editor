@@ -7,7 +7,7 @@ PKGS    := ./cmd/... ./internal/... ./web/...
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build frontend backend deps test check lint e2e clean run cross packages dist
+.PHONY: all build frontend backend deps test check lint e2e clean run cross packages dist android-debug android-release
 
 ## build: frontend + single self-contained binary
 all: build
@@ -54,7 +54,13 @@ lint: node_modules
 e2e: node_modules
 	npm run test:e2e
 
-# Every target is pure Go, so one Linux machine builds all of them with no
+## android-debug / android-release: ARM64 APKs in build/android (requires Android SDK/NDK)
+android-debug android-release: node_modules
+	bash mobile/build-android.sh $(@:android-%=%)
+	mkdir -p build/android
+	cp mobile/bin/overland-$(@:android-%=%).apk build/android/
+
+# Desktop targets are pure Go, so one Linux machine builds all of them with no
 # cross-toolchain, no container and no macOS runner.
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 

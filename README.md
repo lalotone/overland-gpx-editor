@@ -45,6 +45,10 @@ the part I want.
 
 ## Install
 
+An Android app with a separate map-first mobile frontend lives in **[mobile/](mobile/README.md)**.
+It embeds the same Go backend and Broom engine, with native GPX import/sharing,
+on-device routing, and offline downloads.
+
 Grab the archive for your platform from
 [Releases](https://github.com/lalotone/overland-gpx-editor/releases), unpack
 it, and run the binary. It serves the whole app — frontend, API and track
@@ -201,7 +205,8 @@ The Go server keeps policy-permitted provider responses in
 pack for that route. The **Offline** pill appears directly below Terrain and
 shows live readiness for the vector map, elevation, fuel, water and campsites;
 open it for per-resource progress and item counts. Recent prepared routes remain
-pinned; at the manifest limit the oldest completed automatic pack is released.
+pinned until removed. Pack metadata counts against storage rather than a fixed
+number of saved packs, and interrupted downloads reuse their existing manifest.
 
 Explore can also download a rectangular area without a GPX. Draw the bounds and
 the estimate updates automatically before download. Completed bounds are shown
@@ -258,6 +263,12 @@ After a Broom upgrade, the active managed region updates automatically when
 online. Its previous graph remains usable while it rebuilds, and **Offline
 routing** shows progress. In cache-only mode the update waits until you return
 online. Failed or paused updates can be resumed from the same panel.
+
+Broom 0.7.1 reuses existing 0.7.0 graphs and metrics without rebuilding them.
+It reduces allocations during waypoint snapping and improves local metric-cache
+recovery during profile warmup. Missing or corrupt metrics are regenerated
+locally; filesystem access failures are reported instead of silently retried as
+writes. Damaged graphs still require explicit repair or update.
 
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be
@@ -369,6 +380,8 @@ make check     # tests plus go vet, gofmt, tsc, eslint
 make cross     # release binaries for linux/darwin/windows
 make packages  # .deb and .rpm (needs nfpm)
 make dist      # all of the above, archived with SHA256SUMS
+make android-debug    # build/android/overland-debug.apk (Android SDK/NDK required)
+make android-release  # build/android/overland-release.apk
 npm run dev    # frontend dev server with HMR (needs ./overland serve running)
 npx playwright install chromium  # once, for browser tests
 npm run test:e2e                 # desktop/mobile map and offline UI flows

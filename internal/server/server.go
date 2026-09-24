@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,6 +27,9 @@ import (
 
 // Config wires a Server up. Only GPXDir is required.
 type Config struct {
+	// UseAvailableStorage uses filesystem free space rather than fixed cache
+	// byte quotas. Intended for the capability-protected mobile host.
+	UseAvailableStorage bool
 	// GPXDir is the track library directory. It is created if missing.
 	GPXDir string
 	// ElevationHost is a self-hosted opentopodata-style DEM service. Empty
@@ -174,6 +178,14 @@ func New(cfg Config) (*Server, error) {
 	if cfg.OfflineCacheMaxBytes == 0 {
 		cfg.OfflineCacheMaxBytes = defaultCacheBytes
 	}
+	if cfg.UseAvailableStorage {
+		_, supported, err := availableDiskBytes(cfg.GPXDir)
+		if err != nil || !supported {
+			gpxRoot.Close()
+			return nil, fmt.Errorf("available-storage cache policy requires filesystem space reporting: %v", err)
+		}
+		cfg.OfflineCacheMaxBytes, cfg.ElevationTileCacheMaxBytes = math.MaxInt64, math.MaxInt64
+	}
 	if cfg.OfflineCacheMaxEntries == 0 {
 		cfg.OfflineCacheMaxEntries = defaultCacheEntries
 	}
@@ -199,6 +211,7 @@ func New(cfg Config) (*Server, error) {
 		gpxRoot.Close()
 		return nil, err
 	}
+	cache.useAvailableStorage = cfg.UseAvailableStorage
 	trustedUIOrigin := ""
 	if strings.TrimSpace(cfg.TrustedUIOrigin) != "" {
 		trustedUIOrigin, err = normalizeOrigin(cfg.TrustedUIOrigin)
@@ -233,7 +246,7 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 	}
-	controlReserve := int64(maxStoredPackManifests * maxPackManifestBytes)
+	controlReserve := int64(maxRegionalManifestBytes)
 	if openFreeMapURL != nil {
 		controlReserve += maxMapGenerationBytes
 	}
@@ -285,7 +298,9 @@ func New(cfg Config) (*Server, error) {
 	// the tile default.
 	var tiles *tileStore
 	if cfg.ElevationTiles && strings.TrimSpace(cfg.ElevationHost) == "" {
-		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client)
+		// Pack-owned terrain pins must be restored before any disk eviction.
+		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client, true)
+		tiles.useAvailableStorage = cfg.UseAvailableStorage
 		if tiles.cacheErr != nil {
 			cancel()
 			gpxRoot.Close()
@@ -592,6 +607,7 @@ func (s *Server) routes() http.Handler {
 	r.Delete("/offline/cache", s.requireOfflineControl(s.handleClearCache))
 	if s.broom != nil {
 		r.Get("/offline/routing", s.requireOfflineRead(s.handleBroomStatus))
+		r.Get("/offline/routing/regions", s.requireOfflineRead(s.handleBroomRegions))
 		r.Post("/offline/routing/suggest", s.requireOfflineRead(s.handleBroomSuggest))
 		r.Post("/offline/routing/plan", s.requireOfflineControl(s.handleBroomPlan))
 		r.Post("/offline/routing/profile", s.requireOfflineControl(s.handleSessionProfile))

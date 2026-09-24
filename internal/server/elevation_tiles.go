@@ -80,18 +80,19 @@ type tileFetch struct {
 }
 
 type tileStore struct {
-	url          string
-	zoom         int
-	cacheDir     string
-	cacheRoot    *os.Root
-	cacheErr     error
-	maxDiskBytes int64
-	client       *http.Client
-	userAgent    string
-	sem          chan struct{}
-	modes        *offlineModeController
-	ctx          context.Context
-	wg           *sync.WaitGroup
+	url                 string
+	zoom                int
+	cacheDir            string
+	cacheRoot           *os.Root
+	cacheErr            error
+	maxDiskBytes        int64
+	useAvailableStorage bool
+	client              *http.Client
+	userAgent           string
+	sem                 chan struct{}
+	modes               *offlineModeController
+	ctx                 context.Context
+	wg                  *sync.WaitGroup
 
 	mu       sync.Mutex
 	lru      *list.List // front = most recently used, values are lruEntry
@@ -101,6 +102,7 @@ type tileStore struct {
 	prefetch prefetchState
 
 	diskMu    sync.Mutex
+	diskPins  map[string]map[string]struct{}
 	diskBytes int64
 	diskFiles map[string]tileDiskFile
 
@@ -153,7 +155,7 @@ func newTileStore(url string, zoom int, cacheDir string, client *http.Client) *t
 	return newTileStoreWithQuota(url, zoom, cacheDir, defaultElevationTileCacheBytes, client)
 }
 
-func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes int64, client *http.Client) *tileStore {
+func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes int64, client *http.Client, deferQuota ...bool) *tileStore {
 	if url == "" {
 		url = defaultTileURL
 	}
@@ -175,6 +177,7 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 		inflight:     make(map[tileKey]*tileFetch),
 		maxDiskBytes: maxDiskBytes,
 		diskFiles:    make(map[string]tileDiskFile),
+		diskPins:     make(map[string]map[string]struct{}),
 		ctx:          context.Background(),
 		wg:           &sync.WaitGroup{},
 	}
@@ -196,7 +199,11 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 			store.cacheErr = err
 			return store
 		}
-		if err := store.loadDiskIndex(); err != nil {
+		err = store.loadDiskIndex()
+		if err == nil && (len(deferQuota) == 0 || !deferQuota[0]) {
+			err = store.enforceDiskQuotaLocked("")
+		}
+		if err != nil {
 			root.Close()
 			store.cacheRoot = nil
 			store.cacheErr = err
@@ -461,7 +468,7 @@ func (s *tileStore) stats() tileCacheStats {
 	diskEntries, diskBytes := len(s.diskFiles), s.diskBytes
 	s.diskMu.Unlock()
 	return tileCacheStats{
-		MemoryEntries: memoryEntries, DiskEntries: diskEntries, DiskBytes: diskBytes, DiskQuota: s.maxDiskBytes, InFlight: inFlight,
+		MemoryEntries: memoryEntries, DiskEntries: diskEntries, DiskBytes: diskBytes, DiskQuota: s.diskQuota(), InFlight: inFlight,
 		MemoryHits: s.memoryHits.Load(), DiskHits: s.diskHits.Load(), CacheMisses: s.cacheMisses.Load(), SharedLoads: s.sharedLoads.Load(), OfflineMisses: s.offlineMisses.Load(),
 		NetworkRequests: s.networkRequests.Load(), NetworkFailures: s.networkFailures.Load(), NetworkStatus2xx: s.networkStatus2xx.Load(), NetworkStatus4xx: s.networkStatus4xx.Load(), NetworkStatus5xx: s.networkStatus5xx.Load(),
 		NetworkDuration: time.Duration(s.networkDurationNS.Load()), NetworkMaxDuration: time.Duration(s.networkMaxDurationNS.Load()),
@@ -556,6 +563,11 @@ func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
 	if err := s.makeDiskRoomLocked(path, int64(len(raw))); err != nil {
 		return err
 	}
+	if s.useAvailableStorage {
+		if err := requirePackDiskSpace(s.cacheDir, int64(len(raw))); err != nil {
+			return err
+		}
+	}
 	tmp, err := writeTempFileAt(s.cacheRoot, dir, raw)
 	if err != nil {
 		return err
@@ -574,7 +586,7 @@ func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
 	s.diskFiles[path] = tileDiskFile{key: key, size: int64(len(raw)), lastAccess: time.Now().UTC()}
 	s.diskBytes += int64(len(raw))
 	if s.diskBytes > s.maxDiskBytes {
-		return errors.New("elevation tile cache quota exceeded after write")
+		return cacheStorageLimitError("elevation tile cache quota exceeded after write")
 	}
 	return nil
 }
@@ -630,7 +642,7 @@ func (s *tileStore) loadDiskIndex() error {
 	}); err != nil {
 		return err
 	}
-	return s.enforceDiskQuotaLocked("")
+	return nil
 }
 
 func tileKeyFromPath(path string) (tileKey, bool) {
@@ -645,7 +657,7 @@ func tileKeyFromPath(path string) (tileKey, bool) {
 
 func (s *tileStore) makeDiskRoomLocked(path string, size int64) error {
 	if size > s.maxDiskBytes {
-		return errors.New("elevation tile exceeds cache quota")
+		return cacheStorageLimitError("elevation tile exceeds cache quota")
 	}
 	old := s.diskFiles[path]
 	for s.diskBytes-old.size+size > s.maxDiskBytes {
@@ -669,13 +681,13 @@ func (s *tileStore) evictOldestDiskLocked(exclude string) error {
 	oldestPath := ""
 	var oldest tileDiskFile
 	for path, entry := range s.diskFiles {
-		if path == exclude || (oldestPath != "" && !entry.lastAccess.Before(oldest.lastAccess)) {
+		if path == exclude || len(s.diskPins[path]) > 0 || (oldestPath != "" && !entry.lastAccess.Before(oldest.lastAccess)) {
 			continue
 		}
 		oldestPath, oldest = path, entry
 	}
 	if oldestPath == "" {
-		return errors.New("elevation tile cache quota cannot be satisfied")
+		return errTileQuotaPinned
 	}
 	if err := s.cacheRoot.Remove(oldestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("evict elevation tile: %w", err)
@@ -870,7 +882,14 @@ func (s *tileStore) diskStats() (int64, int) {
 	return s.diskBytes, len(s.diskFiles)
 }
 
-func (s *tileStore) diskQuota() int64 { return s.maxDiskBytes }
+func (s *tileStore) diskQuota() int64 {
+	if !s.useAvailableStorage {
+		return s.maxDiskBytes
+	}
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	return availableStorageQuota(s.cacheDir, s.diskBytes)
+}
 
 func (s *tileStore) progress() prefetchProgress {
 	s.prefetch.mu.Lock()

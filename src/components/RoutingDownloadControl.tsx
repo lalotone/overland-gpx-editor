@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
-import { cancelRoutingData, prepareRoutingData, fetchRoutingDataStatus, responseError, normalizePackBounds, formatBytes } from '../lib/offline'
+import { cancelRoutingData, prepareRoutingData, fetchRoutingDataStatus, fetchRoutingSummary, responseError, normalizePackBounds, formatBytes } from '../lib/offline'
 import type { RuntimeConfig, RoutingDataStatus } from '../lib/offline'
 import './RoutingDownloadControl.css'
 import { useEscapeDismiss, ESCAPE_PRIORITY } from './useEscapeDismiss'
@@ -42,6 +42,14 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
     resize: () => setRevision(value => value + 1),
   })
   const running = status?.job?.state === 'queued' || status?.job?.state === 'running'
+  useEffect(() => {
+    if (!open) return
+    const controller = new AbortController()
+    void fetchRoutingSummary(runtime, controller.signal).then(next => {
+      if (next && !controller.signal.aborted) { setLocalStatus(next); onStatus?.(next) }
+    }).catch(() => { /* Progress remains usable when inventory inspection fails. */ })
+    return () => controller.abort()
+  }, [open, runtime, onStatus])
   useEffect(() => {
     setPlan(null)
     setPlanning(false)
@@ -166,7 +174,7 @@ export default function RoutingDownloadControl({ runtime, status: suppliedStatus
         {runtime.offline.mode === 'cache-only' && !region?.installed && <p>Go online to download routing data.</p>}
       </>}
       {(error || status?.error || job?.state === 'failed') && <p role="alert">{error || status?.error || job?.detail}</p>}
-      {!!status?.cacheBytes && <small>{formatBytes(status.cacheBytes)} cached for routing</small>}
+      {status?.summaryKnown && <small>{formatBytes(status.summaryBytes ?? 0)} cached for routing{status.summaryStale ? ' (last measured)' : ''}</small>}
     </section>}
     <button className="routing-download-pill" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       {running ? `${job?.upgrading ? 'Updating routing · ' : ''}${phaseLabel}${job?.phase === 'elevation' ? ` · ${tiles}${job.itemsTotal ? `/${job.itemsTotal}` : ''} tiles` : '…'}` : status?.upgradePending ? 'Routing ready · update pending' : job?.state === 'failed' ? 'Routing download failed' : active ? 'Routing ready' : 'Offline routing'}

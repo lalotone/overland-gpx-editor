@@ -1328,6 +1328,15 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('pack summaries preserve per-resource progress and item counts',
     packs[0]?.resources.water?.done === 1 && packs[0]?.resources.water?.bytes === 42 &&
       packs[0]?.resources.water?.items === 3)
+  check('legacy pack summaries do not invent transfer counts or whole-region coverage',
+    packs[0]?.resources.water?.reused === undefined && packs[0]?.resources.water?.downloaded === undefined && packs[0]?.coverageKind === undefined)
+  const transferPack = decodePacks([{
+    id: 'transfer', state: 'running', coverageKind: 'region',
+    resources: { 'vector-map': { done: 5, total: 10, failed: 0, bytes: 0, reused: 3, downloaded: 1, revalidated: 1 } },
+  }])[0]
+  check('pack decoding distinguishes cached tiles, downloaded bodies and online revalidation independently of bytes',
+    transferPack?.coverageKind === 'region' && transferPack.resources['vector-map']?.reused === 3 &&
+    transferPack.resources['vector-map']?.downloaded === 1 && transferPack.resources['vector-map']?.revalidated === 1)
   check('pack summaries preserve validated antimeridian area bounds',
     (packs[0] as { bbox?: { south: number; west: number; north: number; east: number } })?.bbox?.west === 179 &&
       (packs[0] as { bbox?: { south: number; west: number; north: number; east: number } })?.bbox?.east === -179)

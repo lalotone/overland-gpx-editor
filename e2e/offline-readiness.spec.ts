@@ -330,7 +330,7 @@ test('Enduro and session BRF profiles are selectable without persisting the uplo
     services: { broomRoute: '/routing/broom/route' },
     maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
   }))
-  await page.route(/\/offline\/routing$/, route => json(route, { enabled: true, ready: true, regionId: 'aragon', generationId: 'one', cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: true, regionId: 'aragon', generationId: 'one', cached: [], cacheBytes: 0 }))
   await page.route(/\/offline\/routing\/suggest$/, route => json(route, { region: { regionId: 'aragon', name: 'Aragón', installed: true, active: true } }))
   await page.route(/\/offline\/routing\/profile$/, async route => {
     expect(route.request().postDataJSON()).toMatchObject({ source: 'session BRF test' })
@@ -374,7 +374,7 @@ test('permit access reroutes and routing upgrades keep the planner usable', asyn
     services: { broomRoute: '/routing/broom/route' },
     maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
   }))
-  await page.route(/\/offline\/routing$/, route => json(route, status()))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, status()))
   await page.route(/\/offline\/routing\/suggest$/, route => json(route, { region: { regionId: 'aragon', name: 'Aragón', installed: true, active: true } }))
   await page.route(/\/offline\/routing\/cancel$/, route => { paused = true; return json(route, status()) })
   await page.route(/\/offline\/routing\/prepare$/, route => {
@@ -427,6 +427,7 @@ test('planner suggests viewport routing downloads and reveals progress', async (
   let suggestedBounds: unknown
   let requestedRegion: string | undefined
   let routeCalls = 0
+  let summaryRequests = 0
   const status = () => ({
     enabled: true,
     ready,
@@ -434,6 +435,10 @@ test('planner suggests viewport routing downloads and reveals progress', async (
     ...(running ? { job: { id: 'routing-1', regionId: 'spain/aragon', state: 'running', phase: 'elevation', item: 'N41E002', done: 1, total: 2, completedItems: 12, itemsTotal: 55, itemsDownloaded: 8, itemsReused: 4 } } : {}),
     cached: ready ? [{ regionId: 'spain/aragon', generationId: 'generation-1', name: 'Aragon', selected: true, pinned: false }] : [],
     cacheBytes: ready ? 4096 : 0,
+    summaryBytes: 4096,
+    summaryKnown: true,
+    summaryStale: true,
+    summaryUpdatedAt: '2026-09-23T12:00:00Z',
     pinnedBytes: 0,
     inUseBytes: ready ? 2048 : 0,
     reclaimableBytes: 0,
@@ -462,7 +467,8 @@ test('planner suggests viewport routing downloads and reveals progress', async (
     suggestedBounds = (route.request().postDataJSON() as { bbox: unknown }).bbox
     await json(route, { region: { regionId: 'spain/aragon', name: 'Aragon', installed: ready, active: ready } })
   })
-  await page.route(/\/offline\/routing$/, async route => {
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, async route => {
+    if (route.request().url().endsWith('?summary=1')) summaryRequests++
     if (running && complete) {
       running = false
       ready = true
@@ -498,6 +504,8 @@ test('planner suggests viewport routing downloads and reveals progress', async (
   await expect(page.getByRole('region', { name: 'Offline routing download' })).toHaveCount(0)
   await pill.click()
   await expect(page.locator('.routing-download-estimate')).toContainText('55 terrain tiles · 4 cached · 51 to fetch')
+  await expect.poll(() => summaryRequests).toBe(1)
+  await expect(page.getByText('4.00 KiB cached for routing (last measured)')).toBeVisible()
   await page.getByRole('button', { name: 'Download Aragon' }).click()
   expect(requestedRegion).toBe('spain/aragon')
   await expect(page.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '50')

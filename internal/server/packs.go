@@ -25,7 +25,6 @@ import (
 const (
 	maxPackResources        = 10000
 	maxActivePackJobs       = 2
-	maxStoredPackManifests  = 16
 	maxPackManifestBytes    = 1 << 20
 	maxMapGenerationBytes   = 4 << 20
 	maxElevationPackEntries = 2048
@@ -43,30 +42,34 @@ const (
 )
 
 type packInput struct {
-	Name      string       `json:"name"`
-	Automatic bool         `json:"automatic,omitempty"`
-	BBox      *bbox        `json:"bbox,omitempty"`
-	Route     []coordinate `json:"route,omitempty"`
-	PaddingKM float64      `json:"paddingKm"`
-	ZoomMin   int          `json:"zoomMin"`
-	ZoomMax   int          `json:"zoomMax"`
-	Layers    []string     `json:"layers,omitempty"`
-	Scopes    []string     `json:"scopes,omitempty"`
+	CoverageKind string       `json:"coverageKind,omitempty"`
+	Regional     bool         `json:"regional,omitempty"`
+	Name         string       `json:"name"`
+	Automatic    bool         `json:"automatic,omitempty"`
+	BBox         *bbox        `json:"bbox,omitempty"`
+	Route        []coordinate `json:"route,omitempty"`
+	PaddingKM    float64      `json:"paddingKm"`
+	ZoomMin      int          `json:"zoomMin"`
+	ZoomMax      int          `json:"zoomMax"`
+	Layers       []string     `json:"layers,omitempty"`
+	Scopes       []string     `json:"scopes,omitempty"`
 }
 
 func (p *packInput) UnmarshalJSON(raw []byte) error {
 	type wireInput struct {
-		Name      string          `json:"name"`
-		Automatic bool            `json:"automatic"`
-		BBox      json.RawMessage `json:"bbox"`
-		Route     []coordinate    `json:"route"`
-		PaddingKM float64         `json:"paddingKm"`
-		ZoomMin   *int            `json:"zoomMin"`
-		ZoomMax   *int            `json:"zoomMax"`
-		MinZoom   *int            `json:"minZoom"`
-		MaxZoom   *int            `json:"maxZoom"`
-		Layers    []string        `json:"layers"`
-		Scopes    []string        `json:"scopes"`
+		CoverageKind string          `json:"coverageKind"`
+		Regional     bool            `json:"regional"`
+		Name         string          `json:"name"`
+		Automatic    bool            `json:"automatic"`
+		BBox         json.RawMessage `json:"bbox"`
+		Route        []coordinate    `json:"route"`
+		PaddingKM    float64         `json:"paddingKm"`
+		ZoomMin      *int            `json:"zoomMin"`
+		ZoomMax      *int            `json:"zoomMax"`
+		MinZoom      *int            `json:"minZoom"`
+		MaxZoom      *int            `json:"maxZoom"`
+		Layers       []string        `json:"layers"`
+		Scopes       []string        `json:"scopes"`
 	}
 	var wire wireInput
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
@@ -75,6 +78,8 @@ func (p *packInput) UnmarshalJSON(raw []byte) error {
 		return err
 	}
 	p.Name, p.Automatic, p.Route, p.PaddingKM, p.Layers, p.Scopes = wire.Name, wire.Automatic, wire.Route, wire.PaddingKM, wire.Layers, wire.Scopes
+	p.Regional = wire.Regional
+	p.CoverageKind = wire.CoverageKind
 	if wire.ZoomMin != nil {
 		p.ZoomMin = *wire.ZoomMin
 	} else if wire.MinZoom != nil {
@@ -144,54 +149,69 @@ type poiPackResource struct {
 }
 
 type packResourceProgress struct {
-	Done   int   `json:"done"`
-	Total  int   `json:"total"`
-	Failed int   `json:"failed"`
-	Bytes  int64 `json:"bytes"`
-	Items  int   `json:"items,omitempty"`
+	Reused      int   `json:"reused,omitempty"`
+	Downloaded  int   `json:"downloaded,omitempty"`
+	Revalidated int   `json:"revalidated,omitempty"`
+	Done        int   `json:"done"`
+	Total       int   `json:"total"`
+	Failed      int   `json:"failed"`
+	Bytes       int64 `json:"bytes"`
+	Items       int   `json:"items,omitempty"`
 }
 
 type packManifest struct {
-	ID        string                          `json:"id"`
-	Name      string                          `json:"name"`
-	State     string                          `json:"state"`
-	CreatedAt time.Time                       `json:"createdAt"`
-	UpdatedAt time.Time                       `json:"updatedAt"`
-	Done      int                             `json:"done"`
-	Total     int                             `json:"total"`
-	Bytes     int64                           `json:"bytes"`
-	Failures  int                             `json:"failures"`
-	Resources map[string]packResourceProgress `json:"resources,omitempty"`
-	Input     packInput                       `json:"input"`
-	CacheKeys []string                        `json:"cacheKeys,omitempty"`
-	ErrorCode string                          `json:"errorCode,omitempty"`
+	Unavailable   []blockedPackResource           `json:"unavailable,omitempty"`
+	ElevationKeys []string                        `json:"elevationKeys,omitempty"`
+	ID            string                          `json:"id"`
+	Name          string                          `json:"name"`
+	State         string                          `json:"state"`
+	CreatedAt     time.Time                       `json:"createdAt"`
+	UpdatedAt     time.Time                       `json:"updatedAt"`
+	Done          int                             `json:"done"`
+	Total         int                             `json:"total"`
+	Bytes         int64                           `json:"bytes"`
+	Failures      int                             `json:"failures"`
+	Resources     map[string]packResourceProgress `json:"resources,omitempty"`
+	Input         packInput                       `json:"input"`
+	CacheKeys     []string                        `json:"cacheKeys,omitempty"`
+	ErrorCode     string                          `json:"errorCode,omitempty"`
 
-	cancel  context.CancelFunc `json:"-"`
-	deleted bool               `json:"-"`
+	cancel         context.CancelFunc `json:"-"`
+	deleted        bool               `json:"-"`
+	cacheKeySet    map[string]struct{}
+	lastCheckpoint time.Time
+	checkpointDone int
+	working        bool
 }
 
 type packSummary struct {
-	ID        string                          `json:"id"`
-	Name      string                          `json:"name"`
-	State     string                          `json:"state"`
-	BBox      *bbox                           `json:"bbox,omitempty"`
-	Done      int                             `json:"done"`
-	Total     int                             `json:"total"`
-	Failures  int                             `json:"failed"`
-	Bytes     int64                           `json:"bytes"`
-	Resources map[string]packResourceProgress `json:"resources,omitempty"`
-	ErrorCode string                          `json:"errorCode,omitempty"`
-	Error     string                          `json:"error,omitempty"`
-	CreatedAt time.Time                       `json:"createdAt"`
-	UpdatedAt time.Time                       `json:"updatedAt"`
+	CoverageKind string                          `json:"coverageKind,omitempty"`
+	Unavailable  []blockedPackResource           `json:"unavailable,omitempty"`
+	BatchesDone  int                             `json:"batchesDone,omitempty"`
+	BatchesTotal int                             `json:"batchesTotal,omitempty"`
+	ID           string                          `json:"id"`
+	Name         string                          `json:"name"`
+	State        string                          `json:"state"`
+	BBox         *bbox                           `json:"bbox,omitempty"`
+	Done         int                             `json:"done"`
+	Total        int                             `json:"total"`
+	Failures     int                             `json:"failed"`
+	Bytes        int64                           `json:"bytes"`
+	Resources    map[string]packResourceProgress `json:"resources,omitempty"`
+	ErrorCode    string                          `json:"errorCode,omitempty"`
+	Error        string                          `json:"error,omitempty"`
+	CreatedAt    time.Time                       `json:"createdAt"`
+	UpdatedAt    time.Time                       `json:"updatedAt"`
 }
 
 type packManager struct {
-	server             *Server
-	mu                 sync.Mutex
-	packs              map[string]*packManifest
-	jobTimeout         time.Duration
-	replacementCleanup func(*packManifest) error
+	server       *Server
+	mu           sync.Mutex
+	packs        map[string]*packManifest
+	jobTimeout   time.Duration
+	controlMu    sync.Mutex
+	controlAlloc map[string]int64
+	controlBytes int64
 }
 
 type packBudgetError struct{}
@@ -215,15 +235,23 @@ func (b *packAdmissionBudget) admit(bytes int64) error {
 }
 
 func newPackManager(server *Server) (*packManager, error) {
-	m := &packManager{server: server, packs: make(map[string]*packManifest), jobTimeout: defaultPackJobTimeout}
+	m := &packManager{server: server, packs: make(map[string]*packManifest), controlAlloc: make(map[string]int64), jobTimeout: defaultPackJobTimeout}
 	if !server.cache.writable {
+		if server.elevation.tiles != nil {
+			if err := server.elevation.tiles.finishPackRestore(); err != nil {
+				return nil, err
+			}
+		}
 		return m, nil
 	}
 	changed, err := m.loadStoredPacks()
 	if err != nil {
 		return nil, err
 	}
-	if err := m.pruneExcessStoredPacks(changed); err != nil {
+	if err := server.cache.setReservedBytes(m.controlReserve()); err != nil {
+		return nil, err
+	}
+	if err := m.restoreElevationPins(changed); err != nil {
 		return nil, err
 	}
 	desired, unavailable := m.desiredStoredPins()
@@ -254,12 +282,16 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !validPackID(filenameID) {
 			continue
 		}
-		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxPackManifestBytes)
+		if info, err := entry.Info(); err == nil {
+			m.controlAlloc[filenameID] = info.Size()
+			m.controlBytes += info.Size()
+		}
+		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxRegionalManifestBytes)
 		if err != nil {
 			continue
 		}
 		var manifest packManifest
-		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(manifest.CacheKeys) > maxPackResources {
+		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(raw) > packManifestLimit(manifest.Input) {
 			continue
 		}
 		if manifest.State == "running" || manifest.State == "queued" {
@@ -277,23 +309,6 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		m.packs[manifest.ID] = &copyManifest
 	}
 	return changed, nil
-}
-
-func (m *packManager) pruneExcessStoredPacks(changed map[string]bool) error {
-	for len(m.packs) > maxStoredPackManifests {
-		pruneID := m.oldestAutomaticPackLocked()
-		if pruneID == "" {
-			break
-		}
-		pruned := m.packs[pruneID]
-		if err := m.removeManifestFile(pruned.ID); err != nil {
-			return fmt.Errorf("repair interrupted automatic pack replacement: %w", err)
-		}
-		pruned.deleted = true
-		delete(m.packs, pruneID)
-		delete(changed, pruneID)
-	}
-	return nil
 }
 
 func (m *packManager) desiredStoredPins() (map[string][]string, map[string]struct{}) {
@@ -361,23 +376,60 @@ func (m *packManager) persistLocked(manifest *packManifest) error {
 	if err != nil {
 		return err
 	}
-	if len(raw) > maxPackManifestBytes {
+	if len(raw) > packManifestLimit(manifest.Input) {
 		return errors.New("pack manifest exceeds storage limit")
 	}
-	return atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw)
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	allocation := int64(len(raw))
+	if manifest.State == "queued" || manifest.State == "running" {
+		allocation = int64(packManifestLimit(manifest.Input))
+	}
+	previous := m.controlBaseReserve() + m.controlBytes
+	next := previous - m.controlAlloc[manifest.ID] + allocation
+	if err := m.server.cache.reserveControlStorage(next); err != nil {
+		return err
+	}
+	if err := requirePackDiskSpace(m.server.cache.dir, int64(len(raw))); err != nil {
+		_ = m.server.cache.setReservedBytes(previous)
+		return err
+	}
+	if err := atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw); err != nil {
+		_ = m.server.cache.setReservedBytes(previous)
+		return err
+	}
+	m.controlBytes += allocation - m.controlAlloc[manifest.ID]
+	m.controlAlloc[manifest.ID] = allocation
+	manifest.lastCheckpoint, manifest.checkpointDone = time.Now(), manifest.Done
+	return nil
 }
 
 func (m *packManager) removeManifestFile(id string) error {
 	if !m.server.cache.writable {
 		return nil
 	}
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
 	if err := m.server.cache.root.Remove(filepath.Join(m.server.cache.packsRel, id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncRootDir(m.server.cache.root, m.server.cache.packsRel)
+	if err := syncRootDir(m.server.cache.root, m.server.cache.packsRel); err != nil {
+		return err
+	}
+	m.controlBytes -= m.controlAlloc[id]
+	delete(m.controlAlloc, id)
+	return m.server.cache.setReservedBytes(m.controlBaseReserve() + m.controlBytes)
 }
 
 func validatePackInput(input packInput) (bbox, error) {
+	switch input.CoverageKind {
+	case "", "area", "city", "region", "country":
+	default:
+		return bbox{}, errors.New("unknown pack coverage kind")
+	}
+	if input.Regional && (input.BBox == nil || len(input.Route) != 0) {
+		return bbox{}, errors.New("regional packs require a bounding area")
+	}
 	input.Name = strings.TrimSpace(input.Name)
 	if input.Name == "" || len(input.Name) > 100 {
 		return bbox{}, errors.New("name is required and must not exceed 100 characters")
@@ -646,6 +698,21 @@ func updatePackResource(pack *packManifest, category string, failed bool, bytes 
 	pack.Resources[category] = progress
 }
 
+// Count response origins rather than admitted bytes: a network replacement can
+// consume zero additional storage. Older manifests have no transfer breakdown.
+func updatePackTransfer(pack *packManifest, category, state string) {
+	progress := pack.Resources[category]
+	switch state {
+	case "hit", "stale":
+		progress.Reused++
+	case "revalidated":
+		progress.Revalidated++
+	case "miss", "bypass":
+		progress.Downloaded++
+	}
+	pack.Resources[category] = progress
+}
+
 func packPOIBounds(input packInput, fallback bbox) ([]bbox, error) {
 	if len(input.Route) == 0 {
 		if err := fallback.validate(250, false); err != nil {
@@ -823,13 +890,17 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				estimate.Reused++
 				estimate.ReusedBytes += entry.Meta.Length
 			}
-			if estimate.Resources >= maxPackResources {
-				return packEstimate{}, fmt.Errorf("pack exceeds %d resources", maxPackResources)
+			if estimate.Resources >= packResourceLimit(input) {
+				return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
 			}
 			m.server.openFreeMap.mu.RLock()
-			vectorSources := make([]string, 0, len(m.server.openFreeMap.tiles))
+			vectorSources := make(map[string]int, len(m.server.openFreeMap.tiles))
 			for source := range m.server.openFreeMap.tiles {
-				vectorSources = append(vectorSources, source)
+				maxZoom, ok := m.server.openFreeMap.vectorMaxZoom[source]
+				if !ok {
+					maxZoom = 19
+				}
+				vectorSources[source] = maxZoom
 			}
 			rasterSources := make(map[string]int, len(m.server.openFreeMap.rasters))
 			for source := range m.server.openFreeMap.rasters {
@@ -840,16 +911,14 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				rasterSources[source] = maxZoom
 			}
 			m.server.openFreeMap.mu.RUnlock()
-			var tiles []tileKey
-			if len(vectorSources) > 0 {
-				var err error
-				tiles, err = enumeratePackTiles(input, bounds, input.ZoomMin, input.ZoomMax, maxPackResources-estimate.Resources)
+			vectorMissing := 0
+			for source, sourceMaxZoom := range vectorSources {
+				// A WebView overzooms the source's native tiles. Fetch their
+				// ancestors rather than requesting nonexistent high-zoom tiles.
+				tiles, err := enumeratePackTiles(input, bounds, min(input.ZoomMin, sourceMaxZoom), min(input.ZoomMax, sourceMaxZoom), packResourceLimit(input)-estimate.Resources)
 				if err != nil {
 					return packEstimate{}, err
 				}
-			}
-			vectorMissing := 0
-			for _, source := range vectorSources {
 				estimate.MapTiles[source] = tiles
 				estimate.Counts["openfreemap"] += len(tiles)
 				estimate.Resources += len(tiles)
@@ -869,7 +938,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				if sourceMaxZoom < input.ZoomMin {
 					continue
 				}
-				rasterTiles, err := enumeratePackTiles(input, bounds, input.ZoomMin, min(input.ZoomMax, sourceMaxZoom), maxPackResources-estimate.Resources)
+				rasterTiles, err := enumeratePackTiles(input, bounds, input.ZoomMin, min(input.ZoomMax, sourceMaxZoom), packResourceLimit(input)-estimate.Resources)
 				if err != nil {
 					return packEstimate{}, err
 				}
@@ -899,12 +968,16 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		if m.server.elevation.tiles == nil || m.server.elevation.tiles.cacheDir == "" {
 			return packEstimate{}, errors.New("elevation packs require Terrarium tile mode with a persistent tile cache")
 		}
-		tiles, err := enumeratePackTiles(input, bounds, m.server.elevation.tiles.zoom, m.server.elevation.tiles.zoom, maxPackResources-estimate.Resources)
+		tiles, err := enumeratePackTiles(input, bounds, m.server.elevation.tiles.zoom, m.server.elevation.tiles.zoom, packResourceLimit(input)-estimate.Resources)
 		if err != nil {
 			return packEstimate{}, err
 		}
-		if len(tiles) > maxElevationPackEntries {
-			return packEstimate{}, fmt.Errorf("elevation pack exceeds %d tiles", maxElevationPackEntries)
+		maxEntries, maxBytes := packElevationLimits(input)
+		if input.Regional && m.server.cache.useAvailableStorage {
+			maxBytes = m.server.elevation.tiles.diskQuota()
+		}
+		if len(tiles) > maxEntries {
+			return packEstimate{}, fmt.Errorf("elevation pack exceeds %d tiles", maxEntries)
 		}
 		estimate.ElevationTiles = tiles
 		estimate.Counts["elevation"] = len(tiles)
@@ -923,11 +996,14 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		}
 		missing := len(tiles) - elevationReused
 		estimatedTileBytes := int64(missing)*(120<<10) + elevationReusedBytes
-		if estimatedTileBytes > maxElevationPackBytes {
+		if estimatedTileBytes > maxBytes {
 			return packEstimate{}, errors.New("elevation pack exceeds its byte limit")
 		}
 		if estimatedTileBytes > m.server.elevation.tiles.diskQuota() {
 			return packEstimate{}, errors.New("elevation pack exceeds the configured tile cache quota")
+		}
+		if !m.server.elevation.tiles.canFitPack(tiles) {
+			return packEstimate{}, errors.New("elevation cache is reserved by downloaded packs; remove an old pack or increase storage")
 		}
 		elevationBytes := int64(missing) * 120 << 10
 		estimate.Scopes["elevation"] = cacheScopeStat{Bytes: elevationBytes, Entries: len(tiles)}
@@ -953,7 +1029,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		poiBytes := int64(0)
 		searchBounds, boundsErr := packPOIBounds(input, bounds)
 		if boundsErr != nil {
-			reason := "route area cannot be split into bounded POI searches"
+			reason := "POI provider limits do not permit a search across this whole area; choose a city for fresh place data"
 			for _, blockedKind := range []string{"fuel", "water", "camp"} {
 				estimate.Blocked = append(estimate.Blocked, blockedPackResource{Resource: poiPackCategory(blockedKind), Reason: reason})
 			}
@@ -1006,11 +1082,12 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		}[scope]
 		estimate.Dynamic = append(estimate.Dynamic, detail)
 	}
-	if estimate.Resources > maxPackResources {
-		return packEstimate{}, fmt.Errorf("pack exceeds %d resources", maxPackResources)
+	if estimate.Resources > packResourceLimit(input) {
+		return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
 	}
 	stats := m.server.cache.stats()
-	estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-stats.Reserved)
+	reserved := m.controlReserve() + int64(packManifestLimit(input))
+	estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-reserved)
 	estimate.FinalBytes = stats.Bytes + estimate.GenericBytes
 	estimate.Detail = strings.Join(estimate.Dynamic, "; ")
 	return estimate, nil
@@ -1032,17 +1109,10 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		estimate, err := m.estimateContext(ctx, input)
 		return &copyManifest, estimate, err
 	}
-	active, stored := m.activeLocked(), len(m.packs)
-	pruneID := ""
-	if input.Automatic && stored >= maxStoredPackManifests {
-		pruneID = m.oldestAutomaticPackLocked()
-	}
+	active := m.activeLocked()
 	m.mu.Unlock()
 	if active >= maxActivePackJobs {
 		return nil, packEstimate{}, fmt.Errorf("at most %d pack jobs may be active", maxActivePackJobs)
-	}
-	if stored >= maxStoredPackManifests && pruneID == "" {
-		return nil, packEstimate{}, fmt.Errorf("at most %d pack manifests may be retained", maxStoredPackManifests)
 	}
 	estimate, err := m.estimateContext(ctx, input)
 	if err != nil {
@@ -1065,15 +1135,26 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 	if err := ctx.Err(); err != nil {
 		return nil, estimate, err
 	}
+	if input.Regional {
+		if err := requirePackDiskSpace(m.server.cache.dir, estimate.EstimatedBytes); err != nil {
+			return nil, estimate, err
+		}
+	}
 	id, err := newPackID()
 	if err != nil {
 		return nil, estimate, err
 	}
 	now := time.Now().UTC()
-	manifest := &packManifest{ID: id, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input}
-	jobCtx, cancel := context.WithTimeout(m.server.ctx, m.jobTimeout)
+	manifest := &packManifest{ID: id, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input, Unavailable: estimate.Blocked}
+	for _, key := range estimate.ElevationTiles {
+		manifest.ElevationKeys = append(manifest.ElevationKeys, key.path())
+	}
+	timeout := m.jobTimeout
+	if input.Regional {
+		timeout = regionalJobTimeout
+	}
+	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
 	manifest.cancel = cancel
-	var pruned *packManifest
 	m.mu.Lock()
 	if existing := m.matchingPackLocked(input); existing != nil {
 		copyManifest := m.publicCopyLocked(existing)
@@ -1086,16 +1167,26 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		cancel()
 		return nil, estimate, errors.New("pack capacity was reached while estimating")
 	}
-	if len(m.packs) >= maxStoredPackManifests {
-		if input.Automatic {
-			pruneID = m.oldestAutomaticPackLocked()
-		}
-		if pruneID == "" {
+	if previous := m.retryPackLocked(input); previous != nil {
+		if previous.working {
 			m.mu.Unlock()
 			cancel()
-			return nil, estimate, errors.New("pack capacity was reached while estimating")
+			return nil, estimate, errors.New("previous download attempt is still stopping; try again shortly")
 		}
-		pruned = m.packs[pruneID]
+		id, manifest.ID, manifest.CreatedAt = previous.ID, previous.ID, previous.CreatedAt
+		// Keep the old ownership until every resource is rechecked. A retry must
+		// never open a window in which its cached tiles can be evicted.
+		manifest.CacheKeys = append([]string(nil), previous.CacheKeys...)
+		terrainKeys := make(map[string]struct{}, len(manifest.ElevationKeys))
+		for _, key := range manifest.ElevationKeys {
+			terrainKeys[key] = struct{}{}
+		}
+		for _, key := range previous.ElevationKeys {
+			if _, exists := terrainKeys[key]; !exists {
+				manifest.ElevationKeys = append(manifest.ElevationKeys, key)
+				terrainKeys[key] = struct{}{}
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		m.mu.Unlock()
@@ -1107,21 +1198,11 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		cancel()
 		return nil, estimate, err
 	}
-	if pruned != nil {
-		cleanup := m.cleanupPack
-		if m.replacementCleanup != nil {
-			cleanup = m.replacementCleanup
-		}
-		if err := cleanup(pruned); err != nil {
-			rollbackErr := m.restoreReplacedPackLocked(pruned, manifest)
-			m.mu.Unlock()
-			cancel()
-			return nil, estimate, errors.Join(fmt.Errorf("replace oldest automatic pack: %w", err), rollbackErr)
-		}
-		pruned.deleted = true
-		delete(m.packs, pruned.ID)
-	}
 	m.packs[id] = manifest
+	manifest.working = true
+	if m.server.elevation.tiles != nil {
+		m.server.elevation.tiles.setPackPins(id, manifest.ElevationKeys)
+	}
 	copyManifest := m.publicCopyLocked(manifest)
 	m.mu.Unlock()
 	m.server.wg.Add(1)
@@ -1145,40 +1226,32 @@ func (m *packManager) matchingPackLocked(input packInput) *packManifest {
 	return nil
 }
 
-func (m *packManager) restoreReplacedPackLocked(pruned, replacement *packManifest) error {
-	var restoreErr error
-	restoreErr = errors.Join(restoreErr, m.persistLocked(pruned))
-	for _, key := range pruned.CacheKeys {
-		restoreErr = errors.Join(restoreErr, m.server.cache.pin(key, pruned.ID, true))
+func (m *packManager) retryPackLocked(input packInput) *packManifest {
+	var newest *packManifest
+	for _, pack := range m.packs {
+		if pack.State != "incomplete" {
+			continue
+		}
+		candidate, requested := pack.Input, input
+		// Display labels changed between releases; geometry and resources, not
+		// their presentation, identify a resumable download.
+		candidate.Name, requested.Name = "", ""
+		candidate.CoverageKind, requested.CoverageKind = "", ""
+		if reflect.DeepEqual(candidate, requested) && (newest == nil || pack.UpdatedAt.After(newest.UpdatedAt)) {
+			newest = pack
+		}
 	}
-	restoreErr = errors.Join(restoreErr, m.cleanupPack(replacement))
-	return restoreErr
+	return newest
 }
 
 func (m *packManager) activeLocked() int {
 	active := 0
 	for _, manifest := range m.packs {
-		if manifest.State == "queued" || manifest.State == "running" {
+		if manifest.working || manifest.State == "queued" || manifest.State == "running" {
 			active++
 		}
 	}
 	return active
-}
-
-func (m *packManager) oldestAutomaticPackLocked() string {
-	var oldest *packManifest
-	for _, manifest := range m.packs {
-		if !manifest.Input.Automatic || manifest.State == "queued" || manifest.State == "running" {
-			continue
-		}
-		if oldest == nil || manifest.UpdatedAt.Before(oldest.UpdatedAt) {
-			oldest = manifest
-		}
-	}
-	if oldest == nil {
-		return ""
-	}
-	return oldest.ID
 }
 
 func requirePackDiskSpace(path string, required int64) error {
@@ -1189,21 +1262,31 @@ func requirePackDiskSpace(path string, required int64) error {
 	if err != nil {
 		return fmt.Errorf("check available disk space: %w", err)
 	}
-	const safetyMargin = uint64(64 << 20)
-	if supported && available < uint64(required)+safetyMargin {
-		return errors.New("pack would leave less than 64 MiB of free disk space")
+	if supported && available < uint64(required)+offlineDiskSafetyMargin {
+		return cacheStorageLimitError("download would leave less than 64 MiB of free disk space")
 	}
 	return nil
 }
 
 func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manifest *packManifest, estimate packEstimate) {
 	defer m.server.wg.Done()
+	defer func() {
+		m.mu.Lock()
+		manifest.working = false
+		m.mu.Unlock()
+	}()
 	defer cancel()
+	ctx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
 	if !m.update(manifest, func(p *packManifest) { p.State = "running" }) {
 		return
 	}
 	markIncomplete := func(code string) {
 		m.update(manifest, func(p *packManifest) {
+			if p.State == "incomplete" && p.ErrorCode != "" {
+				p.cancel = nil
+				return
+			}
 			p.State = "incomplete"
 			p.ErrorCode = code
 			p.cancel = nil
@@ -1232,7 +1315,8 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			return false
 		}
 		var budgetErr packBudgetError
-		if errors.As(err, &budgetErr) || strings.Contains(err.Error(), "admission") || strings.Contains(err.Error(), "quota") || strings.Contains(err.Error(), "entry limit") {
+		var storageErr cacheStorageLimitError
+		if errors.As(err, &budgetErr) || errors.As(err, &storageErr) || errors.Is(err, errTileQuotaPinned) {
 			markIncomplete("resource_limit")
 			return false
 		}
@@ -1251,7 +1335,8 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			pack.Done++
 			pack.Bytes += response.AdmittedBytes
 			updatePackResource(pack, category, false, response.AdmittedBytes, packResponseItems(category, response.Body))
-			pack.CacheKeys = appendUnique(pack.CacheKeys, response.Key)
+			updatePackTransfer(pack, category, response.State)
+			pack.addCacheKey(response.Key)
 		})
 		m.releaseRejectedPin(manifest, response.Key, nil, applied)
 		return applied
@@ -1264,164 +1349,177 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		applied := m.update(manifest, func(pack *packManifest) {
 			pack.Done++
 			updatePackResource(pack, category, false, 0, 0)
-			pack.CacheKeys = appendUnique(pack.CacheKeys, key)
+			updatePackTransfer(pack, category, "hit")
+			pack.addCacheKey(key)
 		})
 		m.releaseRejectedPin(manifest, key, nil, applied)
 		return applied
 	}
-	var elevationPackBytes int64
-	elevationByteLimit := int64(maxElevationPackBytes)
-	if m.server.elevation.tiles != nil {
-		elevationByteLimit = min(elevationByteLimit, m.server.elevation.tiles.diskQuota())
-	}
-	for _, key := range estimate.ElevationTiles {
-		if fail() {
-			return
-		}
-		wasCached := m.server.elevation.tiles.have(key)
-		_, err := m.server.elevation.tiles.grid(ctx, key)
-		var tileBytes int64
-		if err == nil {
-			if size, ok := m.server.elevation.tiles.diskFileSize(key); ok {
-				tileBytes = size
-			}
-			if elevationPackBytes+tileBytes > elevationByteLimit {
-				err = errors.New("elevation pack exceeded its byte limit")
+	elevation := func() bool {
+		_, limit := packElevationLimits(manifest.Input)
+		if m.server.elevation.tiles != nil {
+			if manifest.Input.Regional && m.server.cache.useAvailableStorage {
+				limit = m.server.elevation.tiles.diskQuota()
+			} else {
+				limit = min(limit, m.server.elevation.tiles.diskQuota())
 			}
 		}
-		newBytes := tileBytes
-		if wasCached {
-			newBytes = 0
-		}
-		if !m.update(manifest, func(p *packManifest) {
-			p.Done++
+		elevationBudget := &packAdmissionBudget{limit: limit}
+		// Leave slots for interactive elevation lookups. The tile store also
+		// applies its global six-request bound across packs and other callers.
+		return runTileBatchesWithWorkers(ctx, estimate.ElevationTiles, 4, func(workCtx context.Context, key tileKey) bool {
+			if fail() {
+				return false
+			}
+			wasCached := m.server.elevation.tiles.have(key)
+			_, err := m.server.elevation.tiles.grid(workCtx, key)
+			var tileBytes int64
+			if err == nil {
+				tileBytes, _ = m.server.elevation.tiles.diskFileSize(key)
+				err = elevationBudget.admit(tileBytes)
+			}
+			newBytes := tileBytes
+			if wasCached {
+				newBytes = 0
+			}
+			if !m.update(manifest, func(p *packManifest) {
+				p.Done++
+				if err != nil {
+					p.Failures++
+				}
+				p.Bytes += newBytes
+				updatePackResource(p, packResourceElevation, err != nil, newBytes, 0)
+			}) {
+				return false
+			}
 			if err != nil {
-				p.Failures++
+				if fail() {
+					return false
+				}
+				var budgetErr packBudgetError
+				var storageErr cacheStorageLimitError
+				if errors.As(err, &budgetErr) || errors.As(err, &storageErr) || errors.Is(err, errTileQuotaPinned) {
+					markIncomplete("resource_limit")
+					return false
+				}
 			}
-			p.Bytes += newBytes
-			updatePackResource(p, packResourceElevation, err != nil, newBytes, 0)
-		}) {
-			return
-		}
-		if err != nil {
+			return true
+		})
+	}
+	auxiliary := func() bool {
+		if estimate.Counts["fuel"] > 0 {
 			if fail() {
-				return
+				return false
 			}
-			if elevationPackBytes+tileBytes > elevationByteLimit {
-				markIncomplete("resource_limit")
-				return
-			}
-			continue
-		}
-		elevationPackBytes += tileBytes
-	}
-	if estimate.Counts["fuel"] > 0 {
-		if fail() {
-			return
-		}
-		p := m.server.providers["fuel"]
-		response, err := m.server.outbound.do(ctx, cachedRequest{policy: p, method: http.MethodGet, url: p.baseURL.String(), params: "national-snapshot", cacheable: true, headers: map[string]string{"Accept": "application/json"}, validate: validateFuelResponse, admit: budget.admit, cancelWithCaller: true})
-		if !acceptResponse(packResourceFuelPrices, response, err) {
-			return
-		}
-	}
-	for _, resource := range estimate.POIRequests {
-		if fail() {
-			return
-		}
-		request := resource.Request
-		request.admit = budget.admit
-		request.cancelWithCaller = true
-		response, err := m.server.outbound.do(ctx, request)
-		if !acceptResponse(resource.Category, response, err) {
-			return
-		}
-	}
-	if m.server.openFreeMap != nil {
-		m.server.openFreeMap.mu.RLock()
-		coreKeys := append([]string(nil), m.server.openFreeMap.coreKeys...)
-		generation := m.server.openFreeMap.generation
-		m.server.openFreeMap.mu.RUnlock()
-		if estimate.Counts["openfreemap-core"] > 0 {
-			for _, key := range coreKeys {
-				if fail() {
-					return
-				}
-				if !pinExisting(packResourceVectorMap, key) {
-					return
-				}
+			p := m.server.providers["fuel"]
+			response, err := m.server.outbound.do(ctx, cachedRequest{policy: p, method: http.MethodGet, url: p.baseURL.String(), params: "national-snapshot", cacheable: true, headers: map[string]string{"Accept": "application/json"}, validate: validateFuelResponse, admit: budget.admit, cancelWithCaller: true})
+			if !acceptResponse(packResourceFuelPrices, response, err) {
+				return false
 			}
 		}
-		m.server.openFreeMap.mu.RLock()
-		glyphTemplate := m.server.openFreeMap.glyphs
-		m.server.openFreeMap.mu.RUnlock()
-		for _, glyph := range estimate.Glyphs {
+		for _, resource := range estimate.POIRequests {
 			if fail() {
-				return
+				return false
 			}
-			endpoint := strings.NewReplacer("{fontstack}", url.PathEscape(glyph.Font), "{range}", glyph.Range).Replace(glyphTemplate)
-			response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, generation+":glyph:"+glyph.Font+":"+glyph.Range, []string{"application/x-protobuf", "application/octet-stream", "application/vnd.mapbox-vector-tile"}, budget.admit)
-			if !acceptResponse(packResourceVectorMap, response, err) {
-				return
-			}
-		}
-		for source, tiles := range estimate.MapTiles {
-			m.server.openFreeMap.mu.RLock()
-			template := m.server.openFreeMap.tiles[source]
-			m.server.openFreeMap.mu.RUnlock()
-			for _, key := range tiles {
-				if fail() {
-					return
-				}
-				endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
-				response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream"}, budget.admit)
-				if !acceptResponse(packResourceVectorMap, response, err) {
-					return
-				}
+			request := resource.Request
+			request.admit = budget.admit
+			request.cancelWithCaller = true
+			response, err := m.server.outbound.do(ctx, request)
+			if !acceptResponse(resource.Category, response, err) {
+				return false
 			}
 		}
-		for source, tiles := range estimate.RasterMapTiles {
-			m.server.openFreeMap.mu.RLock()
-			template := m.server.openFreeMap.rasters[source]
-			m.server.openFreeMap.mu.RUnlock()
-			for _, key := range tiles {
-				if fail() {
-					return
-				}
-				endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
-				response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"image/png", "image/jpeg", "image/webp"}, budget.admit)
-				if !acceptResponse(packResourceVectorMap, response, err) {
-					return
-				}
+		for _, resource := range estimate.ExistingKeys {
+			if fail() || !pinExisting(resource.Category, resource.Key) {
+				return false
 			}
 		}
+		return true
 	}
-	for _, resource := range estimate.ExistingKeys {
-		if fail() {
-			return
+	maps := func() bool {
+		if m.server.openFreeMap != nil {
+			m.server.openFreeMap.mu.RLock()
+			coreKeys := append([]string(nil), m.server.openFreeMap.coreKeys...)
+			generation := m.server.openFreeMap.generation
+			m.server.openFreeMap.mu.RUnlock()
+			if estimate.Counts["openfreemap-core"] > 0 {
+				for _, key := range coreKeys {
+					if fail() {
+						return false
+					}
+					if !pinExisting(packResourceVectorMap, key) {
+						return false
+					}
+				}
+			}
+			m.server.openFreeMap.mu.RLock()
+			glyphTemplate := m.server.openFreeMap.glyphs
+			m.server.openFreeMap.mu.RUnlock()
+			for _, glyph := range estimate.Glyphs {
+				if fail() {
+					return false
+				}
+				endpoint := strings.NewReplacer("{fontstack}", url.PathEscape(glyph.Font), "{range}", glyph.Range).Replace(glyphTemplate)
+				response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, generation+":glyph:"+glyph.Font+":"+glyph.Range, []string{"application/x-protobuf", "application/octet-stream", "application/vnd.mapbox-vector-tile"}, budget.admit)
+				if !acceptResponse(packResourceVectorMap, response, err) {
+					return false
+				}
+			}
+			for source, tiles := range estimate.MapTiles {
+				m.server.openFreeMap.mu.RLock()
+				template := m.server.openFreeMap.tiles[source]
+				m.server.openFreeMap.mu.RUnlock()
+				if !runTileBatches(ctx, tiles, manifest.Input.Regional, func(workCtx context.Context, key tileKey) bool {
+					if fail() {
+						return false
+					}
+					endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
+					response, err := m.server.openFreeMap.fetchWithAdmission(workCtx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream"}, budget.admit)
+					return acceptResponse(packResourceVectorMap, response, err)
+				}) {
+					if ctx.Err() != nil {
+						fail()
+					}
+					return false
+				}
+			}
+			for source, tiles := range estimate.RasterMapTiles {
+				m.server.openFreeMap.mu.RLock()
+				template := m.server.openFreeMap.rasters[source]
+				m.server.openFreeMap.mu.RUnlock()
+				for _, key := range tiles {
+					if fail() {
+						return false
+					}
+					endpoint := strings.NewReplacer("{z}", fmt.Sprint(key.z), "{x}", fmt.Sprint(key.x), "{y}", fmt.Sprint(key.y)).Replace(template)
+					response, err := m.server.openFreeMap.fetchWithAdmission(ctx, endpoint, fmt.Sprintf("%s:resource:%s:%d/%d/%d", generation, source, key.z, key.x, key.y), []string{"image/png", "image/jpeg", "image/webp"}, budget.admit)
+					if !acceptResponse(packResourceVectorMap, response, err) {
+						return false
+					}
+				}
+			}
 		}
-		if !pinExisting(resource.Category, resource.Key) {
-			return
-		}
+		return true
+	}
+	if !runPackStages(stopWork, elevation, maps, auxiliary) {
+		fail()
+		return
+	}
+	if fail() {
+		return
 	}
 	m.update(manifest, func(p *packManifest) {
-		if p.Failures == 0 && p.Done == p.Total {
+		if p.Failures == 0 && p.Done == p.Total && len(p.Unavailable) == 0 {
 			p.State = "complete"
 		} else {
 			p.State = "incomplete"
 			p.ErrorCode = "resource_failures"
+			if p.Failures == 0 && p.Done == p.Total {
+				p.ErrorCode = "provider_limits"
+			}
 		}
 		p.cancel = nil
 	})
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, current := range values {
-		if current == value {
-			return values
-		}
-	}
-	return append(values, value)
 }
 
 func (m *packManager) releaseRejectedPin(manifest *packManifest, key string, pinErr error, applied bool) {
@@ -1436,8 +1534,14 @@ func (m *packManager) update(manifest *packManifest, change func(*packManifest))
 	if manifest.deleted {
 		return false
 	}
+	previousState := manifest.State
 	change(manifest)
 	manifest.UpdatedAt = time.Now().UTC()
+	// Regional packs checkpoint bounded batches instead of rewriting an
+	// ever-growing multi-megabyte manifest for every individual tile.
+	if manifest.Input.Regional && previousState == "running" && manifest.State == "running" && manifest.Done-manifest.checkpointDone < regionalBatchSize && time.Since(manifest.lastCheckpoint) < 5*time.Second {
+		return true
+	}
 	if err := m.persistLocked(manifest); err != nil {
 		manifest.State = "incomplete"
 		manifest.ErrorCode = "storage_error"
@@ -1490,13 +1594,24 @@ func (m *packManager) summaryLocked(p *packManifest) packSummary {
 		copy := *p.Input.BBox
 		bounds = &copy
 	}
-	return packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	summary := packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Unavailable: append([]blockedPackResource(nil), p.Unavailable...)}
+	summary.CoverageKind = p.Input.CoverageKind
+	if p.Input.Regional {
+		summary.BatchesTotal = (p.Total + regionalBatchSize - 1) / regionalBatchSize
+		summary.BatchesDone = p.Done / regionalBatchSize
+		if p.Done == p.Total {
+			summary.BatchesDone = summary.BatchesTotal
+		}
+	}
+	return summary
 }
 
 func (m *packManager) publicCopyLocked(p *packManifest) packManifest {
 	copyManifest := *p
 	copyManifest.Input = packInput{}
 	copyManifest.CacheKeys = nil
+	copyManifest.ElevationKeys = nil
+	copyManifest.cacheKeySet = nil
 	copyManifest.Resources = clonePackResources(p.Resources)
 	return copyManifest
 }
@@ -1531,6 +1646,9 @@ func (m *packManager) delete(id string) (bool, error) {
 }
 
 func (m *packManager) cleanupPack(p *packManifest) error {
+	if m.server.elevation.tiles != nil {
+		m.server.elevation.tiles.setPackPins(p.ID, nil)
+	}
 	var persistenceErr error
 	for _, key := range p.CacheKeys {
 		persistenceErr = errors.Join(persistenceErr, m.server.cache.pin(key, p.ID, false))

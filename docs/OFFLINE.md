@@ -113,6 +113,39 @@ and reused counts, retries, elapsed stage time and activity updates. Transfer
 percentages are per file; diagnostics don't replace current work. Only an open
 graph is reported as ready.
 
+Routing progress polling never calls Broom's artifact-verifying `CacheInfo`.
+`GET /offline/routing?summary=1` explicitly refreshes Broom's metadata-only
+measurement; `summaryBytes`, `summaryKnown`, `summaryStale` and
+`summaryUpdatedAt` distinguish unknown storage from a measured zero and expose
+freshness. Ordinary polls return that snapshot without traversing files.
+`?inventory=1` remains the explicit verified inventory path for ownership,
+pinned/in-use/reclaimable counts; `inventoryUpdatedAt` dates those separate
+counters. An advisory summary never authorizes pruning.
+
+`GET /offline/routing/regions` exposes the provider's region hierarchy and bounds
+with installed/in-use flags. It starts no preparation. Without the full provider
+catalogue, installed generations remain browsable from local metadata. City
+map packs still use a covering regional routing extract, not a city-specific
+routing graph.
+
+Vector pack preparation clamps tile requests to each source's declared native
+maximum zoom. Higher requested display zooms reuse native parent tiles for
+overzooming instead of requesting nonexistent tiles from the provider.
+
+Explicit `regional: true` bbox packs use a bounded 100,000-resource budget and
+128-resource batches, instead of the ordinary 10,000-resource trip-pack limit.
+Two vector workers share the existing provider limiter. Their larger manifests
+have reserved control storage and checkpoint every batch (or five seconds),
+with terminal states always flushed. One manifest owns all cache pins; terrain
+pins are restored before quota eviction at startup. Quota shortages fail admission
+rather than silently replacing previously downloaded packs.
+
+Regional elevation work allows up to 16,384 tiles / 2 GiB, still subject to the
+configured terrain quota and existing pack reservations. Broad POI searches keep
+their provider bounds: `unavailable` reports unsupported resources and a terminal
+`provider_limits` result distinguishes those from a network failure. There is no
+tiled Overpass sweep. Supported map/elevation work can finish independently.
+
 Broom 0.5 selects sparse terrain tiles intersecting retained highway/ferry
 geometry. A real Catalonia plan and rebuild selected 55 tiles, versus 180 with
 0.4's all-node rectangle. Retained distant roads and ferries still require terrain;
@@ -169,16 +202,24 @@ per server. This does not change the built-in profiles or saved GPX contents.
 Opening or selecting a GPX makes its route the active automatic pack. The
 frontend estimates first, then starts preparation without a second user action.
 The readiness control reports each resource independently and replaces the
-active status when another route is loaded. Recent packs remain pinned; once
-the manifest limit is reached, starting a new automatic pack releases the oldest
-completed automatic one. Editing an already loaded track does not restart the
-job.
+active status when another route is loaded. Packs remain pinned until removed;
+there is no fixed retained-pack count. Their metadata is charged to storage:
+running jobs reserve room to grow, completed manifests occupy their actual size,
+and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
+identity and preserves its pins. Editing an already loaded track does not
+restart the job.
 
 Estimates perform no provider traffic. They report resource counts, estimated
 and reusable bytes, remaining quota, and every blocked provider. Long and
 antimeridian routes are split into bounded corridor POI searches. Jobs have hard
 count, byte, zoom, coordinate and worker limits, can be cancelled through the
 API, and persist progress after each resource.
+
+Android uses available filesystem space instead of fixed map/elevation cache
+byte quotas, rechecks free space on writes, and keeps a 64 MiB safety margin.
+The two caches share that free space; their reported capacities are not additive.
+The global entry/index bound, per-job enumeration limits, concurrent-job bound
+and provider-worker limits still protect memory and upstream services.
 
 A completed pack may contain Terrarium corridor tiles, one fuel snapshot,
 bounded trip POIs, selected exact cached data and bounded OpenFreeMap coverage.

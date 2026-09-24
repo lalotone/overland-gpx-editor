@@ -118,6 +118,12 @@ export interface RoutingDataRegion {
 }
 
 export interface RoutingDataStatus {
+  /** Byte counters are a verified snapshot, not recalculated by progress polls. */
+  inventoryUpdatedAt?: string
+  summaryBytes?: number
+  summaryKnown?: boolean
+  summaryStale?: boolean
+  summaryUpdatedAt?: string
   upgradePending?: boolean
   enabled: boolean
   ready: boolean
@@ -134,6 +140,10 @@ export interface RoutingDataStatus {
 }
 
 export interface PackSummary extends OfflineJob {
+  coverageKind?: 'area' | 'city' | 'region' | 'country'
+  unavailable?: { resource?: string; layer?: string; reason: string }[]
+  batchesDone?: number
+  batchesTotal?: number
   bbox?: PackBounds
   createdAt?: string
   updatedAt?: string
@@ -144,6 +154,9 @@ export interface PackSummary extends OfflineJob {
 }
 
 export interface PackResourceProgress {
+  reused?: number
+  downloaded?: number
+  revalidated?: number
   done: number
   total: number
   failed: number
@@ -152,6 +165,8 @@ export interface PackResourceProgress {
 }
 
 export interface PackEstimateRequest {
+  coverageKind?: 'area' | 'city' | 'region' | 'country'
+  regional?: boolean
   name: string
   automatic?: boolean
   route?: { lat: number; lon: number }[]
@@ -525,6 +540,11 @@ function decodeRoutingDataStatus(value: unknown): RoutingDataStatus {
   return {
     enabled: root?.enabled === true,
     ready: root?.ready === true,
+    inventoryUpdatedAt: text(root?.inventoryUpdatedAt),
+    summaryBytes: number(root?.summaryBytes),
+    summaryKnown: root?.summaryKnown === true,
+    summaryStale: root?.summaryStale === true,
+    summaryUpdatedAt: text(root?.summaryUpdatedAt),
     upgradePending: root?.upgradePending === true,
     regionId: text(root?.regionId),
     generationId: text(root?.generationId),
@@ -562,6 +582,15 @@ export async function fetchRoutingDataStatus(runtime: RuntimeConfig, signal?: Ab
   if (!runtime.offline?.routing) return null
   const response = await fetch(runtime.offline.routing, { signal })
   if (!response.ok) throw await responseError(response, `Routing data status returned ${response.status}`)
+  return decodeRoutingDataStatus(await response.json())
+}
+
+/** Explicit storage inspection; never call this from a progress polling loop. */
+export async function fetchRoutingSummary(runtime: RuntimeConfig, signal?: AbortSignal): Promise<RoutingDataStatus | null> {
+  if (!runtime.offline?.routing) return null
+  const endpoint = runtime.offline.routing
+  const response = await fetch(`${endpoint}${endpoint.includes('?') ? '&' : '?'}summary=1`, { signal })
+  if (!response.ok) throw await responseError(response, 'Could not inspect routing storage')
   return decodeRoutingDataStatus(await response.json())
 }
 
@@ -673,6 +702,9 @@ function decodePackResources(value: unknown): Record<string, PackResourceProgres
     const progress = record(entry)
     if (!progress) continue
     resources[category] = {
+      reused: number(progress.reused),
+      downloaded: number(progress.downloaded),
+      revalidated: number(progress.revalidated),
       done: number(progress.done) ?? 0,
       total: number(progress.total) ?? 0,
       failed: number(progress.failed) ?? number(progress.failures) ?? 0,
@@ -748,8 +780,18 @@ export function decodePacks(value: unknown): PackSummary[] {
     const job = decodeJob(entry)
     const item = record(entry)
     if (!job || !item) return []
+    const kind = item.coverageKind
+    const coverageKind: PackSummary['coverageKind'] = kind === 'area' || kind === 'city' || kind === 'region' || kind === 'country' ? kind : undefined
     return [{
       ...job,
+      coverageKind,
+      unavailable: Array.isArray(item.unavailable) ? item.unavailable.flatMap(value => {
+        const blocked = record(value)
+        const reason = text(blocked?.reason)
+        return reason ? [{ reason, resource: text(blocked?.resource), layer: text(blocked?.layer) }] : []
+      }) : [],
+      batchesDone: number(item.batchesDone),
+      batchesTotal: number(item.batchesTotal),
       bbox: decodePackBounds(item.bbox),
       createdAt: text(item.createdAt),
       updatedAt: text(item.updatedAt),

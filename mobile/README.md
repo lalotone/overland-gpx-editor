@@ -119,6 +119,24 @@ The checked Android adaptations use Android Gradle Plugin **8.13.2** with Wails'
 Gradle **9.2.1** wrapper so release lint supports Java 25. Set `JAVA_HOME` to
 select a JDK when more than one is installed.
 
+## CI and tagged releases
+
+The **Mobile CI** workflow runs on pushes to `main` and pull requests. It builds
+and type-checks the mobile frontend, runs the mobile Go tests with the race
+detector and coverage, runs `go vet`, and runs the browser suite at both phone
+sizes. Browser failure traces are uploaded as workflow artifacts.
+
+Tags matching `v*` run the same mobile checks before publishing. The release
+workflow builds the ARM64 release APK with Java 25, attaches
+`overland-release.apk` to the GitHub release, and includes it in `SHA256SUMS`.
+
+For stable signing across releases, configure repository secrets
+`ANDROID_KEYSTORE_BASE64` (the base64-encoded keystore),
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`.
+The workflow decodes the keystore into a temporary file and removes it after the
+build. Without these secrets, Wails uses a runner-local debug key; APKs from
+different runs will not have a stable signing identity for in-place updates.
+
 ## Preview and checks
 
 ```sh

@@ -14,7 +14,11 @@ permissions:
   contents: write # to create the release and upload the archives
 
 jobs:
+  mobile-tests:
+    uses: ./.github/workflows/mobile.yml
+
   release:
+    needs: mobile-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +34,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            mobile/go.sum
 
       # A tag should never publish something that fails its own checks. This
       # is the same command a contributor runs locally.
@@ -44,10 +51,40 @@ jobs:
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      # Every target is pure Go, so this one Linux runner produces the macOS
+      # Desktop targets are pure Go, so this one Linux runner produces the macOS
       # and Windows builds too — no cross-toolchain, no matrix, no mac runner.
       - name: Build archives and packages
         run: make dist
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.2.12479018'
+      - name: Prepare Android signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            umask 077
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/overland-release.jks"
+            echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/overland-release.jks" >> "$GITHUB_ENV"
+          fi
+      # make dist clears build/, so assemble the APK afterwards.
+      - name: Build Android release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" make android-release
+      - name: Add APK checksums
+        working-directory: build/android
+        run: sha256sum -- *.apk >> ../SHA256SUMS
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/overland-release.jks"
 
       - name: Write release notes
         run: |
@@ -82,6 +119,14 @@ jobs:
           **Windows** — SmartScreen warns about an unrecognised app for the
           same reason: More info, then Run anyway.
 
+          **Android (ARM64)** — download `overland-release.apk` and install it:
+
+          ```bash
+          adb install -r overland-release.apk
+          ```
+
+          Installing with `-r` preserves existing tracks and offline downloads.
+
           Verify a download against `SHA256SUMS`:
 
           ```bash
@@ -98,4 +143,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file build/NOTES.md \
             --generate-notes \
-            build/*.tar.gz build/*.zip build/*.deb build/*.rpm build/SHA256SUMS
+            build/*.tar.gz build/*.zip build/*.deb build/*.rpm build/android/*.apk build/SHA256SUMS

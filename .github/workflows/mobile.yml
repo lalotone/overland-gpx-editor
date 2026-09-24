@@ -65,6 +65,9 @@ jobs:
           distribution: temurin
           java-version: '25'
       - uses: android-actions/setup-android@v3
+        with:
+          # The action defaults to the obsolete "tools" package as well.
+          packages: platform-tools
       - name: Install Android build tools
         run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.2.12479018'
       - name: Build Android debug APK

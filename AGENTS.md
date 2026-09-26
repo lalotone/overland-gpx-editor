@@ -116,6 +116,12 @@ Two rules it is worth repeating here:
   library goes through `safeGPXFilename`, which refuses directory components
   and non-`.gpx` names, then through `os.Root` so symlinks cannot escape
   `GPX_DIR`. There is no authentication in front of it.
+- **Passkey auth wraps the handler; it does not live in `internal/server`.**
+  `serve --auth` puts `internal/passkeyauth` around everything in
+  `cmd/overland/serve/auth.go`, so the mobile host stays unaffected and never
+  links WebAuthn or SQLite. New routes are guarded automatically; do not add
+  exemptions beyond `/healthz`, and decide any exemption on the same path
+  spelling the router uses — chi routes on the raw path.
 - **Never assume an untagged surface is sealed.** Edges with no OSM `surface`
   tag are reported as `unknown` and counted towards neither the paved nor the
   unpaved share — rolling them into either invents a number the data does not

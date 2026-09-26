@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f5f0" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex" />
+    <title>Create a passkey</title>
+    <link rel="stylesheet" href="/auth/auth.css" />
+    <script defer src="/auth/auth.js"></script>
+  </head>
+  <body data-page="enroll">
+    <main id="enroll" class="auth-card enroll" data-state="checking">
+      <div class="auth-icon" aria-hidden="true">
+        <svg data-show="checking ready" viewBox="0 0 24 24">
+          <circle cx="15.5" cy="8.5" r="5.5" />
+          <circle cx="17" cy="7" r="1.2" />
+          <path d="M11.6 12.4 3 21m2.8-2.8 2.4 2.4m.4-5.2 2.2 2.2" />
+        </svg>
+        <svg data-show="done" viewBox="0 0 24 24">
+          <path d="m5 12.5 4.5 4.5L19 7.5" />
+        </svg>
+        <svg data-show="invalid" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7.5v5.5m0 3.5v.01" />
+        </svg>
+      </div>
+
+      <p data-show="checking" class="auth-lead">Checking your link…</p>
+
+      <section data-show="ready">
+        <p id="enroll-app" class="auth-eyebrow"></p>
+        <h1>Create your passkey</h1>
+        <p class="auth-account">
+          <span id="account-initial" class="auth-avatar"></span
+          ><span id="account-name"></span>
+        </p>
+        <form id="enroll-form">
+          <button id="passkey" class="auth-button" type="submit">
+            Create passkey
+          </button>
+          <details class="auth-more">
+            <summary>Label it in your passkey manager</summary>
+            <label for="passkey-name" class="sr-only">Passkey label</label>
+            <input
+              id="passkey-name"
+              maxlength="128"
+              autocomplete="off"
+              placeholder="e.g. your email"
+            />
+            <p class="auth-hint">Kept on your device, never on the server.</p>
+          </details>
+        </form>
+      </section>
+
+      <section data-show="done">
+        <p id="done-app" class="auth-eyebrow"></p>
+        <h1>You're all set</h1>
+        <p id="done-lead" class="auth-lead"></p>
+        <a id="continue" class="auth-button" href="/">Continue</a>
+      </section>
+
+      <section data-show="invalid">
+        <h1>This link doesn't work</h1>
+        <p id="invalid-reason" class="auth-lead"></p>
+      </section>
+
+      <p
+        id="auth-status"
+        class="auth-status"
+        role="status"
+        aria-live="polite"
+      ></p>
+    </main>
+  </body>
+</html>

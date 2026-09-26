@@ -21,6 +21,16 @@ func GPXDirFlag() cli.Flag {
 	}
 }
 
+// AuthDBFlag is the passkey account database shared by serve and user.
+func AuthDBFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name:    "auth-db",
+		Usage:   "passkey account database",
+		Value:   DefaultAuthDB(),
+		Sources: NonEmptyEnv("AUTH_DB"),
+	}
+}
+
 func NonEmptyEnv(key string) cli.ValueSourceChain {
 	return envSource(key, func(value string) (string, bool) {
 		return value, value != ""
@@ -122,4 +132,17 @@ func DefaultRoutingCacheDir() string {
 		return "routing"
 	}
 	return filepath.Join(home, ".cache", "overland", "routing")
+}
+
+// DefaultAuthDB keeps accounts with configuration rather than in a cache
+// directory, where a cleanup would silently sign everyone out for good.
+func DefaultAuthDB() string {
+	if base := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(base) {
+		return filepath.Join(base, "overland", "accounts.db")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "accounts.db"
+	}
+	return filepath.Join(home, ".config", "overland", "accounts.db")
 }

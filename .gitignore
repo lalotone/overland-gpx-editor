@@ -39,3 +39,8 @@ __pycache__/
 /mobile/bin/
 /mobile/frontend/dist/*
 !/mobile/frontend/dist/.gitkeep
+/worktrees
+/.kata.toml
+/tmp
+/scripts/deploy
+/scripts/account

@@ -16,6 +16,7 @@ import (
 
 	"github.com/lalotone/overland-gpx-editor/cmd/overland/util"
 	"github.com/lalotone/overland-gpx-editor/internal/mcp"
+	"github.com/lalotone/overland-gpx-editor/internal/passkeyauth"
 	"github.com/lalotone/overland-gpx-editor/internal/server"
 	"github.com/lalotone/overland-gpx-editor/web"
 	"github.com/urfave/cli/v3"
@@ -55,6 +56,17 @@ func Flags() []cli.Flag {
 			Usage:   "the server sits behind a reverse proxy; withdraws implicit loopback trust so management needs --offline-admin-token",
 			Sources: util.BoolEnv("BEHIND_PROXY"),
 		},
+		&cli.BoolFlag{
+			Name:    "auth",
+			Usage:   "require passkey sign-in for the whole app; manage accounts with `overland user`",
+			Sources: util.BoolEnv("AUTH"),
+		},
+		&cli.StringFlag{
+			Name:    "auth-origin",
+			Usage:   "public URL browsers use with --auth (https://host, or http://localhost:PORT); passkeys bind to its host name (default: http://localhost:<--addr port>)",
+			Sources: util.NonEmptyEnv("AUTH_ORIGIN"),
+		},
+		util.AuthDBFlag(),
 		util.GPXDirFlag(),
 		&cli.StringFlag{
 			Name:    "elevation-host",
@@ -150,6 +162,22 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		return errors.New("--routing-prepare and --routing-update require --routing-region")
 	}
 
+	addr, err := listenAddr(cmd.String("addr"), cmd.IsSet("addr"), cmd.Int("port"))
+	if err != nil {
+		return err
+	}
+	var origin string
+	var accounts *passkeyauth.Store
+	if cmd.Bool("auth") {
+		if origin, err = authOrigin(cmd.String("auth-origin"), addr); err != nil {
+			return err
+		}
+		if accounts, err = passkeyauth.OpenStore(cmd.String("auth-db")); err != nil {
+			return fmt.Errorf("open account database: %w", err)
+		}
+		defer accounts.Close()
+	}
+
 	behindProxy := cmd.Bool("behind-proxy")
 	bridge, mcpServer, mcpListener, err := startMCP(cmd, behindProxy)
 	if err != nil {
@@ -199,9 +227,28 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer srv.Close()
 
+	var handler http.Handler = srv
+	if accounts != nil {
+		var auth *passkeyauth.Authenticator
+		if handler, auth, err = protectWithPasskeys(srv, accounts, origin); err != nil {
+			closeMCP(bridge, mcpListener)
+			return err
+		}
+		purgeDone, purged := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(purged)
+			auth.PurgeLoop(purgeDone)
+		}()
+		// Stop the purge before the account database closes.
+		defer func() {
+			close(purgeDone)
+			<-purged
+		}()
+	}
+
 	httpServer := &http.Server{
-		Addr:              cmd.String("addr"),
-		Handler:           logRequests(srv),
+		Addr:              addr,
+		Handler:           logRequests(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       60 * time.Second,
@@ -229,15 +276,24 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	log.Printf("%s %s listening on %s (library: %s, elevation: %s)",
-		util.AppName, cmd.Root().Version, cmd.String("addr"), cmd.String("gpx-dir"), elevationSource)
+		util.AppName, cmd.Root().Version, addr, cmd.String("gpx-dir"), elevationSource)
 	if cmd.String("routing-cache-dir") != "" {
 		log.Printf("Broom routing enabled (data: %s, region: %s)", cmd.String("routing-cache-dir"), valueOrNone(cmd.String("routing-region")))
+	}
+	if accounts != nil {
+		log.Printf("passkey sign-in required at %s (accounts: %s; manage with `%s user`)", origin, cmd.String("auth-db"), util.AppName)
+		if behindProxy {
+			log.Printf("with --auth the proxy must preserve the Host header and serve %s", origin)
+		}
+		for _, warning := range authWarnings(origin, addr, cmd.StringSlice("allowed-origin"), cmd.String("trusted-ui-origin")) {
+			log.Printf("warning: %s", warning)
+		}
 	}
 	if bridge != nil {
 		log.Printf("MCP available at http://%s/mcp (Streamable HTTP, loopback clients only)", mcpListener.Addr())
 	}
 	if behindProxy {
-		log.Printf("behind a reverse proxy: loopback trust withdrawn, offline management requires an admin token")
+		log.Printf("behind a reverse proxy: loopback trust withdrawn, offline management requires --trusted-ui-origin or an admin token")
 		// Without a declared origin the relay refuses the proxied frontend's
 		// own requests, which looks like routing and tiles quietly breaking.
 		if len(cmd.StringSlice("allowed-origin")) == 0 && strings.TrimSpace(cmd.String("trusted-ui-origin")) == "" {
@@ -307,6 +363,22 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	}
 	log.Printf("%s stopped", util.AppName)
 	return nil
+}
+
+// listenAddr applies the root --port flag. Process managers such as naked
+// pass the port ahead of the subcommand ("overland --port N serve …"), and it
+// always means loopback: the proxy in front is what faces the network.
+func listenAddr(addr string, addrSet bool, port int) (string, error) {
+	if port == 0 {
+		return addr, nil
+	}
+	if addrSet {
+		return "", errors.New("--port and --addr are mutually exclusive")
+	}
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("--port %d is out of range", port)
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil
 }
 
 func expectedServiceStop(err error) bool {

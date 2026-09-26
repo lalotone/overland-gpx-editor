@@ -15,6 +15,7 @@
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "test:e2e": "playwright test --config=playwright.config.ts",
+    "test:e2e:auth": "playwright test --config=playwright.auth.config.ts",
     "verify": "esbuild scripts/verify.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/verify.mjs && node node_modules/.cache/verify.mjs && npm run verify:mcp",
     "verify:mcp": "esbuild scripts/verifyMcpBridge.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/verifyMcpBridge.mjs && node node_modules/.cache/verifyMcpBridge.mjs"
   },

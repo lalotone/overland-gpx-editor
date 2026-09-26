@@ -15,7 +15,7 @@ func TestCommandLayout(t *testing.T) {
 	if cmd.Action == nil {
 		t.Fatal("root command does not display help")
 	}
-	for _, name := range []string{"serve", "import"} {
+	for _, name := range []string{"serve", "import", "user"} {
 		if cmd.Command(name) == nil {
 			t.Errorf("missing %q command", name)
 		}
@@ -62,5 +62,14 @@ func TestImportCommand(t *testing.T) {
 		if string(content) != "<gpx/>" {
 			t.Fatalf("imported content = %q", content)
 		}
+	}
+}
+
+// naked starts services as "<binary> --port N <args>", so the root flag must
+// reach serve. An out-of-range port fails before anything is started.
+func TestRootPortFlagReachesServe(t *testing.T) {
+	err := newCommand().Run(context.Background(), []string{"overland", "--port", "70000", "serve"})
+	if err == nil || !strings.Contains(err.Error(), "--port 70000 is out of range") {
+		t.Fatalf("err = %v", err)
 	}
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { fetchRoutingSummary, formatBytes } from '../lib/offline'
-import type { PackSummary, RoutingDataJob, RoutingDataStatus, RuntimeConfig } from '../lib/offline'
+import { fetchRoutingPlan, fetchRoutingSummary, formatBytes } from '../lib/offline'
+import type { PackSummary, RoutingDataJob, RoutingDataStatus, RoutingPlan, RuntimeConfig } from '../lib/offline'
 import { searchPlaces } from '../lib/geocoding'
 import type { PlaceResult } from '../lib/geocoding'
 import {
@@ -16,13 +16,15 @@ import {
   fetchRoutingRegions,
   gridParts,
   groupStatus,
-  mapsComplete,
   packAreaName,
   packFailure,
   packGroups,
   packIsActive,
+  packWasStopped,
   partsProgress,
+  regionIdName,
   resourceTransferText,
+  routingDiagnosticsText,
   routingJobView,
 } from '../lib/offlineRegions'
 import type { DownloadArea, DownloadRegion, DownloadResource, GroupStatus, ResourceGroup } from '../lib/offlineRegions'
@@ -39,11 +41,21 @@ const GROUP_HINTS: Record<ResourceGroup, string> = {
 
 const GROUP_SHORT: Record<ResourceGroup, string> = { maps: 'Maps', terrain: 'Terrain', places: 'POIs' }
 
+/** "1,014 of 1,854 · 22.2 MiB": what the percentage is made of. */
+function countText(status: GroupStatus): string {
+  const parts: string[] = []
+  if (status.total) parts.push(`${status.done.toLocaleString()} of ${status.total.toLocaleString()}`)
+  if (status.bytes) parts.push(formatBytes(status.bytes))
+  return parts.join(' · ')
+}
+
 function groupStatusText(status: GroupStatus): string {
+  const counts = countText(status)
   switch (status.state) {
-    case 'done': return 'Downloaded'
-    case 'running': return `Downloading · ${Math.round((status.fraction ?? 0) * 100)}%`
+    case 'done': return status.bytes ? `Downloaded · ${formatBytes(status.bytes)}` : 'Downloaded'
+    case 'running': return `Downloading · ${Math.round((status.fraction ?? 0) * 100)}%${counts ? ` · ${counts}` : ''}`
     case 'queued': return 'Queued'
+    case 'stopped': return `Stopped${counts ? ` · ${counts}` : ''}`
     case 'failed': return 'Stopped short'
     case 'partial': return 'Partly downloaded'
     case 'unavailable': return 'Not available here'
@@ -56,11 +68,17 @@ function chipText(status: GroupStatus): string {
     case 'done': return '✓'
     case 'running': return `${Math.round((status.fraction ?? 0) * 100)}%`
     case 'queued': return 'queued'
+    case 'stopped': return 'stopped'
     case 'failed':
     case 'partial': return 'partial'
     case 'unavailable': return 'n/a'
     default: return '—'
   }
+}
+
+/** "Maps · Terrain · POIs": which groups a stored pack holds. */
+function packGroupsText(pack: PackSummary): string {
+  return packGroups(pack).map(group => GROUP_SHORT[group]).join(' · ')
 }
 
 /**
@@ -151,10 +169,11 @@ export function OfflineRegionsButton({
   const total = activePacks.reduce((sum, pack) => sum + (pack.total ?? 0), 0)
   const mapPercent = percent(done, total)
   const failed = routing?.job?.state === 'failed'
+  const routingStep = routingBusy ? (ROUTING_STEPS[routingJobView(routing?.job).step]?.label ?? 'starting') : ''
   const label = activePacks.length
-    ? `Downloading${mapPercent === null ? '…' : ` ${mapPercent}%`}`
+    ? `Downloading${mapPercent === null ? '…' : ` ${mapPercent}%`}${routingBusy ? ' · routing' : ''}`
     : routingBusy
-      ? `Routing · ${ROUTING_STEPS[routingJobView(routing?.job).step]?.label ?? 'starting'}`
+      ? `Routing · ${routingStep}`
       : 'Offline regions'
   const detail = routing?.upgradePending
     ? 'Routing update pending'
@@ -244,7 +263,9 @@ export function OfflineRegionsDialog({
   }, [runtime.offline?.routing])
 
   useEffect(() => {
-    // Explicit storage inspection, once per opening — never from a polling loop.
+    // Explicit storage inspection: once per opening and again when downloads
+    // finish — never from a polling loop.
+    if (downloads.downloading) return
     const controller = new AbortController()
     void fetchRoutingSummary(runtime, controller.signal)
       .then(summary => {
@@ -254,7 +275,7 @@ export function OfflineRegionsDialog({
       })
       .catch(() => { /* Storage totals are advisory. */ })
     return () => controller.abort()
-  }, [])
+  }, [downloads.downloading])
 
   const installed = useMemo(
     () => new Set(routing?.cached.filter(region => region.selected).map(region => region.regionId) ?? []),
@@ -278,7 +299,27 @@ export function OfflineRegionsDialog({
   const byID = useMemo(() => new Map(catalogue.map(region => [region.id, region])), [catalogue])
   const countries = catalogue.filter(region => region.kind === 'country')
   const downloadedRegions = catalogue.filter(region => installed.has(region.id) || region.installed)
-  const regionName = (id: string | undefined) => (id && (byID.get(id)?.name ?? routing?.cached.find(r => r.regionId === id)?.name)) || id || 'Routing region'
+  const regionName = (id: string | undefined) => {
+    if (!id) return 'Routing region'
+    return byID.get(id)?.name
+      ?? routing?.cached.find(r => r.regionId === id)?.name
+      ?? (downloads.target?.region === id ? downloads.target.area.name : undefined)
+      ?? regionIdName(id)
+  }
+  /** "Routing, maps and terrain downloaded · POIs stopped": every resource of a region, in one line. */
+  const regionSummary = (region: DownloadRegion): string => {
+    const area = areaForRegion(region, catalogue)
+    if (!area) return 'Routing downloaded'
+    const done = ['Routing']
+    const rest: string[] = []
+    for (const group of PACK_GROUPS) {
+      const status = groupStatus(downloads.packs, area, group)
+      if (status.state === 'done') done.push(group === 'places' ? 'POIs' : GROUP_SHORT[group].toLowerCase())
+      else if (status.state !== 'none') rest.push(`${GROUP_SHORT[group]} ${groupStatusText(status).toLowerCase().split(' · ')[0]}`)
+    }
+    const list = done.length > 1 ? `${done.slice(0, -1).join(', ')} and ${done[done.length - 1]}` : done[0]
+    return [`${list} downloaded`, ...rest].join(' · ')
+  }
   const countryOf = (region: DownloadRegion) => {
     let current: DownloadRegion | undefined = region
     const seen = new Set<string>()
@@ -332,9 +373,12 @@ export function OfflineRegionsDialog({
     : undefined
   const unsplitArea = unsplitCountry ? areaForRegion(unsplitCountry, catalogue) : null
   const unsplitAreas = unsplitArea ? gridParts(unsplitArea) : []
+  // Typing a name searches every country: a filter preselected from the
+  // active region must not hide the region the user is looking for.
+  const searchingAll = mode === 'regions' && Boolean(query.trim())
   const filtered = catalogue.filter(region =>
     region.kind === (mode === 'countries' ? 'country' : 'region') &&
-    (!country || mode === 'countries' || countryOf(region) === country) &&
+    (!country || mode === 'countries' || searchingAll || countryOf(region) === country) &&
     normalized(region.name).includes(normalized(query)),
   )
 
@@ -364,7 +408,6 @@ export function OfflineRegionsDialog({
 
   const regionRow = (region: DownloadRegion) => {
     const downloaded = installed.has(region.id) || region.installed
-    const mapped = mapsComplete(downloads.packs, areaForRegion(region, catalogue))
     const inUse = routing?.ready && routing.regionId === region.id
     const working = routing?.job?.regionId === region.id && downloads.routingBusy
     const parentName = byID.get(region.parent ?? '')?.name
@@ -378,7 +421,7 @@ export function OfflineRegionsDialog({
               {working
                 ? 'Downloading routing…'
                 : downloaded
-                  ? mapped ? 'Routing and maps downloaded' : 'Routing downloaded · maps not complete'
+                  ? regionSummary(region)
                   : parentName || 'Available to download'}
             </small>
           </span>
@@ -431,7 +474,9 @@ export function OfflineRegionsDialog({
           <span className="offline-regions-row-text">
             <strong>{name}</strong>
             <small>
-              {pack.status === 'queued' ? 'Queued' : `${(pack.done ?? 0).toLocaleString()} / ${(pack.total ?? 0).toLocaleString()} resources`}
+              {packGroupsText(pack)}
+              {pack.status === 'queued' ? ' · queued' : ` · ${(pack.done ?? 0).toLocaleString()} / ${(pack.total ?? 0).toLocaleString()} resources`}
+              {pack.bytes ? ` · ${formatBytes(pack.bytes)}` : ''}
               {pack.batchesTotal && pack.batchesTotal > 1 ? ` · batch ${Math.min((pack.batchesDone ?? 0) + 1, pack.batchesTotal)} of ${pack.batchesTotal}` : ''}
             </small>
           </span>
@@ -452,7 +497,7 @@ export function OfflineRegionsDialog({
             return (
               <li key={kind}>
                 <span>{label}</span>
-                <strong>{progress.failed ? `${progress.failed} missing` : `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()}`}</strong>
+                <strong>{progress.failed ? `${progress.failed} missing${progress.error ? ` · ${progress.error}` : ''}` : `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()}${progress.bytes ? ` · ${formatBytes(progress.bytes)}` : ''}`}</strong>
               </li>
             )
           })}
@@ -565,7 +610,7 @@ export function OfflineRegionsDialog({
                   <span className={`offline-regions-symbol is-${state.tone}`}><Icon name={state.tone === 'ready' ? 'check' : 'map'} /></span>
                   <span className="offline-regions-row-text">
                     <strong>{name}</strong>
-                    <small>{[coverageLabel(pack.coverageKind), formatBytes(pack.bytes), packDate(pack)].filter(Boolean).join(' · ')}</small>
+                    <small>{[packGroupsText(pack), coverageLabel(pack.coverageKind), formatBytes(pack.bytes), packDate(pack)].filter(Boolean).join(' · ')}</small>
                   </span>
                   <span className={`offline-regions-badge is-${state.tone}`}>{state.label}</span>
                 </button>
@@ -609,8 +654,8 @@ export function OfflineRegionsDialog({
       </section>
 
       <p className="offline-regions-storage">
-        {formatBytes(packBytes)} of maps
-        {routingBytes && <> · {formatBytes(routingBytes.bytes)} of routing data{routingBytes.stale ? ' (last measured)' : ''}</>}
+        {formatBytes(packBytes)} of maps, terrain and POIs
+        {routingBytes && <> · {formatBytes(routingBytes.bytes)} of routing data</>}
       </p>
       {downloadedRegions.length === 0 && storedPacks.length === 0 && !downloads.downloading && (
         <button type="button" className="btn btn-primary btn-sm offline-regions-cta" onClick={() => setTab('browse')}>
@@ -680,7 +725,7 @@ export function OfflineRegionsDialog({
         ) : (
           <>
             <div className="offline-regions-heading">
-              <h3>{mode === 'countries' ? 'Countries' : country ? `${byID.get(country)?.name} · regions` : 'Regions'}</h3>
+              <h3>{mode === 'countries' ? 'Countries' : country && !searchingAll ? `${byID.get(country)?.name} · regions` : searchingAll ? 'Matching regions' : 'Regions'}</h3>
               <span>{filtered.length}</span>
             </div>
             <ul className="offline-regions-list">{filtered.map(regionRow)}</ul>
@@ -705,6 +750,24 @@ export function OfflineRegionsDialog({
       </div>
     </>
   )
+
+  const detailRegionID = detail ? detail.area?.regionId || detail.record?.id : undefined
+  const detailRegionKnown = Boolean(detailRegionID && (installed.has(detailRegionID) || detail?.record?.installed))
+  const [routingPlan, setRoutingPlan] = useState<{ region: string; plan: RoutingPlan | null; loading: boolean } | null>(null)
+  useEffect(() => {
+    // Broom's estimate makes no PBF or terrain downloads. Only worth asking
+    // for a region not yet installed and not being prepared.
+    if (!detailRegionID || detailRegionKnown || downloads.routingBusy || !runtime.offline?.routing) {
+      setRoutingPlan(null)
+      return
+    }
+    const controller = new AbortController()
+    setRoutingPlan({ region: detailRegionID, plan: null, loading: true })
+    void fetchRoutingPlan(runtime, detailRegionID, controller.signal)
+      .then(plan => { if (!controller.signal.aborted) setRoutingPlan({ region: detailRegionID, plan, loading: false }) })
+      .catch(() => { if (!controller.signal.aborted) setRoutingPlan({ region: detailRegionID, plan: null, loading: false }) })
+    return () => controller.abort()
+  }, [detailRegionID, detailRegionKnown, downloads.routingBusy, runtime.offline?.routing])
 
   let detailView = null
   if (detail) {
@@ -738,7 +801,23 @@ export function OfflineRegionsDialog({
       ...PACK_GROUPS.filter(group => statuses[group].state !== 'done' && statuses[group].state !== 'running' && statuses[group].state !== 'queued'),
     ]
     const nothingYet = !regionInstalled && !regionRunning && PACK_GROUPS.every(group => statuses[group].state === 'none')
+    const anyBusy = regionRunning || PACK_GROUPS.some(group => statuses[group].state === 'running' || statuses[group].state === 'queued')
     const failedPack = PACK_GROUPS.map(group => areaDownloadState(downloads.packs, detailArea, group)).find(state => state.failed && !state.active)?.failed
+    const completedJob = regionID && routing?.job?.regionId === regionID && routing.job.state === 'complete' ? routing.job : undefined
+    const diagnostics = routingDiagnosticsText(job ?? completedJob)
+    const planText = (() => {
+      if (regionInstalled || regionRunning || !routingPlan || routingPlan.region !== regionID) return null
+      if (routingPlan.loading) return 'Estimating the download…'
+      const plan = routingPlan.plan
+      // Broom only knows sizes once it has the index and the PBF, so a fresh
+      // region often has nothing to say; say nothing rather than a caveat.
+      if (!plan) return null
+      const parts: string[] = []
+      if (plan.pbfBytes !== null) parts.push(`${formatBytes(plan.pbfBytes)} of road data`)
+      if (plan.tilesKnown) parts.push(`${plan.tilesTotal.toLocaleString()} terrain tile${plan.tilesTotal === 1 ? '' : 's'}${plan.tilesCached ? ` (${plan.tilesCached.toLocaleString()} already cached)` : ''}`)
+      if (plan.estimatedBytes !== null) parts.push(`about ${formatBytes(plan.estimatedBytes)} to download`)
+      return parts.length ? parts.join(' · ') : null
+    })()
 
     detailView = (
       <div className="offline-regions-scroll">
@@ -764,6 +843,7 @@ export function OfflineRegionsDialog({
                   {subAreas.length > 0
                     ? `One download for all of ${name}, so routes cross its ${subLabel} freely. Needed to plan routes, online or offline.`
                     : 'Needed to plan routes, online or offline.'}
+                  {planText ? ` · ${planText}` : ''}
                 </small>
               </span>
               {regionRunning ? (
@@ -790,6 +870,7 @@ export function OfflineRegionsDialog({
             </div>
             {regionRunning && <RoutingProgress job={job} />}
             {routingFailed && <p className="offline-regions-error" role="alert">{routing?.error || job?.detail || 'Routing download failed.'}</p>}
+            {diagnostics && <p className="offline-regions-muted">{diagnostics}</p>}
           </div>
         </section>
 
@@ -842,7 +923,11 @@ export function OfflineRegionsDialog({
           </ul>
         </section>
 
-        {failedPack && <p className="offline-regions-error" role="alert">{subAreas.length ? `${packAreaName(failedPack)}: ` : ''}{packFailure(failedPack)}</p>}
+        {failedPack && (
+          <p className={packWasStopped(failedPack) ? 'offline-regions-notice' : 'offline-regions-error'} role={packWasStopped(failedPack) ? 'status' : 'alert'}>
+            {subAreas.length ? `${packAreaName(failedPack)}: ` : ''}{packFailure(failedPack)}
+          </p>
+        )}
         {matchingTarget && downloads.error && <p className="offline-regions-error" role="alert">{downloads.error}</p>}
         <div className="offline-regions-detail-actions">
           <button
@@ -852,7 +937,7 @@ export function OfflineRegionsDialog({
             onClick={() => detailArea && void downloads.start(detailArea, missing)}
           >
             <Icon name="download" />
-            {downloads.preparing ? 'Preparing…' : !missing.length ? 'Everything downloaded' : nothingYet ? 'Download everything' : 'Download the rest'}
+            {downloads.preparing ? 'Preparing…' : missing.length ? (nothingYet ? 'Download everything' : 'Download the rest') : anyBusy ? 'Downloading…' : 'Everything downloaded'}
           </button>
           {downloads.downloading && (
             <button type="button" className="btn btn-ghost btn-sm" disabled={downloads.busyPack !== null} onClick={() => void downloads.stopAll()}>

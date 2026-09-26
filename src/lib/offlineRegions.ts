@@ -17,6 +17,7 @@ import type {
   RoutingDataStatus,
   RuntimeConfig,
 } from './offline'
+import { intersectsSpain } from './fuel'
 
 /**
  * Region downloads shared by the web and mobile frontends. A region offers
@@ -187,6 +188,34 @@ export function routingJobView(job: RoutingDataJob | undefined): RoutingJobView 
   }
 }
 
+const DIAGNOSTIC_LABELS: Record<string, string> = {
+  'malformed-restrictions': 'malformed turn restrictions',
+  'unsupported-conditional-restrictions': 'conditional turn restrictions',
+  'unsupported-mode-restrictions': 'vehicle-specific turn restrictions',
+  'unmapped-restrictions': 'turn restrictions Broom cannot represent',
+}
+
+/**
+ * Broom's build notes in plain words, or null when there are none. These are
+ * data-quality remarks about the map, not failures: the graph is complete.
+ */
+export function routingDiagnosticsText(job: RoutingDataJob | undefined): string | null {
+  const notes = (job?.diagnostics ?? []).filter(item => item.Count > 0)
+  if (!notes.length) return null
+  const total = notes.reduce((sum, item) => sum + item.Count, 0)
+  const parts = notes.map(item => `${item.Count.toLocaleString()} ${DIAGNOSTIC_LABELS[item.Code] ?? item.Code.replace(/-/g, ' ')}`)
+  return `Skipped ${total.toLocaleString()} restriction${total === 1 ? '' : 's'} in the map data: ${parts.join(', ')}. Routes still work; those junctions may allow a turn the signs do not.`
+}
+
+/** A readable name for a routing region id when the catalogue has none yet. */
+export function regionIdName(id: string): string {
+  const last = id.split('/').pop() ?? id
+  return last
+    .split('-')
+    .map(word => (['of', 'and', 'the', 'de', 'del', 'la', 'y'].includes(word) ? word : word.charAt(0).toUpperCase() + word.slice(1)))
+    .join(' ')
+}
+
 export function packAreaName(pack: PackSummary): string {
   return pack.name?.replace(/^(Map|Maps|Route|Terrain|Points of interest|[\w ]+ \+ [\w +]+):\s*/i, '').trim() || 'Downloaded area'
 }
@@ -229,10 +258,22 @@ export function coversBounds(pack: PackBounds | undefined, area: PackBounds): bo
   )
 }
 
-export function packFailure(pack: PackSummary): string {
-  const failed = Object.entries(pack.resources)
+/** "fuel stations (the request timed out)" for each resource that failed. */
+export function failedResourcesText(pack: PackSummary): string {
+  return Object.entries(pack.resources)
     .filter(([, progress]) => progress.failed > 0)
-    .map(([kind]) => RESOURCE_LABELS[kind] ?? kind)
+    .map(([kind, progress]) => `${(RESOURCE_LABELS[kind] ?? kind).toLowerCase()}${progress.error ? ` (${progress.error})` : ''}`)
+    .join(', ')
+}
+
+export function packWasStopped(pack: PackSummary): boolean {
+  return pack.detail === 'cancelled'
+}
+
+export function packFailure(pack: PackSummary): string {
+  const failed = failedResourcesText(pack)
+  if (packWasStopped(pack))
+    return `Stopped at ${(pack.done ?? 0).toLocaleString()} of ${(pack.total ?? 0).toLocaleString()} resources. Downloaded data is kept; download again to continue.`
   if (pack.detail === 'interrupted')
     return 'Download interrupted. Download again to resume using the cached data.'
   if (pack.detail === 'resource_limit')
@@ -241,8 +282,8 @@ export function packFailure(pack: PackSummary): string {
     return `Could not start this queued download${pack.reason ? `: ${pack.reason}` : ''}. Download again to retry.`
   if (pack.detail === 'provider_limits')
     return 'Available resources downloaded. Place-provider limits require city-sized areas for fresh stops.'
-  if (failed.length)
-    return `Could not finish ${failed.join(', ').toLowerCase()}. Download again to retry the missing resources.`
+  if (failed)
+    return `Could not finish ${failed}. Download again to retry the missing resources.`
   return 'Some resources are missing. Download again to finish the area.'
 }
 
@@ -316,13 +357,19 @@ function fitsOnePack(bounds: PackBounds): boolean {
   return tileCount(bounds) <= PART_MAP_TILES && tilesAt(bounds, TERRAIN_ZOOM) <= PART_TERRAIN_TILES
 }
 
-function gridLabel(row: number, rows: number, column: number, columns: number): string {
-  const words = (count: number, names: string[][]) => count <= 3 ? names[count - 1] : undefined
-  const vertical = words(rows, [[''], ['north', 'south'], ['north', 'central', 'south']])?.[row]
-  const horizontal = words(columns, [[''], ['west', 'east'], ['west', 'central', 'east']])?.[column]
-  if (vertical === undefined || horizontal === undefined) return `row ${row + 1}, column ${column + 1}`
+const ROW_WORDS = [[''], ['north', 'south'], ['north', 'central', 'south'], ['far north', 'north', 'south', 'far south'], ['far north', 'north', 'central', 'south', 'far south']]
+const COLUMN_WORDS = [[''], ['west', 'east'], ['west', 'central', 'east'], ['far west', 'west', 'east', 'far east'], ['far west', 'west', 'central', 'east', 'far east']]
+
+/** "north-west", "far south-central": a compass name a rider can place. */
+export function gridLabel(row: number, rows: number, column: number, columns: number): string {
+  const vertical = ROW_WORDS[rows - 1]?.[row]
+  const horizontal = COLUMN_WORDS[columns - 1]?.[column]
+  if (vertical === undefined || horizontal === undefined) return `row ${row + 1} of ${rows}, column ${column + 1} of ${columns}`
+  if (!vertical || !horizontal) return vertical || horizontal
   if (vertical === 'central' && horizontal === 'central') return 'centre'
-  return [vertical, horizontal].filter(Boolean).join('-')
+  if (vertical === 'central') return horizontal
+  if (horizontal === 'central') return vertical
+  return `${vertical}-${horizontal}`
 }
 
 /**
@@ -472,7 +519,9 @@ export function areaDownloadState(packs: PackSummary[], area: DownloadArea | nul
     active: members.some(packIsActive),
     resources,
     unavailable: members.flatMap(pack => pack.unavailable ?? []),
-    failed: members.find(pack => !packIsActive(pack) && (pack.status === 'failed' || pack.incomplete)),
+    // A pack that stopped short of another group is not this group's failure:
+    // after a retry the maps pack may still carry a dead POI query.
+    failed: members.find(pack => !packIsActive(pack) && (pack.status === 'failed' || pack.incomplete) && !packFinished(pack, group)),
   }
 }
 
@@ -481,12 +530,17 @@ export function mapsComplete(packs: PackSummary[], area: DownloadArea | null): b
   return areaDownloadState(packs, area, 'maps').complete
 }
 
-export type GroupState = 'done' | 'running' | 'queued' | 'failed' | 'partial' | 'unavailable' | 'none'
+export type GroupState = 'done' | 'running' | 'queued' | 'stopped' | 'failed' | 'partial' | 'unavailable' | 'none'
 
 export interface GroupStatus {
   state: GroupState
   /** Share done while running, 0..1. */
   fraction?: number
+  /** Resources done and expected, summed over the area's packs. */
+  done: number
+  total: number
+  /** Bytes stored so far for this group. */
+  bytes: number
 }
 
 /** One resource group's state for one area, from the packs that hold it. */
@@ -494,19 +548,24 @@ export function groupStatus(packs: PackSummary[], area: DownloadArea | null, gro
   const state = areaDownloadState(packs, area, group)
   const kinds = RESOURCE_GROUPS[group].kinds
   const present = kinds.map(kind => state.resources[kind]).filter(progress => progress !== undefined)
-  if (state.complete) return { state: 'done' }
+  const done = present.reduce((sum, progress) => sum + progress.done, 0)
+  const total = present.reduce((sum, progress) => sum + progress.total, 0)
+  const bytes = present.reduce((sum, progress) => sum + progress.bytes, 0)
+  const counts = { done, total, bytes }
+  if (state.complete) return { state: 'done', ...counts }
   if (state.active) {
-    const done = present.reduce((sum, progress) => sum + progress.done, 0)
-    const total = present.reduce((sum, progress) => sum + progress.total, 0)
     return state.packs.some(pack => pack.status === 'running')
-      ? { state: 'running', fraction: total ? done / total : 0 }
-      : { state: 'queued' }
+      ? { state: 'running', fraction: total ? done / total : 0, ...counts }
+      : { state: 'queued', ...counts }
   }
   if (!present.length && state.unavailable.some(item => (item.resource && kinds.includes(item.resource)) || (group === 'maps' && item.layer === 'openfreemap')))
-    return { state: 'unavailable' }
-  if (state.failed) return { state: state.covers ? 'failed' : 'partial' }
-  if (state.packs.length) return { state: 'partial' }
-  return { state: 'none' }
+    return { state: 'unavailable', ...counts }
+  if (state.failed) {
+    if (packWasStopped(state.failed) && present.every(progress => progress.failed === 0)) return { state: 'stopped', ...counts }
+    return { state: state.covers ? 'failed' : 'partial', ...counts }
+  }
+  if (state.packs.length) return { state: 'partial', ...counts }
+  return { state: 'none', ...counts }
 }
 
 /** How many of an area's parts have a group, for "7 of 19 regions". */
@@ -546,7 +605,9 @@ export function regionalPackRequest(area: DownloadArea, groups: ResourceGroup[] 
     minZoom: 5,
     maxZoom: 14,
     layers: chosen.flatMap(group => RESOURCE_GROUPS[group].layers),
-    scopes: chosen.flatMap(group => RESOURCE_GROUPS[group].scopes),
+    // The fuel snapshot is Spain's national price file; elsewhere it would
+    // only add 12 MiB of stations the rider cannot reach.
+    scopes: chosen.flatMap(group => RESOURCE_GROUPS[group].scopes).filter(scope => scope !== 'fuel' || intersectsSpain(area.bounds)),
   }
 }
 

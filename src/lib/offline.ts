@@ -104,6 +104,8 @@ export interface RoutingDataJob {
   retrySeconds?: number
   attempt?: number
   retrying?: boolean
+  /** Broom's build notes, such as turn restrictions it could not map. */
+  diagnostics?: { Code: string; Count: number }[]
 }
 
 export interface RoutingDataRegion {
@@ -162,6 +164,8 @@ export interface PackResourceProgress {
   failed: number
   bytes: number
   items: number
+  /** Why the last resource of this kind failed, when one did. */
+  error?: string
 }
 
 export interface PackEstimateRequest {
@@ -496,6 +500,39 @@ export async function fetchRoutingSummary(runtime: RuntimeConfig, signal?: Abort
   return decodeRoutingDataStatus(await response.json())
 }
 
+/** Broom's acquisition estimate for a region: no PBF or terrain is fetched. */
+export interface RoutingPlan {
+  pbfBytes: number | null
+  estimatedBytes: number | null
+  tilesKnown: boolean
+  tilesTotal: number
+  tilesCached: number
+  tilesMissing: number
+  installed?: boolean
+}
+
+export async function fetchRoutingPlan(runtime: RuntimeConfig, regionId: string, signal?: AbortSignal): Promise<RoutingPlan> {
+  if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
+  const response = await fetch(`${runtime.offline.routing}/plan`, {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+    body: JSON.stringify({ regionId }),
+  })
+  if (!response.ok) throw await responseError(response, 'Could not estimate the routing download')
+  const body = await response.json() as Partial<RoutingPlan>
+  const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+  return {
+    pbfBytes: num(body.pbfBytes),
+    estimatedBytes: num(body.estimatedBytes),
+    tilesKnown: body.tilesKnown === true,
+    tilesTotal: num(body.tilesTotal) ?? 0,
+    tilesCached: num(body.tilesCached) ?? 0,
+    tilesMissing: num(body.tilesMissing) ?? 0,
+    installed: body.installed === true,
+  }
+}
+
 export async function prepareRoutingData(runtime: RuntimeConfig, regionId: string, update = false): Promise<RoutingDataStatus> {
   if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
   const response = await fetch(`${runtime.offline.routing}/prepare`, {
@@ -612,6 +649,7 @@ function decodePackResources(value: unknown): Record<string, PackResourceProgres
       failed: number(progress.failed) ?? number(progress.failures) ?? 0,
       bytes: number(progress.bytes) ?? 0,
       items: number(progress.items) ?? 0,
+      ...(typeof progress.error === 'string' && progress.error ? { error: progress.error } : {}),
     }
   }
   return resources

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -159,6 +160,10 @@ type packResourceProgress struct {
 	Failed      int   `json:"failed"`
 	Bytes       int64 `json:"bytes"`
 	Items       int   `json:"items,omitempty"`
+	// Error is the most recent reason a resource of this kind could not be
+	// fetched, so "1 missing" can say why. Provider errors are already
+	// sanitised of URLs and query text; see packFailureReason.
+	Error string `json:"error,omitempty"`
 }
 
 type packManifest struct {
@@ -712,6 +717,37 @@ func updatePackResource(pack *packManifest, category string, failed bool, bytes 
 	pack.Resources[category] = progress
 }
 
+// noteResourceError keeps the latest reason a resource failed, for the UI.
+func noteResourceError(pack *packManifest, category string, err error) {
+	if pack.Resources == nil {
+		pack.Resources = make(map[string]packResourceProgress)
+	}
+	progress := pack.Resources[category]
+	progress.Error = packFailureReason(err)
+	pack.Resources[category] = progress
+}
+
+// packFailureReason turns a fetch error into a short reason safe to persist
+// and display. Transport errors can quote the request URL, which for POI
+// searches carries the query bounds, so anything with a URL is generalised.
+func packFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "the request timed out"
+	}
+	reason := err.Error()
+	if strings.Contains(reason, "://") {
+		return "network error while contacting the provider"
+	}
+	const limit = 160
+	if len(reason) > limit {
+		reason = reason[:limit] + "…"
+	}
+	return reason
+}
+
 // Count response origins rather than admitted bytes: a network replacement can
 // consume zero additional storage. Older manifests have no transfer breakdown.
 func updatePackTransfer(pack *packManifest, category, state string) {
@@ -1023,7 +1059,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		estimate.Scopes["elevation"] = cacheScopeStat{Bytes: elevationBytes, Entries: len(tiles)}
 		estimate.EstimatedBytes += elevationBytes
 	}
-	if containsString(input.Scopes, "fuel") {
+	if containsString(input.Scopes, "fuel") && fuelSnapshotApplies(input.BBox) {
 		p := m.server.providers["fuel"]
 		key := canonicalCacheKey(p.name, p.sourceFingerprint, http.MethodGet, "national-snapshot", "", nil)
 		estimate.Counts["fuel"] = 1
@@ -1413,14 +1449,19 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		return true
 	}
 	recordFailure := func(category string, err error) bool {
+		// A stop is not a failure: the resource was never attempted to the
+		// end, and counting it as failed would tell the user their download
+		// broke when they cancelled it.
+		if fail() {
+			return false
+		}
+		log.Printf("pack %s: %s: %s", manifest.ID, category, packFailureReason(err))
 		if !m.update(manifest, func(p *packManifest) {
 			p.Done++
 			p.Failures++
 			updatePackResource(p, category, true, 0, 0)
+			noteResourceError(p, category, err)
 		}) {
-			return false
-		}
-		if fail() {
 			return false
 		}
 		var budgetErr packBudgetError
@@ -1491,10 +1532,18 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 			if wasCached {
 				newBytes = 0
 			}
+			if err != nil && fail() {
+				// Stopped mid-tile: neither done nor failed.
+				return false
+			}
+			if err != nil {
+				log.Printf("pack %s: %s: %s", manifest.ID, packResourceElevation, packFailureReason(err))
+			}
 			if !m.update(manifest, func(p *packManifest) {
 				p.Done++
 				if err != nil {
 					p.Failures++
+					noteResourceError(p, packResourceElevation, err)
 				}
 				p.Bytes += newBytes
 				updatePackResource(p, packResourceElevation, err != nil, newBytes, 0)
@@ -1502,9 +1551,6 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 				return false
 			}
 			if err != nil {
-				if fail() {
-					return false
-				}
 				var budgetErr packBudgetError
 				var storageErr cacheStorageLimitError
 				if errors.As(err, &budgetErr) || errors.As(err, &storageErr) || errors.Is(err, errTileQuotaPinned) {
@@ -1854,4 +1900,26 @@ func (s *Server) handleDeletePack(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// spainFuelAreas is the envelope the Spanish fuel snapshot covers, matching
+// SPAIN_AREAS in src/lib/fuel.ts. Regions elsewhere would otherwise pin the
+// whole national file (about 12 MiB) to every pack.
+var spainFuelAreas = []bbox{
+	{South: 35.0, West: -9.5, North: 44.0, East: 4.5},    // mainland, Baleares, Ceuta y Melilla
+	{South: 27.5, West: -18.3, North: 29.5, East: -13.3}, // Canarias
+}
+
+// fuelSnapshotApplies reports whether a pack area touches Spain. Route packs
+// without bounds keep the snapshot: their corridor is checked elsewhere.
+func fuelSnapshotApplies(area *bbox) bool {
+	if area == nil {
+		return true
+	}
+	for _, spain := range spainFuelAreas {
+		if area.South <= spain.North && area.North >= spain.South && area.West <= spain.East && area.East >= spain.West {
+			return true
+		}
+	}
+	return false
 }

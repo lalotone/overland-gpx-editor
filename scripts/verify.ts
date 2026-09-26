@@ -89,6 +89,7 @@ const {
   groupStatus,
   partsProgress,
   packGroups,
+  gridLabel,
   gridParts,
   tileCount,
   startRegionDownload,
@@ -96,6 +97,9 @@ const {
   decodeRoutingRegions,
   packAreaName,
   packFailure,
+  packWasStopped,
+  regionIdName,
+  routingDiagnosticsText,
   packIsActive,
   regionalPackRequest,
   routingJobActive,
@@ -1489,6 +1493,9 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     const terrainAndPlaces = regionalPackRequest(region, ['places', 'terrain'])
     check('all resource groups together keep the original pack request',
       all.name === 'Map: Aragón' && all.layers.join(',') === 'openfreemap' && all.scopes.join(',') === 'elevation,pois,fuel')
+    const utrecht = { id: 'utrecht', name: 'Utrecht', kind: 'region' as const, bounds: { south: 51.856, west: 4.791, north: 52.305, east: 5.628 } }
+    check('the Spanish fuel snapshot is only requested for areas touching Spain',
+      regionalPackRequest(utrecht, ['places']).scopes.join(',') === 'pois' && regionalPackRequest(region, ['places']).scopes.join(',') === 'pois,fuel')
     check('a single resource group asks only for its own layers and scopes',
       mapsOnly.name === 'Maps: Aragón' && mapsOnly.layers.join(',') === 'openfreemap' && mapsOnly.scopes.length === 0 &&
         terrainAndPlaces.name === 'Terrain + Points of interest: Aragón' && terrainAndPlaces.layers.length === 0 &&
@@ -1575,6 +1582,37 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
         groupStatus(morePacks, parts[1], 'maps').fraction === 0.4 && groupStatus(morePacks, parts[2], 'maps').state === 'queued' &&
         groupStatus(morePacks, parts[3], 'maps').state === 'none' && groupStatus(morePacks, parts[0], 'terrain').state === 'done' &&
         groupStatus(morePacks, parts[1], 'terrain').state === 'none')
+    const running = groupStatus(morePacks, parts[1], 'maps')
+    check('a running group says what its percentage is made of',
+      running.done === 4 && running.total === 10 && running.bytes === 0)
+    const stoppedPacks = decodePacks([
+      { ...pack('s', `Maps: ${parts[0].name}`, parts[0].bounds, 'incomplete', 6), detail: 'cancelled', done: 6, total: 10 },
+      { ...pack('f', `Maps: ${parts[1].name}`, parts[1].bounds, 'incomplete', 10), detail: 'resource_failures',
+        resources: { 'vector-map': { done: 10, total: 10, failed: 2, bytes: 0, items: 0, error: 'upstream temporarily unavailable' } } },
+    ])
+    check('a stopped download is reported as stopped, not failed',
+      groupStatus(stoppedPacks, parts[0], 'maps').state === 'stopped' && packWasStopped(stoppedPacks[0]) &&
+        /^Stopped at 6 of 10 resources/.test(packFailure(stoppedPacks[0])) && !/Could not/.test(packFailure(stoppedPacks[0])))
+    check('a failed resource carries its reason',
+      groupStatus(stoppedPacks, parts[1], 'maps').state === 'failed' &&
+        packFailure(stoppedPacks[1]) === 'Could not finish vector maps (upstream temporarily unavailable). Download again to retry the missing resources.')
+    const retried = decodePacks([
+      { ...pack('old', `Map: ${parts[0].name}`, parts[0].bounds, 'incomplete', 10, ['vector-map', 'campsites']), detail: 'resource_failures',
+        resources: { 'vector-map': { done: 10, total: 10, failed: 0, bytes: 0, items: 0 }, campsites: { done: 1, total: 1, failed: 1, bytes: 0, items: 0 } } },
+      { ...pack('new', `Points of interest: ${parts[0].name}`, parts[0].bounds, 'complete', 1, ['campsites']),
+        resources: { campsites: { done: 1, total: 1, failed: 0, bytes: 869, items: 0 } } },
+    ])
+    check('a retried group is done, and the old pack no longer blames the groups that finished',
+      groupStatus(retried, parts[0], 'places').state === 'done' && groupStatus(retried, parts[0], 'maps').state === 'done' &&
+        areaDownloadState(retried, parts[0], 'maps').failed === undefined && areaDownloadState(retried, parts[0], 'places').failed === undefined)
+    check('grid parts get compass names up to five rows and columns',
+      gridLabel(0, 3, 0, 5) === 'north-far west' && gridLabel(1, 3, 2, 5) === 'centre' && gridLabel(1, 2, 1, 2) === 'south-east' &&
+        gridLabel(1, 3, 0, 1) === 'central' && gridLabel(0, 6, 0, 6) === 'row 1 of 6, column 1 of 6')
+    check('catalogue ids read as names when the catalogue has none',
+      regionIdName('us/district-of-columbia') === 'District of Columbia' && regionIdName('castilla-y-leon') === 'Castilla y Leon')
+    check('routing build notes are explained, not hidden',
+      /Skipped 11 restrictions/.test(routingDiagnosticsText({ id: 'j', regionId: 'r', state: 'complete', diagnostics: [{ Code: 'malformed-restrictions', Count: 9 }, { Code: 'unmapped-restrictions', Count: 2 }] }) ?? '') &&
+        routingDiagnosticsText({ id: 'j', regionId: 'r', state: 'complete' }) === null)
     const mapsProgress = partsProgress(morePacks, parts, 'maps')
     check('a country counts its parts per resource',
       mapsProgress.done === 1 && mapsProgress.active === 2 && mapsProgress.total === parts.length &&

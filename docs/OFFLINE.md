@@ -113,13 +113,16 @@ prune API operations expose Broom's application-level cache policy.
 The last active managed region is persisted and reopened on restart. Older
 caches without that selection reopen the newest installed region.
 
-Opening the download panel asks Broom for an acquisition plan without downloading
-PBFs or terrain. Exact terrain counts require a local PBF; unknown sizes remain
+Opening a region that is not yet installed asks Broom for an acquisition plan
+(`POST /offline/routing/plan`) without downloading PBFs or terrain, and shows
+the road-data size, the terrain tile count and the bytes still to fetch. Exact terrain counts require a local PBF; unknown sizes remain
 unknown until it is available. Plans report cached and missing tiles and remaining
 source transfer bytes when known, excluding graph and temporary build space.
 
 Progress reports road data, terrain selection, terrain tiles, graph building and
-profile preparation separately. Broom supplies aggregate tile totals, downloaded
+profile preparation separately. Broom's build diagnostics (turn restrictions it
+could not map) are shown as a note once the job completes; they are map-data
+remarks, not failures. Broom supplies aggregate tile totals, downloaded
 and reused counts, retries, elapsed stage time and activity updates. Transfer
 percentages are per file; diagnostics don't replace current work. Only an open
 graph is reported as ready.
@@ -262,6 +265,15 @@ byte quotas, rechecks free space on writes, and keeps a 64 MiB safety margin.
 The two caches share that free space; their reported capacities are not additive.
 The global entry/index bound, per-job enumeration limits, concurrent-job bound
 and provider-worker limits still protect memory and upstream services.
+
+Each resource in a pack records why its last fetch failed (`resources.<kind>.error`,
+a short reason with no URL or query text) and the server logs the same line, so
+"1 missing" can be explained. Stopping a pack is not a failure: resources in
+flight when it is cancelled are neither done nor failed, the pack is reported
+`cancelled` with its `done`/`total` counts, and the UI says "Stopped", not
+"Could not finish". The Spanish fuel snapshot is only included for areas that
+touch Spain's envelope (the same one `lib/fuel.ts` uses); elsewhere the `fuel`
+scope is dropped from the request and ignored by the estimate.
 
 A completed pack may contain Terrarium corridor tiles, one fuel snapshot,
 bounded trip POIs, selected exact cached data and bounded OpenFreeMap coverage.

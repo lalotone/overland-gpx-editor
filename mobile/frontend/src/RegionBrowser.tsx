@@ -24,6 +24,7 @@ function chipText(status: GroupStatus): string {
     case 'done': return '✓'
     case 'running': return `${Math.round((status.fraction ?? 0) * 100)}%`
     case 'queued': return 'queued'
+    case 'stopped': return 'stopped'
     case 'failed':
     case 'partial': return 'partial'
     case 'unavailable': return 'n/a'
@@ -453,7 +454,9 @@ export default function RegionBrowser({
                               ? 'Downloading'
                               : status.state === 'queued'
                                 ? 'Queued'
-                                : ''}
+                                : status.state === 'stopped'
+                                  ? 'Stopped'
+                                  : ''}
                       </span>
                       {status.state !== 'done' && !busy && (
                         <button

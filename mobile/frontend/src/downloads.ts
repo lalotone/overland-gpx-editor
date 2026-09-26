@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RuntimeConfig, RoutingDataStatus, PackSummary } from '../../../src/lib/offline'
 import { cancelRoutingData, prepareRoutingData, fetchPacks, cancelPack } from '../../../src/lib/offline'
-import { packFailure, startRegionDownload } from '../../../src/lib/offlineRegions'
+import { packFailure, packWasStopped, startRegionDownload } from '../../../src/lib/offlineRegions'
 import type { DownloadArea, DownloadResource } from '../../../src/lib/offlineRegions'
 
 export {
@@ -53,7 +53,8 @@ export function useDownloads(
   useEffect(() => {
     // Report the current/latest pack, not every historical failed attempt.
     const pack = target?.pack ? packs.find((p) => p.id === target.pack) : packs[0]
-    if (pack && (pack.status === 'failed' || pack.incomplete) && !notified.current.has(pack.id)) {
+    // A pack the user stopped is not news to them.
+    if (pack && (pack.status === 'failed' || pack.incomplete) && !packWasStopped(pack) && !notified.current.has(pack.id)) {
       notified.current.add(pack.id)
       notify(packFailure(pack))
     }

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { RuntimeConfig, RoutingDataStatus, PackSummary } from '../../../src/lib/offline'
+import type { RuntimeConfig, RoutingDataStatus } from '../../../src/lib/offline'
 import { formatBytes } from '../../../src/lib/offline'
 import { searchPlaces } from '../../../src/lib/geocoding'
 import type { PlaceResult } from '../../../src/lib/geocoding'
 import { request } from './model'
 import Icon from './Icon'
 import { coversBounds, RESOURCE_LABELS, packFailure, resourceTransferText, coverageLabel, boundsLabel } from './downloads'
+import { areaForRegion as areaFor, completeMapPack as fullPack, savedMapAreas } from '../../../src/lib/offlineRegions'
 import type { DownloadArea, DownloadRegion, Downloads } from './downloads'
 
 function normalized(value: string) {
@@ -14,32 +15,6 @@ function normalized(value: string) {
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
 }
-function areaFor(region: DownloadRegion): DownloadArea | null {
-  return region.bbox
-    ? {
-        id: region.id,
-        name: region.name,
-        kind: region.kind === 'country' ? 'country' : 'region',
-        bounds: region.bbox,
-        regionId: region.id,
-      }
-    : null
-}
-function fullPack(packs: PackSummary[], area: DownloadArea | null) {
-  return area
-    ? packs.find(
-        (pack) =>
-          (pack.status === 'complete' ||
-            pack.detail === 'provider_limits' ||
-            pack.detail === 'resource_failures') &&
-          coversBounds(pack.bbox, area.bounds) &&
-          pack.resources['vector-map']?.failed === 0 &&
-          pack.resources['vector-map']?.total > 0 &&
-          pack.resources['vector-map']?.done === pack.resources['vector-map']?.total,
-      )
-    : undefined
-}
-
 export default function RegionBrowser({
   runtime,
   status,
@@ -196,15 +171,7 @@ export default function RegionBrowser({
     ? catalogue.filter((region) => region.parent === selectedRecord.id)
     : []
   const isOffline = runtime.offline?.mode === 'cache-only'
-  const savedAreas = downloads.packs.filter(
-    (pack, index, all) =>
-      pack.bbox &&
-      pack.name?.startsWith('Map:') &&
-      (pack.status === 'complete' || pack.incomplete) &&
-      all.findIndex(
-        (p) => p.name === pack.name && JSON.stringify(p.bbox) === JSON.stringify(pack.bbox),
-      ) === index,
-  )
+  const savedAreas = savedMapAreas(downloads.packs)
 
   const row = (region: DownloadRegion) => {
     const downloaded = installed.has(region.id) || region.installed

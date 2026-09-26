@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -541,19 +542,142 @@ func TestPackStartReusesIdenticalActiveRoute(t *testing.T) {
 	}
 }
 
-func TestPackStartEnforcesActiveCeilingBeforeEstimating(t *testing.T) {
+func TestPackStartEnforcesQueueCeilingBeforeEstimating(t *testing.T) {
 	s := newPackTestServer(t)
 	input := packInput{Name: "capacity", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}}
 	s.packs.mu.Lock()
-	for i := 0; i < maxActivePackJobs; i++ {
+	for i := 0; i < maxActivePackJobs+maxQueuedPackJobs; i++ {
 		id := fmt.Sprintf("%032x", i+1)
-		s.packs.packs[id] = &packManifest{ID: id, State: "running"}
+		s.packs.packs[id] = &packManifest{ID: id, State: "queued"}
 	}
 	s.packs.mu.Unlock()
-	if _, _, err := s.packs.start(input); err == nil || !strings.Contains(err.Error(), "pack jobs") {
-		t.Fatalf("active capacity error = %v", err)
+	if _, _, err := s.packs.start(input); err == nil || !strings.Contains(err.Error(), "active or queued") {
+		t.Fatalf("queue capacity error = %v", err)
 	}
+}
 
+func fuelPackServer(t *testing.T) *Server {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
+	}))
+	t.Cleanup(upstream.Close)
+	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	return s
+}
+
+// occupySlots fills every job slot with a pack that never finishes by itself.
+func occupySlots(s *Server) []string {
+	s.packs.mu.Lock()
+	defer s.packs.mu.Unlock()
+	ids := make([]string, 0, maxActivePackJobs)
+	for i := 0; i < maxActivePackJobs; i++ {
+		id := fmt.Sprintf("%032x", 0xf00+i)
+		s.packs.packs[id] = &packManifest{ID: id, State: "running"}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func TestPacksBeyondActiveSlotsWaitAndStartInOrder(t *testing.T) {
+	s := fuelPackServer(t)
+	busy := occupySlots(s)
+	var queued []string
+	for i := 0; i < 3; i++ {
+		input := packInput{Name: fmt.Sprintf("Map: part %d", i), Regional: true, BBox: &bbox{South: 40 + float64(i), West: -1, North: 40.5 + float64(i), East: 0}, Scopes: []string{"fuel"}}
+		pack, _, err := s.packs.start(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pack.State != "queued" {
+			t.Fatalf("pack %d state = %q, want queued", i, pack.State)
+		}
+		queued = append(queued, pack.ID)
+	}
+	s.packs.mu.Lock()
+	for _, id := range queued {
+		if p := s.packs.packs[id]; p.working || p.cancel != nil {
+			t.Fatalf("waiting pack %s was launched", id)
+		}
+	}
+	// A waiting regional pack is charged its manifest size, not the 8 MiB a
+	// running one reserves to grow.
+	if allocation := s.packs.controlAlloc[queued[0]]; allocation >= maxRegionalManifestBytes {
+		t.Fatalf("waiting pack reserved %d bytes", allocation)
+	}
+	s.packs.mu.Unlock()
+
+	// Freeing one slot starts only the oldest waiting pack.
+	s.packs.mu.Lock()
+	s.packs.packs[busy[0]].State = "complete"
+	s.packs.mu.Unlock()
+	s.packs.startQueued()
+	waitForPackState(t, s.packs, queued[0], "complete")
+	// Its completion hands the slot on to the next one, and so on.
+	waitForPackState(t, s.packs, queued[1], "complete")
+	waitForPackState(t, s.packs, queued[2], "complete")
+}
+
+func TestWaitingPackCancelsWithoutRunning(t *testing.T) {
+	s := fuelPackServer(t)
+	occupySlots(s)
+	pack, _, err := s.packs.start(packInput{Name: "waiting", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.packs.cancel(pack.ID) {
+		t.Fatal("waiting pack was not found")
+	}
+	summary, _ := s.packs.publicManifest(pack.ID)
+	if summary.State != "incomplete" || summary.ErrorCode != "cancelled" {
+		t.Fatalf("cancelled waiting pack = %+v", summary)
+	}
+	s.packs.startQueued()
+	if summary, _ := s.packs.publicManifest(pack.ID); summary.State != "incomplete" {
+		t.Fatalf("cancelled pack restarted: %+v", summary)
+	}
+}
+
+func TestQueuedPackThatNoLongerFitsReportsWhy(t *testing.T) {
+	s := fuelPackServer(t)
+	busy := occupySlots(s)
+	pack, _, err := s.packs.start(packInput{Name: "waiting", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.packs.mu.Lock()
+	s.packs.packs[pack.ID].Input.Scopes = []string{"unknown"}
+	s.packs.packs[busy[0]].State = "complete"
+	s.packs.mu.Unlock()
+	s.packs.startQueued()
+	summary, _ := s.packs.publicManifest(pack.ID)
+	if summary.State != "incomplete" || summary.ErrorCode != "start_failed" || summary.ErrorDetail == "" {
+		t.Fatalf("failed queued start = %+v", summary)
+	}
+}
+
+func TestOversizedPacksAreReportedAsTooLarge(t *testing.T) {
+	_, err := enumerateTiles(bbox{South: -80, West: -170, North: 80, East: 170}, 10, 10, 10)
+	var tooLarge packTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("tile cap error = %T %v", err, err)
+	}
+	rec := httptest.NewRecorder()
+	writePackError(rec, err)
+	var body map[string]string
+	if json.Unmarshal(rec.Body.Bytes(), &body) != nil || rec.Code != http.StatusBadRequest || body["code"] != "pack_too_large" {
+		t.Fatalf("too-large response = %d %s", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	writePackError(rec, errors.New("pack would exceed the generic cache quota"))
+	if strings.Contains(rec.Body.String(), "pack_too_large") {
+		t.Fatalf("quota error was reported as splittable: %s", rec.Body)
+	}
 }
 
 func TestAutomaticPacksDoNotEvictAtFormerCountLimit(t *testing.T) {

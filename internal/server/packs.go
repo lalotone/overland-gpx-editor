@@ -23,8 +23,10 @@ import (
 )
 
 const (
-	maxPackResources        = 10000
-	maxActivePackJobs       = 2
+	maxPackResources  = 10000
+	maxActivePackJobs = 2
+	// Further packs wait their turn, so a country can be queued region by region.
+	maxQueuedPackJobs       = 48
 	maxPackManifestBytes    = 1 << 20
 	maxMapGenerationBytes   = 4 << 20
 	maxElevationPackEntries = 2048
@@ -175,13 +177,17 @@ type packManifest struct {
 	Input         packInput                       `json:"input"`
 	CacheKeys     []string                        `json:"cacheKeys,omitempty"`
 	ErrorCode     string                          `json:"errorCode,omitempty"`
+	ErrorDetail   string                          `json:"errorDetail,omitempty"`
 
 	cancel         context.CancelFunc `json:"-"`
 	deleted        bool               `json:"-"`
 	cacheKeySet    map[string]struct{}
 	lastCheckpoint time.Time
 	checkpointDone int
-	working        bool
+	// working is set while a job holds one of the maxActivePackJobs slots,
+	// from launch (or queued re-estimation) until run returns.
+	working  bool
+	queueSeq uint64
 }
 
 type packSummary struct {
@@ -200,6 +206,7 @@ type packSummary struct {
 	Resources    map[string]packResourceProgress `json:"resources,omitempty"`
 	ErrorCode    string                          `json:"errorCode,omitempty"`
 	Error        string                          `json:"error,omitempty"`
+	ErrorDetail  string                          `json:"errorDetail,omitempty"`
 	CreatedAt    time.Time                       `json:"createdAt"`
 	UpdatedAt    time.Time                       `json:"updatedAt"`
 }
@@ -212,9 +219,16 @@ type packManager struct {
 	controlMu    sync.Mutex
 	controlAlloc map[string]int64
 	controlBytes int64
+	queueSeq     uint64
 }
 
 type packBudgetError struct{}
+
+// packTooLargeError marks an area beyond one pack's resource limits. It is
+// reported with its own code so clients split the area rather than give up.
+type packTooLargeError string
+
+func (e packTooLargeError) Error() string { return string(e) }
 
 func (packBudgetError) Error() string { return "pack exceeded its actual cache byte budget" }
 
@@ -382,7 +396,7 @@ func (m *packManager) persistLocked(manifest *packManifest) error {
 	m.controlMu.Lock()
 	defer m.controlMu.Unlock()
 	allocation := int64(len(raw))
-	if manifest.State == "queued" || manifest.State == "running" {
+	if manifest.State == "running" || manifest.State == "queued" && manifest.working {
 		allocation = int64(packManifestLimit(manifest.Input))
 	}
 	previous := m.controlBaseReserve() + m.controlBytes
@@ -552,7 +566,7 @@ func enumerateTiles(bounds bbox, zoomMin, zoomMax, capCount int) ([]tileKey, err
 					key := tileKey{z: z, x: min(x, n-1), y: y}
 					seen[key] = struct{}{}
 					if len(seen) > capCount {
-						return nil, fmt.Errorf("pack exceeds %d resources", capCount)
+						return nil, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", capCount))
 					}
 				}
 			}
@@ -596,7 +610,7 @@ func enumeratePackTiles(input packInput, bounds bbox, zoomMin, zoomMax, capCount
 				for _, key := range tiles {
 					seen[key] = struct{}{}
 					if len(seen) > capCount {
-						return nil, fmt.Errorf("pack exceeds %d resources", capCount)
+						return nil, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", capCount))
 					}
 				}
 				previous = current
@@ -891,7 +905,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 				estimate.ReusedBytes += entry.Meta.Length
 			}
 			if estimate.Resources >= packResourceLimit(input) {
-				return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
+				return packEstimate{}, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", packResourceLimit(input)))
 			}
 			m.server.openFreeMap.mu.RLock()
 			vectorSources := make(map[string]int, len(m.server.openFreeMap.tiles))
@@ -977,7 +991,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			maxBytes = m.server.elevation.tiles.diskQuota()
 		}
 		if len(tiles) > maxEntries {
-			return packEstimate{}, fmt.Errorf("elevation pack exceeds %d tiles", maxEntries)
+			return packEstimate{}, packTooLargeError(fmt.Sprintf("elevation pack exceeds %d tiles", maxEntries))
 		}
 		estimate.ElevationTiles = tiles
 		estimate.Counts["elevation"] = len(tiles)
@@ -997,7 +1011,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		missing := len(tiles) - elevationReused
 		estimatedTileBytes := int64(missing)*(120<<10) + elevationReusedBytes
 		if estimatedTileBytes > maxBytes {
-			return packEstimate{}, errors.New("elevation pack exceeds its byte limit")
+			return packEstimate{}, packTooLargeError("elevation pack exceeds its byte limit")
 		}
 		if estimatedTileBytes > m.server.elevation.tiles.diskQuota() {
 			return packEstimate{}, errors.New("elevation pack exceeds the configured tile cache quota")
@@ -1083,7 +1097,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		estimate.Dynamic = append(estimate.Dynamic, detail)
 	}
 	if estimate.Resources > packResourceLimit(input) {
-		return packEstimate{}, fmt.Errorf("pack exceeds %d resources", packResourceLimit(input))
+		return packEstimate{}, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", packResourceLimit(input)))
 	}
 	stats := m.server.cache.stats()
 	reserved := m.controlReserve() + int64(packManifestLimit(input))
@@ -1109,36 +1123,14 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		estimate, err := m.estimateContext(ctx, input)
 		return &copyManifest, estimate, err
 	}
-	active := m.activeLocked()
+	pending := m.activeLocked()
 	m.mu.Unlock()
-	if active >= maxActivePackJobs {
-		return nil, packEstimate{}, fmt.Errorf("at most %d pack jobs may be active", maxActivePackJobs)
+	if pending >= maxActivePackJobs+maxQueuedPackJobs {
+		return nil, packEstimate{}, fmt.Errorf("at most %d pack jobs may be active or queued", maxActivePackJobs+maxQueuedPackJobs)
 	}
-	estimate, err := m.estimateContext(ctx, input)
+	estimate, err := m.admissibleEstimate(ctx, input)
 	if err != nil {
-		return nil, packEstimate{}, err
-	}
-	if estimate.Resources == 0 {
-		return nil, estimate, errors.New("pack has no provider-permitted resources to prepare")
-	}
-	if estimate.GenericBytes > estimate.RemainingQuota {
-		return nil, estimate, errors.New("pack would exceed the generic cache quota")
-	}
-	if err := requirePackDiskSpace(m.server.cache.dir, estimate.GenericBytes); err != nil {
 		return nil, estimate, err
-	}
-	if elevation := estimate.Scopes["elevation"].Bytes; elevation > 0 {
-		if err := requirePackDiskSpace(m.server.elevation.tiles.cacheDir, elevation); err != nil {
-			return nil, estimate, err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, estimate, err
-	}
-	if input.Regional {
-		if err := requirePackDiskSpace(m.server.cache.dir, estimate.EstimatedBytes); err != nil {
-			return nil, estimate, err
-		}
 	}
 	id, err := newPackID()
 	if err != nil {
@@ -1149,28 +1141,19 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 	for _, key := range estimate.ElevationTiles {
 		manifest.ElevationKeys = append(manifest.ElevationKeys, key.path())
 	}
-	timeout := m.jobTimeout
-	if input.Regional {
-		timeout = regionalJobTimeout
-	}
-	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
-	manifest.cancel = cancel
 	m.mu.Lock()
 	if existing := m.matchingPackLocked(input); existing != nil {
 		copyManifest := m.publicCopyLocked(existing)
 		m.mu.Unlock()
-		cancel()
 		return &copyManifest, estimate, nil
 	}
-	if m.activeLocked() >= maxActivePackJobs {
+	if m.activeLocked() >= maxActivePackJobs+maxQueuedPackJobs {
 		m.mu.Unlock()
-		cancel()
-		return nil, estimate, errors.New("pack capacity was reached while estimating")
+		return nil, estimate, errors.New("pack queue was filled while estimating")
 	}
 	if previous := m.retryPackLocked(input); previous != nil {
 		if previous.working {
 			m.mu.Unlock()
-			cancel()
 			return nil, estimate, errors.New("previous download attempt is still stopping; try again shortly")
 		}
 		id, manifest.ID, manifest.CreatedAt = previous.ID, previous.ID, previous.CreatedAt
@@ -1190,24 +1173,132 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 	}
 	if err := ctx.Err(); err != nil {
 		m.mu.Unlock()
-		cancel()
 		return nil, estimate, err
 	}
+	// Claim the slot before the first write so a running job reserves its full
+	// manifest budget, while a waiting one is charged only its actual size.
+	launch := m.runningLocked() < maxActivePackJobs
+	manifest.working = launch
 	if err := m.persistLocked(manifest); err != nil {
 		m.mu.Unlock()
-		cancel()
 		return nil, estimate, err
 	}
 	m.packs[id] = manifest
-	manifest.working = true
-	if m.server.elevation.tiles != nil {
-		m.server.elevation.tiles.setPackPins(id, manifest.ElevationKeys)
+	if launch {
+		m.launchLocked(manifest, estimate)
+	} else {
+		m.queueSeq++
+		manifest.queueSeq = m.queueSeq
 	}
 	copyManifest := m.publicCopyLocked(manifest)
 	m.mu.Unlock()
+	return &copyManifest, estimate, nil
+}
+
+// admissibleEstimate estimates a pack and checks that quota and disk space can
+// hold it. It runs again when a queued pack starts, since earlier packs change
+// both the remaining quota and what is already cached.
+func (m *packManager) admissibleEstimate(ctx context.Context, input packInput) (packEstimate, error) {
+	estimate, err := m.estimateContext(ctx, input)
+	if err != nil {
+		return packEstimate{}, err
+	}
+	if estimate.Resources == 0 {
+		return estimate, errors.New("pack has no provider-permitted resources to prepare")
+	}
+	if estimate.GenericBytes > estimate.RemainingQuota {
+		return estimate, errors.New("pack would exceed the generic cache quota")
+	}
+	if err := requirePackDiskSpace(m.server.cache.dir, estimate.GenericBytes); err != nil {
+		return estimate, err
+	}
+	if elevation := estimate.Scopes["elevation"].Bytes; elevation > 0 {
+		if err := requirePackDiskSpace(m.server.elevation.tiles.cacheDir, elevation); err != nil {
+			return estimate, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return estimate, err
+	}
+	if input.Regional {
+		if err := requirePackDiskSpace(m.server.cache.dir, estimate.EstimatedBytes); err != nil {
+			return estimate, err
+		}
+	}
+	return estimate, nil
+}
+
+// launchLocked starts a pack job in a slot the caller has already claimed.
+func (m *packManager) launchLocked(manifest *packManifest, estimate packEstimate) {
+	timeout := m.jobTimeout
+	if manifest.Input.Regional {
+		timeout = regionalJobTimeout
+	}
+	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
+	manifest.cancel = cancel
+	manifest.working = true
+	if m.server.elevation.tiles != nil {
+		m.server.elevation.tiles.setPackPins(manifest.ID, manifest.ElevationKeys)
+	}
 	m.server.wg.Add(1)
 	go m.run(jobCtx, cancel, manifest, estimate)
-	return &copyManifest, estimate, nil
+}
+
+// startQueued fills free job slots with the oldest waiting packs. It runs on
+// the goroutine of a finishing job, so the server wait group is still held.
+func (m *packManager) startQueued() {
+	for {
+		m.mu.Lock()
+		if m.server.ctx.Err() != nil || m.runningLocked() >= maxActivePackJobs {
+			m.mu.Unlock()
+			return
+		}
+		var next *packManifest
+		for _, pack := range m.packs {
+			if pack.State == "queued" && !pack.working && (next == nil || pack.queueSeq < next.queueSeq) {
+				next = pack
+			}
+		}
+		if next == nil {
+			m.mu.Unlock()
+			return
+		}
+		next.working = true
+		input := next.Input
+		m.mu.Unlock()
+
+		estimate, err := m.admissibleEstimate(m.server.ctx, input)
+
+		m.mu.Lock()
+		switch {
+		case next.deleted || next.State != "queued" || m.server.ctx.Err() != nil:
+			// Cancelled or removed while estimating, or shutting down: a restart
+			// reports a still-queued pack as interrupted.
+			next.working = false
+		case err != nil:
+			next.working = false
+			next.State = "incomplete"
+			next.ErrorCode = "start_failed"
+			next.ErrorDetail = err.Error()
+			next.UpdatedAt = time.Now().UTC()
+			_ = m.persistLocked(next)
+		default:
+			next.Total = estimate.Resources
+			next.Resources = packProgressFromEstimate(estimate)
+			next.Unavailable = estimate.Blocked
+			known := make(map[string]struct{}, len(next.ElevationKeys))
+			for _, key := range next.ElevationKeys {
+				known[key] = struct{}{}
+			}
+			for _, key := range estimate.ElevationTiles {
+				if _, ok := known[key.path()]; !ok {
+					next.ElevationKeys = append(next.ElevationKeys, key.path())
+				}
+			}
+			m.launchLocked(next, estimate)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *packManager) matchingPackLocked(input packInput) *packManifest {
@@ -1244,6 +1335,18 @@ func (m *packManager) retryPackLocked(input packInput) *packManifest {
 	return newest
 }
 
+// runningLocked counts packs holding a job slot.
+func (m *packManager) runningLocked() int {
+	running := 0
+	for _, manifest := range m.packs {
+		if manifest.working || manifest.State == "running" {
+			running++
+		}
+	}
+	return running
+}
+
+// activeLocked counts running and waiting packs.
 func (m *packManager) activeLocked() int {
 	active := 0
 	for _, manifest := range m.packs {
@@ -1274,6 +1377,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		m.mu.Lock()
 		manifest.working = false
 		m.mu.Unlock()
+		m.startQueued()
 	}()
 	defer cancel()
 	ctx, stopWork := context.WithCancel(ctx)
@@ -1594,7 +1698,7 @@ func (m *packManager) summaryLocked(p *packManifest) packSummary {
 		copy := *p.Input.BBox
 		bounds = &copy
 	}
-	summary := packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Unavailable: append([]blockedPackResource(nil), p.Unavailable...)}
+	summary := packSummary{ID: p.ID, Name: p.Name, State: p.State, BBox: bounds, Done: p.Done, Total: p.Total, Failures: p.Failures, Bytes: p.Bytes, Resources: clonePackResources(p.Resources), ErrorCode: p.ErrorCode, Error: p.ErrorCode, ErrorDetail: p.ErrorDetail, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Unavailable: append([]blockedPackResource(nil), p.Unavailable...)}
 	summary.CoverageKind = p.Input.CoverageKind
 	if p.Input.Regional {
 		summary.BatchesTotal = (p.Total + regionalBatchSize - 1) / regionalBatchSize
@@ -1625,6 +1729,12 @@ func (m *packManager) cancel(id string) bool {
 	}
 	if p.cancel != nil {
 		p.cancel()
+	} else if p.State == "queued" {
+		// Still waiting for a slot (or being re-estimated for one): nothing runs yet.
+		p.State = "incomplete"
+		p.ErrorCode = "cancelled"
+		p.UpdatedAt = time.Now().UTC()
+		_ = m.persistLocked(p)
 	}
 	return true
 }
@@ -1669,7 +1779,7 @@ func (s *Server) handleEstimatePack(w http.ResponseWriter, r *http.Request) {
 	}
 	estimate, err := s.packs.estimateContext(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writePackError(w, err)
 		return
 	}
 	noStoreJSON(w, http.StatusOK, estimate)
@@ -1683,11 +1793,20 @@ func (s *Server) handleCreatePack(w http.ResponseWriter, r *http.Request) {
 	}
 	manifest, _, err := s.packs.startContext(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writePackError(w, err)
 		return
 	}
 	summary, _ := s.packs.publicManifest(manifest.ID)
 	noStoreJSON(w, http.StatusAccepted, summary)
+}
+
+func writePackError(w http.ResponseWriter, err error) {
+	var tooLarge packTooLargeError
+	if errors.As(err, &tooLarge) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"detail": err.Error(), "code": "pack_too_large"})
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 func (s *Server) handleGetPack(w http.ResponseWriter, r *http.Request) {

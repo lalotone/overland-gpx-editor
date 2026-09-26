@@ -1,6 +1,7 @@
 import {
   PackTooLargeError,
   estimatePack,
+  formatBytes,
   normalizePackBounds,
   prepareRoutingData,
   responseError,
@@ -322,9 +323,11 @@ export interface RegionDownloadHooks {
 }
 
 interface MapPlan {
-  requests: PackEstimateRequest[]
+  requests: { name: string; request: PackEstimateRequest; bytes: number }[]
   /** Parts that could not be downloaded, with the reason. */
   skipped: string[]
+  /** Storage the cache reported free at the last estimate. */
+  available?: number
 }
 
 /** One pack request per piece of the area that fits the pack limits. */
@@ -337,7 +340,7 @@ async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: R
     const blockedMaps = estimate.blocked.filter(item => item.layer)
     if (blockedMaps.length) throw new Error(blockedMaps.map(item => item.reason).join(' · '))
     if (!estimate.resources) throw new Error('No map resources are available for this area.')
-    return { requests: [request], skipped: [] }
+    return { requests: [{ name: area.name, request, bytes: estimate.genericBytes ?? 0 }], skipped: [], available: estimate.quotaRemaining }
   } catch (reason) {
     const parts = reason instanceof PackTooLargeError
       ? area.parts?.length ? area.parts : depth < SPLIT_DEPTH ? splitArea(area) : []
@@ -352,6 +355,7 @@ async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: R
       const partPlan = await planMapPacks(runtime, part, hooks, depth + 1)
       plan.requests.push(...partPlan.requests)
       plan.skipped.push(...partPlan.skipped)
+      plan.available = partPlan.available ?? plan.available
     }
     return plan
   }
@@ -368,7 +372,7 @@ export async function startRegionDownload(
   runtime: RuntimeConfig,
   area: DownloadArea,
   hooks: RegionDownloadHooks = {},
-): Promise<{ area: DownloadArea; regionId: string; pack?: PackSummary; packs: PackSummary[]; skipped: string[] }> {
+): Promise<{ area: DownloadArea; regionId: string; pack?: PackSummary; packs: PackSummary[]; skipped: string[]; warning?: string }> {
   if (!runtime.offline?.routing) throw new Error('The local routing backend is unavailable.')
   const bounds = normalizePackBounds(
     { lat: area.bounds.south, lon: area.bounds.west },
@@ -390,13 +394,32 @@ export async function startRegionDownload(
   hooks.phase?.('Checking maps and storage…')
   const plan = await planMapPacks(runtime, selected, hooks)
   if (!plan.requests.length) throw new Error(plan.skipped.join(' · ') || 'No map resources are available for this area.')
+  // Check storage before the routing build starts. Only a part that cannot fit
+  // on its own is refused: summed estimates count tiles shared by neighbouring
+  // parts more than once, so a larger total is a warning, not a verdict.
+  const available = plan.available
+  const largest = Math.max(...plan.requests.map(part => part.bytes))
+  if (available !== undefined && largest > available)
+    throw new Error(`${name} needs about ${formatBytes(largest)} for its largest map download, but only ${formatBytes(available)} of storage is available for offline data.`)
+  const total = plan.requests.reduce((sum, part) => sum + part.bytes, 0)
+  const warning = available !== undefined && total > available
+    ? `${name} may need up to ${formatBytes(total)} for maps and ${formatBytes(available)} is available. Downloads that run out of space stop and can be resumed later.`
+    : undefined
   hooks.phase?.(`Preparing ${name}…`)
   await prepareRoutingData(runtime, regionId)
   const packs: PackSummary[] = []
-  for (const [index, request] of plan.requests.entries()) {
+  const skipped = [...plan.skipped]
+  for (const [index, part] of plan.requests.entries()) {
     if (plan.requests.length > 1) hooks.phase?.(`Queueing maps ${index + 1} of ${plan.requests.length}…`)
-    const pack = await startPack(runtime, request)
-    if (pack) packs.push(pack)
+    try {
+      const pack = await startPack(runtime, part.request)
+      if (pack) packs.push(pack)
+    } catch (reason) {
+      // Keep queueing the other parts; one refusal should not strand them.
+      if (plan.requests.length === 1) throw reason
+      skipped.push(`${part.name}: ${(reason as Error).message}`)
+    }
   }
-  return { area: selected, regionId, pack: packs[0], packs, skipped: plan.skipped }
+  if (!packs.length) throw new Error(skipped.join(' · ') || 'No map downloads could be started.')
+  return { area: selected, regionId, pack: packs[0], packs, skipped, warning }
 }

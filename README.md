@@ -370,8 +370,8 @@ bundle at build time.
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ALLOWED_ORIGINS` | backend | *(empty)* | Comma-separated exact browser origins allowed to call the API |
 | `OFFLINE_CACHE_DIR` | backend | `$XDG_CACHE_HOME/overland/responses` | Persistent provider cache; an explicitly empty value disables persistence |
-| `OFFLINE_CACHE_MAX_BYTES` | backend | `1GiB` | Generic cache quota, including metadata |
-| `OFFLINE_CACHE_MAX_ENTRIES` | backend | `100000` | Generic cache entry/inode guard |
+| `OFFLINE_CACHE_MAX_BYTES` | backend | `available` | Generic cache quota, including metadata. `available` uses free disk space minus a 64 MiB margin, so downloads are limited only by the disk; a size such as `20GiB` sets a fixed quota |
+| `OFFLINE_CACHE_MAX_ENTRIES` | backend | `1000000` | Generic cache entry/inode guard; the index costs about 0.9 KB of memory per entry in use, and a large country needs several hundred thousand |
 | `OFFLINE_MODE` | backend | `auto` | `auto` or strict no-outbound `cache-only` |
 | `STATS_LOG_INTERVAL` | backend | `1m` | Privacy-safe aggregate cache/outbound log interval; `0` disables it |
 | `UPSTREAM_CONTACT` | backend | project URL | Contact included in the outbound User-Agent |
@@ -390,7 +390,7 @@ bundle at build time.
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
 | `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland/tiles` (`~/.cache/overland/tiles`) | Where tiles are kept, so elevation works offline |
-| `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `1GiB` | Separate legacy Terrarium cache quota |
+| `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `available` | Separate Terrarium cache quota; `available` or a size, as above |
 | `ELEVATION_HOST` | backend | *(empty)* | Self-hosted opentopodata-style DEM. Takes precedence over tiles |
 | `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
 | `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at an authoritative remote backend; direct fallbacks stay closed until its config loads |

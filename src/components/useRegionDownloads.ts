@@ -96,7 +96,7 @@ export function useRegionDownloads({
     setError('')
     setTarget(null)
     try {
-      const { area: selected, regionId, packs: started, skipped } = await startRegionDownload(runtime, area, {
+      const { area: selected, regionId, packs: started, skipped, warning } = await startRegionDownload(runtime, area, {
         phase: setPhase,
         resolved: (resolved, region) => setTarget({ area: resolved, region }),
       })
@@ -107,6 +107,7 @@ export function useRegionDownloads({
       for (const id of ids) notified.current.delete(id)
       setTarget({ area: selected, region: regionId, packs: [...ids] })
       if (skipped.length) notify(`Some parts could not be downloaded: ${skipped.join(' · ')}`, 'error')
+      if (warning) notify(warning, 'info')
       await refreshPacks()
     } catch (reason) {
       const message = (reason as Error).message

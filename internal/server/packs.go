@@ -130,7 +130,7 @@ type packEstimate struct {
 	MapTiles       map[string][]tileKey      `json:"-"`
 	RasterMapTiles map[string][]tileKey      `json:"-"`
 	ExistingKeys   []existingPackResource    `json:"-"`
-	GenericBytes   int64                     `json:"-"`
+	GenericBytes   int64                     `json:"genericBytes"`
 	Glyphs         []glyphPackResource       `json:"-"`
 	POIRequests    []poiPackResource         `json:"-"`
 }
@@ -987,7 +987,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			return packEstimate{}, err
 		}
 		maxEntries, maxBytes := packElevationLimits(input)
-		if input.Regional && m.server.cache.useAvailableStorage {
+		if input.Regional && m.server.elevation.tiles.useAvailableStorage {
 			maxBytes = m.server.elevation.tiles.diskQuota()
 		}
 		if len(tiles) > maxEntries {
@@ -1462,7 +1462,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 	elevation := func() bool {
 		_, limit := packElevationLimits(manifest.Input)
 		if m.server.elevation.tiles != nil {
-			if manifest.Input.Regional && m.server.cache.useAvailableStorage {
+			if manifest.Input.Regional && m.server.elevation.tiles.useAvailableStorage {
 				limit = m.server.elevation.tiles.diskQuota()
 			} else {
 				limit = min(limit, m.server.elevation.tiles.diskQuota())

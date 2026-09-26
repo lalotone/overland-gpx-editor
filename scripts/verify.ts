@@ -1371,6 +1371,52 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       globalThis.fetch = originalFetch
     }
   }
+  {
+    // Storage decisions happen before the routing build starts.
+    const run = async (bytesPerPart: number, available: number, refuse = '') => {
+      const prepared: string[] = []
+      const started: string[] = []
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; regionId?: string } : {}
+        const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+        if (url.endsWith('/packs/estimate')) {
+          return body.name === 'Map: Spain'
+            ? reply({ detail: 'pack exceeds 100000 resources', code: 'pack_too_large' }, 400)
+            : reply({ resources: 10, genericBytes: bytesPerPart, remainingQuota: available, counts: {}, blocked: [], scopes: {} })
+        }
+        if (url.endsWith('/routing/prepare')) {
+          prepared.push(String(body.regionId))
+          return reply({ enabled: true, ready: false, cached: [] }, 202)
+        }
+        if (url.endsWith('/packs')) {
+          if (body.name === refuse) return reply({ detail: 'download would leave less than 64 MiB of free disk space' }, 400)
+          started.push(String(body.name))
+          return reply({ id: `${started.length}`.padStart(32, '0'), name: body.name, state: 'queued', resources: {} }, 202)
+        }
+        return reply({}, 404)
+      }) as typeof fetch
+      try {
+        const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+        const result = await startRegionDownload(runtime, country!).catch((reason: Error) => reason)
+        return { result, prepared, started }
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    }
+    const tooBig = await run(5 * 2 ** 30, 4 * 2 ** 30)
+    check('a part that can never fit is refused before routing starts',
+      tooBig.result instanceof Error && /largest map download/.test(tooBig.result.message) && tooBig.prepared.length === 0 && tooBig.started.length === 0)
+    const tight = await run(3 * 2 ** 30, 4 * 2 ** 30)
+    check('an overlapping total above free space warns but still downloads',
+      !(tight.result instanceof Error) && /may need up to/.test(tight.result.warning ?? '') && tight.started.length === 2)
+    const refused = await run(2 ** 20, 4 * 2 ** 30, 'Map: Aragón')
+    check('one part refused by the server does not strand the others',
+      !(refused.result instanceof Error) && refused.started.join(',') === 'Map: Cataluña' &&
+        refused.result.skipped.some(item => item.startsWith('Aragón:')))
+  }
+
   check('routing jobs count as active only while queued or running',
     routingJobActive({ job: { id: 'j', regionId: 'r', state: 'running' } } as never) &&
       !routingJobActive({ job: { id: 'j', regionId: 'r', state: 'failed' } } as never) && !routingJobActive(null))

@@ -1006,3 +1006,25 @@ func waitForPackState(t *testing.T, packs *packManager, id, state string) packSu
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestAvailableStoragePerCache(t *testing.T) {
+	if _, supported, _ := availableDiskBytes(t.TempDir()); !supported {
+		t.Skip("free disk space is not measurable on this platform")
+	}
+	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), AvailableCacheStorage: true, OfflineCacheMaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	if !s.cache.useAvailableStorage {
+		t.Fatal("response cache is not sized from free space")
+	}
+	// A fixed quota must not survive into available mode: downloads are bounded
+	// by the disk, not by the 1 MiB a stale setting asked for.
+	if stats := s.cache.stats(); stats.Quota <= 1<<20 && stats.Quota != 0 {
+		available, _, _ := availableDiskBytes(t.TempDir())
+		if available > 2<<20 {
+			t.Fatalf("available-storage quota = %d", stats.Quota)
+		}
+	}
+}

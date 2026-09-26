@@ -188,6 +188,8 @@ export interface PackEstimate {
   bytes?: number
   reusedBytes?: number
   quotaRemaining?: number
+  /** Bytes the response cache must admit; elevation tiles are stored separately. */
+  genericBytes?: number
   finalBytes?: number
   counts: Record<string, number>
   blocked: { provider?: string; layer?: string; resource?: string; reason: string }[]
@@ -720,6 +722,7 @@ export function decodePackEstimate(value: unknown): PackEstimate {
     reusedBytes: number(root?.reusedBytes) ?? number(root?.reuseBytes),
     quotaRemaining: number(root?.quotaRemaining) ?? number(root?.remainingQuota) ?? number(quota?.remaining),
     finalBytes: number(root?.finalBytes) ?? number(root?.expectedFinalBytes),
+    genericBytes: number(root?.genericBytes),
     counts,
     blocked: blockedRaw.flatMap(value => {
       const item = record(value)

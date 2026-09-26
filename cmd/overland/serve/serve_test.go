@@ -161,8 +161,11 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			if got := cmd.String("elevation-tile-cache"); got != util.DefaultTileCacheDir() {
 				t.Errorf("elevation-tile-cache = %q, want %q", got, util.DefaultTileCacheDir())
 			}
-			if got := cmd.String("elevation-tile-cache-max-bytes"); got != "1GiB" {
-				t.Errorf("elevation-tile-cache-max-bytes = %q, want 1GiB", got)
+			if got := cmd.String("elevation-tile-cache-max-bytes"); got != "available" {
+				t.Errorf("elevation-tile-cache-max-bytes = %q, want available", got)
+			}
+			if got := cmd.String("offline-cache-max-bytes"); got != "available" {
+				t.Errorf("offline-cache-max-bytes = %q, want available", got)
 			}
 			if got := cmd.String("nominatim-url"); got != "https://nominatim.openstreetmap.org" {
 				t.Errorf("nominatim-url = %q", got)
@@ -301,10 +304,10 @@ func TestOfflineFlagDefaultsAndExplicitDisable(t *testing.T) {
 		if got := cmd.String("offline-cache-dir"); got != "" {
 			t.Errorf("offline-cache-dir = %q", got)
 		}
-		if got := cmd.String("offline-cache-max-bytes"); got != "1GiB" {
+		if got := cmd.String("offline-cache-max-bytes"); got != "available" {
 			t.Errorf("max bytes = %q", got)
 		}
-		if got := cmd.Int("offline-cache-max-entries"); got != 100000 {
+		if got := cmd.Int("offline-cache-max-entries"); got != 1000000 {
 			t.Errorf("max entries = %d", got)
 		}
 		if got := cmd.String("offline-mode"); got != "auto" {
@@ -314,6 +317,18 @@ func TestOfflineFlagDefaultsAndExplicitDisable(t *testing.T) {
 	}}
 	if err := cmd.Run(context.Background(), []string{"test"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseCacheQuota(t *testing.T) {
+	if bytes, available, err := parseCacheQuota(" Available "); err != nil || !available || bytes != 0 {
+		t.Fatalf("available = %d %v %v", bytes, available, err)
+	}
+	if bytes, available, err := parseCacheQuota("20GiB"); err != nil || available || bytes != 20<<30 {
+		t.Fatalf("explicit quota = %d %v %v", bytes, available, err)
+	}
+	if _, _, err := parseCacheQuota("plenty"); err == nil {
+		t.Fatal("invalid quota was accepted")
 	}
 }
 

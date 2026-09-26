@@ -8,13 +8,22 @@ Broom graph prepared before going offline.
 ## Storage
 
 The generic response cache defaults to
-`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`), with a
-1 GiB and 100,000-entry ceiling. An explicitly empty `OFFLINE_CACHE_DIR`
+`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`). Its byte
+limit defaults to `available`: free disk space minus a 64 MiB margin, rechecked
+on every write, as on Android, so a region download is limited by the disk
+rather than an arbitrary quota. A size (`OFFLINE_CACHE_MAX_BYTES=20GiB`)
+restores a fixed quota with least-recently-used eviction. Where free space
+cannot be measured (Windows) the fixed 1 GiB defaults apply. The index holds
+up to 1,000,000 entries by default, about 0.9 KB of memory each in use; in
+`available` mode that count is what bounds passive browsing cache, since
+unpinned entries are evicted only at the entry limit or when the disk nears
+its margin. An explicitly empty `OFFLINE_CACHE_DIR`
 disables new persistent response storage while retaining bounded pass-through
 APIs. Terrarium elevation keeps its existing, separate
 `$XDG_CACHE_HOME/overland/tiles` tree so upgrades do not move or invalidate
-already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` bounds that
-separate tree to 1 GiB by default; oldest disk tiles are evicted first.
+already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` sizes that
+separate tree the same way, `available` by default; with a fixed size the
+oldest disk tiles are evicted first.
 
 Response filenames are hashes. Search text and POI bounds do
 not appear in paths or request logs. Cache directories use mode `0700` and files

@@ -98,8 +98,8 @@ func Flags() []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:    "elevation-tile-cache-max-bytes",
-			Usage:   "terrain tile cache byte quota (for example 1GiB)",
-			Value:   "1GiB",
+			Usage:   `terrain tile cache byte quota (for example 20GiB), or "available" to use free disk space`,
+			Value:   availableStorage,
 			Sources: util.NonEmptyEnv("ELEVATION_TILE_CACHE_MAX_BYTES"),
 		},
 		&cli.StringFlag{
@@ -109,8 +109,10 @@ func Flags() []cli.Flag {
 			Sources: util.NonEmptyEnv("NOMINATIM_URL"),
 		},
 		&cli.StringFlag{Name: "offline-cache-dir", Usage: "persistent provider response cache; empty disables persistence", Value: util.DefaultOfflineCacheDir(), Sources: util.StringEnv("OFFLINE_CACHE_DIR")},
-		&cli.StringFlag{Name: "offline-cache-max-bytes", Usage: "response-cache byte quota (for example 1GiB)", Value: "1GiB", Sources: util.NonEmptyEnv("OFFLINE_CACHE_MAX_BYTES")},
-		&cli.IntFlag{Name: "offline-cache-max-entries", Usage: "response-cache entry limit", Value: 100000, Sources: util.IntEnv("OFFLINE_CACHE_MAX_ENTRIES")},
+		&cli.StringFlag{Name: "offline-cache-max-bytes", Usage: `response-cache byte quota (for example 20GiB), or "available" to use free disk space`, Value: availableStorage, Sources: util.NonEmptyEnv("OFFLINE_CACHE_MAX_BYTES")},
+		// The entry index lives in memory at about 0.9 KB per entry; a large
+		// country's maps need several hundred thousand entries.
+		&cli.IntFlag{Name: "offline-cache-max-entries", Usage: "response-cache entry limit (about 0.9 KB of memory each when used)", Value: 1000000, Sources: util.IntEnv("OFFLINE_CACHE_MAX_ENTRIES")},
 		&cli.StringFlag{Name: "offline-mode", Usage: "outbound mode: auto or cache-only", Value: "auto", Sources: util.NonEmptyEnv("OFFLINE_MODE")},
 		&cli.DurationFlag{Name: "stats-log-interval", Usage: "interval for privacy-safe aggregate cache and outbound stats (0 disables)", Value: time.Minute, Sources: util.NonEmptyEnv("STATS_LOG_INTERVAL")},
 		&cli.StringFlag{Name: "upstream-contact", Usage: "operator contact included in outbound User-Agent", Value: "https://github.com/lalotone/overland-gpx-editor", Sources: util.NonEmptyEnv("UPSTREAM_CONTACT")},
@@ -150,11 +152,11 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	elevationTiles := cmd.Bool("elevation-tiles")
 	tileZoom := cmd.Int("elevation-tile-zoom")
 	tileCache := cmd.String("elevation-tile-cache")
-	cacheBytes, err := parseByteSize(cmd.String("offline-cache-max-bytes"))
+	cacheBytes, availableCache, err := parseCacheQuota(cmd.String("offline-cache-max-bytes"))
 	if err != nil {
 		return fmt.Errorf("offline-cache-max-bytes: %w", err)
 	}
-	tileCacheBytes, err := parseByteSize(cmd.String("elevation-tile-cache-max-bytes"))
+	tileCacheBytes, availableTiles, err := parseCacheQuota(cmd.String("elevation-tile-cache-max-bytes"))
 	if err != nil {
 		return fmt.Errorf("elevation-tile-cache-max-bytes: %w", err)
 	}
@@ -191,6 +193,8 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		ElevationTileZoom:          tileZoom,
 		ElevationTileCache:         tileCache,
 		ElevationTileCacheMaxBytes: tileCacheBytes,
+		AvailableTileStorage:       availableTiles,
+		AvailableCacheStorage:      availableCache,
 		NominatimURL:               cmd.String("nominatim-url"),
 		OfflineCacheDir:            cmd.String("offline-cache-dir"),
 		OfflineCacheMaxBytes:       cacheBytes,
@@ -390,6 +394,19 @@ func valueOrNone(value string) string {
 		return "select in planner"
 	}
 	return strings.TrimSpace(value)
+}
+
+// availableStorage sizes a cache from free disk space: downloads are limited by
+// the disk, not an arbitrary quota, while a safety margin stays free.
+const availableStorage = "available"
+
+// parseCacheQuota reads a byte quota or the "available" keyword.
+func parseCacheQuota(value string) (int64, bool, error) {
+	if strings.EqualFold(strings.TrimSpace(value), availableStorage) {
+		return 0, true, nil
+	}
+	bytes, err := parseByteSize(value)
+	return bytes, false, err
 }
 
 func parseByteSize(value string) (int64, error) {

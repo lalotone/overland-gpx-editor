@@ -72,7 +72,7 @@ export function useDownloads(
     setError('')
     try {
       setTarget(null)
-      const { area: selected, regionId, pack, skipped } = await startRegionDownload(runtime, area, {
+      const { area: selected, regionId, pack, skipped, warning } = await startRegionDownload(runtime, area, {
         phase: setPhase,
         resolved: (resolved, region) => setTarget({ area: resolved, region }),
       })
@@ -84,6 +84,7 @@ export function useDownloads(
       }
       setTarget({ area: selected, region: regionId, pack: pack?.id })
       if (skipped.length) notify(`Some parts could not be downloaded: ${skipped.join(' · ')}`)
+      if (warning) notify(warning)
       setPacks(await fetchPacks(runtime))
     } catch (reason) {
       const message = (reason as Error).message

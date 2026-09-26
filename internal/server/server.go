@@ -28,8 +28,14 @@ import (
 // Config wires a Server up. Only GPXDir is required.
 type Config struct {
 	// UseAvailableStorage uses filesystem free space rather than fixed cache
-	// byte quotas. Intended for the capability-protected mobile host.
+	// byte quotas for both caches. It fails startup where free space cannot be
+	// measured; the mobile host relies on it.
 	UseAvailableStorage bool
+	// AvailableCacheStorage and AvailableTileStorage size the response and
+	// terrain caches from free space individually, keeping a safety margin.
+	// Where free space cannot be measured they fall back to the byte quotas.
+	AvailableCacheStorage bool
+	AvailableTileStorage  bool
 	// GPXDir is the track library directory. It is created if missing.
 	GPXDir string
 	// ElevationHost is a self-hosted opentopodata-style DEM service. Empty
@@ -178,13 +184,24 @@ func New(cfg Config) (*Server, error) {
 	if cfg.OfflineCacheMaxBytes == 0 {
 		cfg.OfflineCacheMaxBytes = defaultCacheBytes
 	}
-	if cfg.UseAvailableStorage {
+	availableCache := cfg.UseAvailableStorage || cfg.AvailableCacheStorage
+	availableTiles := cfg.UseAvailableStorage || cfg.AvailableTileStorage
+	if availableCache || availableTiles {
 		_, supported, err := availableDiskBytes(cfg.GPXDir)
-		if err != nil || !supported {
+		switch {
+		case (err != nil || !supported) && cfg.UseAvailableStorage:
 			gpxRoot.Close()
 			return nil, fmt.Errorf("available-storage cache policy requires filesystem space reporting: %v", err)
+		case err != nil || !supported:
+			log.Printf("free disk space cannot be measured here (%v); using fixed cache quotas", err)
+			availableCache, availableTiles = false, false
 		}
-		cfg.OfflineCacheMaxBytes, cfg.ElevationTileCacheMaxBytes = math.MaxInt64, math.MaxInt64
+	}
+	if availableCache {
+		cfg.OfflineCacheMaxBytes = math.MaxInt64
+	}
+	if availableTiles {
+		cfg.ElevationTileCacheMaxBytes = math.MaxInt64
 	}
 	if cfg.OfflineCacheMaxEntries == 0 {
 		cfg.OfflineCacheMaxEntries = defaultCacheEntries
@@ -211,7 +228,7 @@ func New(cfg Config) (*Server, error) {
 		gpxRoot.Close()
 		return nil, err
 	}
-	cache.useAvailableStorage = cfg.UseAvailableStorage
+	cache.useAvailableStorage = availableCache
 	trustedUIOrigin := ""
 	if strings.TrimSpace(cfg.TrustedUIOrigin) != "" {
 		trustedUIOrigin, err = normalizeOrigin(cfg.TrustedUIOrigin)
@@ -300,7 +317,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.ElevationTiles && strings.TrimSpace(cfg.ElevationHost) == "" {
 		// Pack-owned terrain pins must be restored before any disk eviction.
 		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client, true)
-		tiles.useAvailableStorage = cfg.UseAvailableStorage
+		tiles.useAvailableStorage = availableTiles
 		if tiles.cacheErr != nil {
 			cancel()
 			gpxRoot.Close()

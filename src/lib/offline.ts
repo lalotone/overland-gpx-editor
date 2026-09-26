@@ -1,6 +1,3 @@
-import { simplifyCoordinates } from './edit'
-import type { Coordinate } from './types'
-
 export type OfflineMode = 'auto' | 'cache-only'
 
 export type RuntimeService =
@@ -169,8 +166,6 @@ export interface PackEstimateRequest {
   coverageKind?: 'area' | 'city' | 'region' | 'country'
   regional?: boolean
   name: string
-  automatic?: boolean
-  route?: { lat: number; lon: number }[]
   bbox?: [number, number, number, number]
   paddingKm: number
   minZoom: number
@@ -179,25 +174,11 @@ export interface PackEstimateRequest {
   scopes: string[]
 }
 
-export type PackArea = 'route' | 'bbox'
-
 export interface PackBounds {
   south: number
   west: number
   north: number
   east: number
-}
-
-export interface PackRequestDraft {
-  name: string
-  area: PackArea
-  route: { lat: number; lon: number }[]
-  bbox: PackBounds | null
-  paddingKm: number
-  minZoom: number
-  maxZoom: number
-  layers: string[]
-  scopes: string[]
 }
 
 export interface PackEstimate {
@@ -212,62 +193,10 @@ export interface PackEstimate {
   detail?: string
 }
 
-export function limitPackRoute(route: Coordinate[], maxPoints = 5000): { lat: number; lon: number }[] {
-  if (route.length <= maxPoints) return route.map(({ lat, lon }) => ({ lat, lon }))
-  let lower = 0
-  let upper = 10
-  let best = simplifyCoordinates(route, upper)
-  while (best.length > maxPoints && upper < 20_000_000) {
-    lower = upper
-    upper *= 2
-    best = simplifyCoordinates(route, upper)
-  }
-  for (let iteration = 0; iteration < 24 && upper - lower > 0.5; iteration++) {
-    const tolerance = (lower + upper) / 2
-    const candidate = simplifyCoordinates(route, tolerance)
-    if (candidate.length > maxPoints) lower = tolerance
-    else { upper = tolerance; best = candidate }
-  }
-  return best.map(({ lat, lon }) => ({ lat, lon }))
-}
-
-export function buildAutomaticPackRequest(name: string, route: Coordinate[]): PackEstimateRequest | null {
-  if (route.length < 2) return null
-  const routeName = name.trim() || 'Loaded route'
-  return {
-    name: `Route: ${routeName}`.slice(0, 100),
-    automatic: true,
-    route: limitPackRoute(route),
-    paddingKm: 5,
-    minZoom: 5,
-    maxZoom: 14,
-    layers: ['openfreemap'],
-    scopes: ['elevation', 'pois', 'fuel'],
-  }
-}
-
-export function packLayerId(layerId: string): string {
-  return layerId === 'topo' ? 'opentopo' : layerId
-}
-
-export function validPackArea(preference: PackArea | null, routeAvailable: boolean): PackArea {
-  if (!routeAvailable) return 'bbox'
-  return preference === 'bbox' ? 'bbox' : 'route'
-}
-
-export function syncPackLayers(
-  selected: string[],
-  activeLayerId: string,
-  userEdited: boolean,
-): string[] {
-  return userEdited ? selected : [packLayerId(activeLayerId)]
-}
-
 const WEB_MERCATOR_LATITUDE = 85.05112878
-const PACK_LAYERS = new Set(['openfreemap', 'osm', 'opentopo', 'cyclosm', 'satellite', 'relief', 'hillshade'])
-const PACK_SCOPES = new Set(['elevation', 'pois', 'fuel', 'places'])
-
 function normalizedLongitude(value: number): number {
+  // In-range values pass through: the modulo round trip adds float noise.
+  if (value >= -180 && value < 180) return value
   const normalized = ((value + 180) % 360 + 360) % 360 - 180
   return Object.is(normalized, -0) ? 0 : normalized
 }
@@ -292,40 +221,6 @@ function validPackBounds(bounds: PackBounds): boolean {
     bounds.south >= -WEB_MERCATOR_LATITUDE && bounds.north <= WEB_MERCATOR_LATITUDE &&
     bounds.south < bounds.north && bounds.west >= -180 && bounds.west <= 180 &&
     bounds.east >= -180 && bounds.east <= 180 && bounds.west !== bounds.east
-}
-
-export function buildPackEstimateRequest(draft: PackRequestDraft): PackEstimateRequest | null {
-  const name = draft.name.trim()
-  if (!name || name.length > 100 || !Number.isFinite(draft.paddingKm) || draft.paddingKm < 0 || draft.paddingKm > 100) return null
-  if (!Number.isInteger(draft.minZoom) || !Number.isInteger(draft.maxZoom) ||
-      draft.minZoom < 0 || draft.minZoom > 19 || draft.maxZoom < 0 || draft.maxZoom > 19) return null
-  if (draft.layers.some(layer => !PACK_LAYERS.has(layer)) || draft.scopes.some(scope => !PACK_SCOPES.has(scope))) return null
-  const request: PackEstimateRequest = {
-    name,
-    paddingKm: draft.paddingKm,
-    minZoom: Math.min(draft.minZoom, draft.maxZoom),
-    maxZoom: Math.max(draft.minZoom, draft.maxZoom),
-    layers: [...new Set(draft.layers)].sort(),
-    scopes: [...new Set(draft.scopes)].sort(),
-  }
-  if (draft.area === 'route') {
-    if (draft.route.length < 2) return null
-    if (draft.route.some(({ lat, lon }) => !Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)) return null
-    request.route = limitPackRoute(draft.route)
-  } else {
-    if (!draft.bbox || !validPackBounds(draft.bbox)) return null
-    request.bbox = [draft.bbox.south, draft.bbox.west, draft.bbox.north, draft.bbox.east]
-  }
-  return request
-}
-
-export function packRequestSignature(request: PackEstimateRequest | null): string | null {
-  if (!request) return null
-  return JSON.stringify({
-    ...request,
-    layers: [...request.layers].sort(),
-    scopes: [...request.scopes].sort(),
-  })
 }
 
 type UnknownRecord = Record<string, unknown>

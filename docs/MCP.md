@@ -172,8 +172,8 @@ So after a command that starts background work, poll `overland://view` until
 `planner.loading` is false, then check `planner.routeError` and any new
 `notifications` entries.
 
-Explore's own offline-pack errors are still local to that screen and are not
-reported in the snapshot.
+Offline region download errors are shown in the Offline regions manager and are
+not reported in the snapshot.
 
 ## Safety boundary
 

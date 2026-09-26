@@ -133,12 +133,13 @@ the service is down, the OSM fuel layer answers as before.
 
 ## Offline preparation
 
-- Loading or selecting a GPX automatically estimates and prepares its bounded
-  route pack; edits do not restart the job. Recent packs remain available, with
-  storage-based manifest accounting and interrupted-pack retries that reuse their identity.
-- A compact readiness pill sits in the same map-control stack as Terrain. Its
-  detail panel reports vector maps, elevation, fuel, water and campsites with
-  independent progress, item counts and unavailable reasons.
+- Offline data is downloaded per city, region or country from **Offline
+  regions**, shared with the Android app: one Broom routing region plus a
+  regional map pack of vector maps, elevation, fuel, water and campsites.
+  Opening a GPX or moving the map never starts a download.
+- The **Downloads** view reports routing stages and per-resource progress, and
+  stops, resumes, switches or removes downloads. Storage-based manifest
+  accounting and interrupted-pack retries reuse their identity.
 - Pack estimates report blocked public providers, reusable bytes and expected
   quota use. Jobs remain explicitly incomplete after cancellation, failure or
   an interrupted restart, while an individual provider failure does not stop
@@ -147,9 +148,6 @@ the service is down, the OSM fuel layer answers as before.
   reference rather than copied, and deleting a pack releases only its pins.
 - Exact route, surface and search replies can replay; arbitrary new offline
   routing still requires a local routing engine.
-- Explore can prepare a drawn rectangular area without a route. Its estimate
-  updates automatically, completed bounds appear as light map coverage, and a
-  dedicated manager hides, restores, cancels or deletes downloaded areas.
 - In startup `auto` mode, **Work offline** immediately closes the outbound gate
   for both the UI and Go server while preserving cache reads. **Go online**
   reopens it. Operator-started `cache-only` mode cannot be overridden by the UI.
@@ -173,12 +171,9 @@ the service is down, the OSM fuel layer answers as before.
   than interface. Escape brings the panels back.
 - **Collapsible terrain panel** — a pill in the map corner that expands to the
   layer/relief/colour controls, so it stops covering the terrain you're reading.
-- **Route readiness control** — appears only for a loaded GPX, directly below
-  Terrain, and makes dead-zone readiness visible without exposing cache
-  administration controls.
-- **Downloaded-area manager** — keeps many Explore downloads out of the map
-  tool stack while retaining progress, coverage visibility and explicit
-  cancel/delete actions. Coverage returns after a reload.
+- **Offline regions manager** — one dialog to browse the region catalogue and
+  follow or manage downloads; its toolbar button shows download progress and
+  routing readiness on every screen.
 - **Editing tools behind a Tools toggle**, grouped by what they do; the POI
   layers and undo stay on the always-visible strip.
 - **Typed waypoint markers** for fuel, water, camps, food, lodging, parking,

@@ -209,17 +209,16 @@ correctly with no elevation service reachable at all.
 
 The Go server keeps policy-permitted provider responses in
 `$XDG_CACHE_HOME/overland/responses` (normally
-`~/.cache/overland/responses`). Opening a GPX automatically prepares a bounded
-pack for that route. The **Offline** pill appears directly below Terrain and
-shows live readiness for the vector map, elevation, fuel, water and campsites;
-open it for per-resource progress and item counts. Recent prepared routes remain
-pinned until removed. Pack metadata counts against storage rather than a fixed
-number of saved packs, and interrupted downloads reuse their existing manifest.
-
-Explore can also download a rectangular area without a GPX. Draw the bounds and
-the estimate updates automatically before download. Completed bounds are shown
-as light coverage rectangles and restored after reload; the downloaded-area
-manager can hide them, inspect progress, cancel work or delete a saved area.
+`~/.cache/overland/responses`). Offline data is downloaded by region, the same
+way as on Android: open **Offline regions** (next to Work offline on every
+screen) and pick a city, region or country under **Add region**. A region
+download fetches its Broom routing extract plus one map pack covering vector
+maps (zooms 5–14), elevation, fuel prices and stations, water and campsites.
+The **Downloads** tab shows routing stages and per-resource progress, lets you
+stop downloads, switch routing to another downloaded region, resume partial
+map downloads and remove stored ones. The button itself doubles as a status
+indicator. Nothing downloads implicitly: opening a GPX or panning the map
+starts no offline work. Interrupted downloads reuse their existing manifest.
 
 In the default `auto` mode, **Work offline** switches the running server and UI
 to deterministic no-network operation immediately; **Go online** re-enables
@@ -232,12 +231,9 @@ cannot reach the Go server itself.
 Routing is separate from response-cache trip packs. Broom stores OSM extracts,
 elevation sources, prepared graphs and profile metrics in
 `$XDG_CACHE_HOME/overland/routing` (normally `~/.cache/overland/routing`).
-Planner and Explore use Broom's region suggestions to find local routing data
-for the visible map, explicitly labelling partial coverage. Open the
-**Offline routing** map pill to see available acquisition estimates and download the
-suggested region or use an installed copy. The same pill reveals preparation
-progress and cancellation; it keeps showing tile totals and progress when collapsed. Preparation
-runs in the background, and completed route queries are entirely local. Updates,
+Regions are chosen in **Offline regions**, which also shows preparation
+progress and cancellation. Preparation runs in the background, and completed
+route queries are entirely local. Updates,
 pinning and pruning remain available through the management API. A strict
 cache-only server can open installed regions but never downloads missing data.
 
@@ -269,8 +265,8 @@ for them.
 
 After a Broom upgrade, the active managed region updates automatically when
 online. Its previous graph remains usable while it rebuilds, and **Offline
-routing** shows progress. In cache-only mode the update waits until you return
-online. Failed or paused updates can be resumed from the same panel.
+regions** shows progress. In cache-only mode the update waits until you return
+online. Failed or paused updates can be resumed from the same view.
 
 Broom 0.13 moves to build pipeline 4, which enforces more via-way turn
 restrictions, so regions built by earlier releases go through that update once.

@@ -39,10 +39,10 @@ src/
 ├── components/                 Presentational React components
 │   ├── ColoredTrack.tsx        Full-resolution track, run-length coloured
 │   ├── ElevationProfile.tsx    Profile chart, hover, range selection
-│   ├── ExploreScreen.tsx       Search, POIs, area packs and coverage
+│   ├── ExploreScreen.tsx       Place search and POIs on a free map
 │   ├── MapLayers.tsx           Base tiles, hillshade pane, terrain controls
-│   ├── OfflineAreaPanel.tsx    Drawn-area options, estimate and start
-│   ├── OfflineAreasPanel.tsx   Saved-area management and visibility
+│   ├── OfflineRegions.tsx      Region catalogue and download manager dialog
+│   ├── useRegionDownloads.ts   Pack polling and region download actions
 │   ├── SplashScreen.tsx        Generated topographic intro
 │   └── TrackCard.tsx           Library card with route thumbnail
 └── lib/                        Pure logic — no React, no DOM*
@@ -52,6 +52,7 @@ src/
     ├── edit.ts                 Trim, split, stages, simplify, smooth
     ├── elevation.ts            Batched DEM lookups
     ├── offline.ts              Runtime policy, status and pack client
+    ├── offlineRegions.ts       Region downloads shared with the mobile UI
     ├── mapStyle.ts             Safe style-resource URL resolution
     ├── fuel.ts                 Spanish official fuel prices
     ├── routing.ts              Broom request and response contract

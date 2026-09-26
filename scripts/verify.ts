@@ -63,8 +63,6 @@ const {
   waypointMarkerIdFromSymbol,
 } = await import('../src/lib/waypointMarkers')
 const {
-  buildAutomaticPackRequest,
-  buildPackEstimateRequest,
   bootstrapRuntimeConfig,
   decodePacks,
   decodePackEstimate,
@@ -76,15 +74,24 @@ const {
   loadRuntimeConfig,
   normalizePackBounds,
   OfflineCacheMissError,
-  packRequestSignature,
   parseCacheMetadata,
   resolveApiUrl,
   responseError,
   selectRuntimeTransport,
   setRuntimeOfflineMode,
-  syncPackLayers,
-  validPackArea,
 } = await import('../src/lib/offline')
+const {
+  areaForRegion,
+  completeMapPack,
+  coversBounds,
+  decodeRoutingRegions,
+  packAreaName,
+  packFailure,
+  packIsActive,
+  regionalPackRequest,
+  routingJobActive,
+  savedMapAreas,
+} = await import('../src/lib/offlineRegions')
 
 let failures = 0
 let checks = 0
@@ -1239,75 +1246,62 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('drawn map bounds are ordered and preserved in Web Mercator range',
     ordinaryBounds?.south === 41.8 && Math.abs((ordinaryBounds?.west ?? 0) + 0.7) < 1e-10 &&
       ordinaryBounds.north === 42.2 && Math.abs((ordinaryBounds?.east ?? 0) - 1.4) < 1e-10)
+  check('in-range region bounds survive normalisation exactly',
+    normalizePackBounds({ lat: 39.8, lon: -2.2 }, { lat: 42.9, lon: 0.8 })?.west === -2.2 &&
+      normalizePackBounds({ lat: 39.8, lon: -2.2 }, { lat: 42.9, lon: 0.8 })?.east === 0.8)
   check('drawn map bounds preserve a short antimeridian crossing',
     crossingBounds?.west === 170 && crossingBounds.east === -170)
   check('degenerate and world-spanning map selections are rejected',
     normalizePackBounds({ lat: 1, lon: 2 }, { lat: 1, lon: 3 }) === null &&
       normalizePackBounds({ lat: -10, lon: -180 }, { lat: 10, lon: 180 }) === null)
 
-  check('pack area follows delayed route availability until the user chooses',
-    validPackArea(null, false) === 'bbox' && validPackArea(null, true) === 'route')
-  check('pack area remains valid when a preferred route disappears',
-    validPackArea('route', false) === 'bbox' && validPackArea('route', true) === 'route')
-  check('an explicit map-area preference survives route availability',
-    validPackArea('bbox', true) === 'bbox')
-  check('unedited pack layers follow the active terrain layer',
-    syncPackLayers(['openfreemap'], 'topo', false)[0] === 'opentopo')
-  check('user-edited pack layers do not follow later terrain changes',
-    syncPackLayers(['osm', 'cyclosm'], 'topo', true).join(',') === 'osm,cyclosm')
+  const region = { id: 'spain/aragon', name: 'Aragón', kind: 'region' as const, bounds: { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }, regionId: 'spain/aragon' }
+  const regionalRequest = regionalPackRequest(region)
+  check('region packs cover the whole region with maps, elevation, POIs and fuel',
+    regionalRequest.regional === true && regionalRequest.coverageKind === 'region' &&
+      regionalRequest.name === 'Map: Aragón' && regionalRequest.bbox?.join(',') === '39.8,-2.2,42.9,0.8' &&
+      regionalRequest.paddingKm === 0 && regionalRequest.minZoom === 5 && regionalRequest.maxZoom === 14 &&
+      regionalRequest.scopes.join(',') === 'elevation,pois,fuel')
 
-  const routeRequest = buildPackEstimateRequest({
-    name: '  Pyrenees  ',
-    area: 'route',
-    route: [{ lat: 42.1, lon: -0.4 }, { lat: 42.2, lon: -0.5 }],
-    bbox: null,
-    paddingKm: 5,
-    minZoom: 14,
-    maxZoom: 8,
-    layers: ['opentopo'],
-    scopes: ['pois', 'elevation'],
+  const catalogue = decodeRoutingRegions({
+    cachedOnly: false,
+    regions: [
+      { id: 'spain', name: 'Spain', kind: 'country', bbox: { south: 35, west: -10, north: 44, east: 5 }, installed: false, active: false },
+      { id: 'spain/aragon', name: 'Aragón', parent: 'spain', kind: 'region', bbox: region.bounds, installed: true, active: true },
+      { id: 'broken', name: 42 },
+      { id: 'no-bounds', name: 'No bounds', kind: 'mystery', bbox: { south: 'x' } },
+    ],
   })
-  const bboxRequest = buildPackEstimateRequest({
-    name: 'Pyrenees',
-    area: 'bbox',
-    route: [],
-    bbox: { south: 41, west: -1, north: 42, east: 0 },
-    paddingKm: 5,
-    minZoom: 8,
-    maxZoom: 14,
-    layers: ['opentopo'],
-    scopes: ['pois', 'elevation'],
-  })
-  check('pack request building trims names and normalizes zoom order',
-    routeRequest?.name === 'Pyrenees' && routeRequest.minZoom === 8 && routeRequest.maxZoom === 14)
-  check('pack request building captures the selected area only',
-    routeRequest?.route?.length === 2 && routeRequest.bbox === undefined &&
-      bboxRequest?.bbox?.join(',') === '41,-1,42,0' && bboxRequest.route === undefined)
-  check('pack request building rejects invalid provider and coordinate inputs',
-    buildPackEstimateRequest({
-      name: 'Invalid layer', area: 'bbox', route: [], bbox: { south: 41, west: -1, north: 42, east: 0 },
-      paddingKm: 0, minZoom: 8, maxZoom: 14, layers: ['unknown'], scopes: [],
-    }) === null && buildPackEstimateRequest({
-      name: 'Invalid latitude', area: 'bbox', route: [], bbox: { south: -90, west: -1, north: 42, east: 0 },
-      paddingKm: 0, minZoom: 8, maxZoom: 14, layers: ['openfreemap'], scopes: ['places'],
-    }) === null)
-  check('pack signatures invalidate estimates when the full area changes',
-    packRequestSignature(routeRequest) !== packRequestSignature(bboxRequest))
-  check('pack signatures treat layer and scope order as equivalent',
-    packRequestSignature(routeRequest) === packRequestSignature(routeRequest ? {
-      ...routeRequest,
-      layers: [...routeRequest.layers].reverse(),
-      scopes: [...routeRequest.scopes].reverse(),
-    } : null))
+  check('region catalogue decoding drops malformed entries and unknown kinds',
+    catalogue.regions.length === 3 && catalogue.regions[2].kind === 'region' &&
+      catalogue.regions[2].bbox === undefined && catalogue.regions[1].parent === 'spain' &&
+      catalogue.regions[1].active && !catalogue.cachedOnly)
+  check('regions without bounds cannot become download areas',
+    areaForRegion(catalogue.regions[2]) === null &&
+      areaForRegion(catalogue.regions[0])?.kind === 'country' &&
+      areaForRegion(catalogue.regions[1])?.regionId === 'spain/aragon')
+  check('coverage requires the pack to contain the whole area',
+    coversBounds(catalogue.regions[0].bbox, region.bounds) &&
+      !coversBounds(region.bounds, catalogue.regions[0].bbox!) && !coversBounds(undefined, region.bounds))
 
-  const automaticRequest = buildAutomaticPackRequest(' Trans-Pyrenees ', Array.from(
-    { length: 6000 },
-    (_, index) => ({ lat: 42 + index / 1_000_000, lon: -1 + Math.sin(index / 20) / 100 }),
-  ))
-  check('automatic packs use bounded route-safe defaults',
-    automaticRequest?.name === 'Route: Trans-Pyrenees' && automaticRequest.route !== undefined &&
-      automaticRequest.automatic === true && automaticRequest.route.length <= 5000 && automaticRequest.layers[0] === 'openfreemap' &&
-      automaticRequest.scopes.join(',') === 'elevation,pois,fuel')
+  const mapProgress = (done: number, failed = 0) => ({ done, total: 10, failed, bytes: 0, items: 0 })
+  const regionPacks = decodePacks([
+    { id: 'a', name: 'Map: Aragón', state: 'complete', bbox: region.bounds, resources: { 'vector-map': mapProgress(10) } },
+    { id: 'b', name: 'Map: Aragón', state: 'incomplete', detail: 'interrupted', bbox: region.bounds, resources: { 'vector-map': mapProgress(4) } },
+    { id: 'c', name: 'Route: Old trip', state: 'complete', bbox: region.bounds, resources: {} },
+    { id: 'd', name: 'Map: Teruel', state: 'running', bbox: region.bounds, resources: { 'vector-map': mapProgress(2) } },
+  ])
+  check('a complete map pack is recognised for a covered region',
+    completeMapPack(regionPacks, region)?.id === 'a' && completeMapPack(regionPacks.slice(1), region) === undefined)
+  check('saved map areas keep one entry per name and extent and skip route packs',
+    savedMapAreas(regionPacks).map(pack => pack.id).join(',') === 'a')
+  check('pack activity and names are derived consistently',
+    packIsActive(regionPacks[3]) && !packIsActive(regionPacks[0]) && packAreaName(regionPacks[2]) === 'Old trip')
+  check('interrupted packs explain how to resume',
+    /Download again to resume/.test(packFailure(regionPacks[1])))
+  check('routing jobs count as active only while queued or running',
+    routingJobActive({ job: { id: 'j', regionId: 'r', state: 'running' } } as never) &&
+      !routingJobActive({ job: { id: 'j', regionId: 'r', state: 'failed' } } as never) && !routingJobActive(null))
 
   const estimate = decodePackEstimate({
     estimatedBytes: 2048,

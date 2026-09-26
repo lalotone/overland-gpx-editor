@@ -92,11 +92,10 @@ permit access policies, before it becomes active,
 so interactive route requests never trigger graph building or profile
 customization.
 
-Planner and Explore use Broom's region suggestions, prioritizing local extracts
-containing the viewport centre and explicitly marking partial coverage.
-The region catalogue is cached through the backend;
-viewport suggestions fetch no PBFs or DEMs and start no preparation jobs. Open the
-compact **Offline routing** map pill to accept a download and reveal progress.
+Regions are picked explicitly in the **Offline regions** manager from the
+region catalogue, which is cached through the backend. City downloads use
+Broom's suggestion endpoint to find the covering extract; suggestions fetch no
+PBFs or DEMs and start no preparation jobs.
 The selected generation and explicit pins survive pruning. Protected pin and
 prune API operations expose Broom's application-level cache policy.
 The last active managed region is persisted and reopened on restart. Older
@@ -204,10 +203,11 @@ per server. This does not change the built-in profiles or saved GPX contents.
 
 ## Trip Packs
 
-Opening or selecting a GPX makes its route the active automatic pack. The
-frontend estimates first, then starts preparation without a second user action.
-The readiness control reports each resource independently and replaces the
-active status when another route is loaded. Packs remain pinned until removed;
+The web and Android frontends create packs only from an explicit region
+download (`src/lib/offlineRegions.ts`): a `regional` pack over the city, region
+or country bounds at zooms 5–14 with elevation, POI and fuel scopes. The
+frontend estimates first and refuses areas whose map layers are blocked, then
+starts routing preparation and the pack together. Packs remain pinned until removed;
 there is no fixed retained-pack count. Their metadata is charged to storage:
 running jobs reserve room to grow, completed manifests occupy their actual size,
 and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
@@ -233,13 +233,10 @@ raster basemaps. Cancellation or process restart leaves a pack incomplete;
 completed shared cache entries remain valid. A failed provider marks its own
 resource unavailable while preparation continues for unrelated resources.
 
-Explore creates the same kind of bounded pack from a drawn rectangle. Estimates
-run automatically after the bounds or options settle and remain traffic-free.
-Completed area summaries expose only their validated bbox, never the manifest's
-route, cache keys or request data. The frontend renders those bboxes as light
-coverage rectangles, restores them after reload, and shows them again whenever
-the download tool opens. The dedicated manager can hide coverage, inspect all
-area jobs, cancel active work and delete completed packs with confirmation.
+Pack summaries expose only their validated bbox, never the manifest's route,
+cache keys or request data. The Downloads view lists every pack, including
+route packs created by older versions, and can stop active work, resume partial
+map downloads and delete packs with confirmation.
 
 ## Operational Statistics
 

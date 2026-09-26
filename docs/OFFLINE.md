@@ -217,8 +217,14 @@ per server. This does not change the built-in profiles or saved GPX contents.
 ## Trip Packs
 
 The web and Android frontends create packs only from an explicit region
-download (`src/lib/offlineRegions.ts`): a `regional` pack over the city, region
-or country bounds at zooms 5–14 with elevation, POI and fuel scopes. The
+download (`src/lib/offlineRegions.ts`): `regional` packs over the city, region
+or country bounds. Routing and three pack groups download independently —
+maps (the `openfreemap` layer, zooms 5–14), terrain (`elevation`) and points of
+interest (`pois`, `fuel`) — each group as its own packs named after it
+(`Maps: Aragón`); all three together keep the original `Map:` request.
+Partitioning does not depend on the groups chosen, so every group's packs
+cover the same parts, and an area's state is judged per group from the packs
+that report that resource. The
 frontend estimates first and refuses areas whose map layers are blocked, then
 starts routing preparation and the pack together. An area beyond one pack's
 limits is reported with code `pack_too_large`; the frontend then plans one pack

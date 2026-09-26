@@ -25,6 +25,7 @@ continues to use its existing entry point.
 - **Offline:** a split map overlay downloads the visible area or opens a region
   browser. The browser has City, Region/comunidad and Country views, a prominent
   Downloaded section, in-use badges, saved map areas and explicit partial states.
+  Routing, maps, terrain and points of interest can each be downloaded alone.
   Selecting a region shows separate progress for routing, vector maps, elevation,
   fuel prices, fuel stations, water and campsites. City search uses the shared
   Nominatim client; cities use their own map bounds plus a covering routing extract.

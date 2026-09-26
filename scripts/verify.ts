@@ -85,6 +85,8 @@ const {
   areaDownloadState,
   mapsComplete,
   splitArea,
+  routingJobProgress,
+  packGroups,
   gridParts,
   tileCount,
   startRegionDownload,
@@ -1426,7 +1428,7 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     }
     const tooBig = await run(5 * 2 ** 30, 4 * 2 ** 30)
     check('a part that can never fit is refused before routing starts',
-      tooBig.result instanceof Error && /largest map download/.test(tooBig.result.message) && tooBig.prepared.length === 0 && tooBig.started.length === 0)
+      tooBig.result instanceof Error && /largest download/.test(tooBig.result.message) && tooBig.prepared.length === 0 && tooBig.started.length === 0)
     const tight = await run(3 * 2 ** 30, 4 * 2 ** 30)
     check('an overlapping total above free space warns but still downloads',
       !(tight.result instanceof Error) && /may need up to/.test(tight.result.warning ?? '') && tight.started.length === 2)
@@ -1476,6 +1478,84 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     } finally {
       globalThis.fetch = originalFetch
     }
+  }
+
+  {
+    // Resources download separately; everything together keeps the old request.
+    const all = regionalPackRequest(region)
+    const mapsOnly = regionalPackRequest(region, ['maps'])
+    const terrainAndPlaces = regionalPackRequest(region, ['places', 'terrain'])
+    check('all resource groups together keep the original pack request',
+      all.name === 'Map: Aragón' && all.layers.join(',') === 'openfreemap' && all.scopes.join(',') === 'elevation,pois,fuel')
+    check('a single resource group asks only for its own layers and scopes',
+      mapsOnly.name === 'Maps: Aragón' && mapsOnly.layers.join(',') === 'openfreemap' && mapsOnly.scopes.length === 0 &&
+        terrainAndPlaces.name === 'Terrain + Points of interest: Aragón' && terrainAndPlaces.layers.length === 0 &&
+        terrainAndPlaces.scopes.join(',') === 'elevation,pois,fuel')
+    const groupPacks = decodePacks([
+      { id: 'm', name: 'Maps: Aragón', state: 'complete', bbox: region.bounds, resources: { 'vector-map': mapProgress(10) } },
+      { id: 't', name: 'Terrain: Aragón', state: 'running', bbox: region.bounds, resources: { elevation: mapProgress(4) } },
+      { id: 'p', name: 'Points of interest: Aragón', state: 'complete', detail: 'provider_limits', bbox: region.bounds,
+        unavailable: [{ resource: 'water', reason: 'City-sized searches are required' }],
+        resources: { 'fuel-stations': { done: 1, total: 1, failed: 0, bytes: 0, items: 3 } } },
+    ])
+    check('a pack\'s resource groups are read from what it reports',
+      packGroups(groupPacks[0]).join(',') === 'maps' && packGroups(groupPacks[1]).join(',') === 'terrain' &&
+        packGroups(groupPacks[2]).join(',') === 'places' && packAreaName(groupPacks[2]) === 'Aragón')
+    check('each resource group is judged by its own packs',
+      areaDownloadState(groupPacks, region, 'maps').complete && !areaDownloadState(groupPacks, region, 'terrain').complete &&
+        areaDownloadState(groupPacks, region, 'terrain').active && areaDownloadState(groupPacks, region, 'places').complete &&
+        mapsComplete(groupPacks, region))
+    check('a terrain-only pack does not make an area\'s maps count as downloaded',
+      !mapsComplete(groupPacks.slice(1), region))
+    check('finished single-group downloads appear as saved areas, running ones do not',
+      savedMapAreas(groupPacks).map(pack => pack.id).join(',') === 'm,p')
+
+    const calls: string[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${url.replace(/^.*\/offline/, '')}`)
+      const body = init?.body ? JSON.parse(String(init.body)) as { name?: string } : {}
+      const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/packs/estimate')) return reply({ resources: 10, counts: {}, blocked: [], scopes: {} })
+      if (url.endsWith('/routing/prepare')) return reply({ enabled: true, ready: false, cached: [] }, 202)
+      if (url.endsWith('/packs')) return reply({ id: '0'.repeat(32), name: body.name, state: 'queued', resources: {} }, 202)
+      return reply({}, 404)
+    }) as typeof fetch
+    try {
+      const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+      const city = { id: 'city:1', name: 'Zaragoza', kind: 'city' as const, bounds: { south: 41.6, west: -0.95, north: 41.7, east: -0.8 } }
+      const mapsResult = await startRegionDownload(runtime, city, {}, ['maps'])
+      check('maps alone need no routing region and prepare no routing',
+        !calls.some(call => call.includes('/routing/')) && mapsResult.packs.length === 1 && mapsResult.regionId === undefined, calls.join(' | '))
+      calls.length = 0
+      const routingResult = await startRegionDownload(runtime, region, {}, ['routing'])
+      check('routing alone prepares routing and starts no packs',
+        calls.join(' | ') === 'POST /routing/prepare' && routingResult.packs.length === 0, calls.join(' | '))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  {
+    const job = (phase: string, extra: Record<string, number>) => ({ id: 'j', regionId: 'morocco', state: 'running', phase, ...extra })
+    const samples = [
+      job('pbf', { done: 900, total: 1000 }),
+      job('planning', { done: 0, total: 10 }),
+      job('elevation', { done: 999, total: 1000, completedItems: 1, itemsTotal: 40 }),
+      job('elevation', { done: 1, total: 1000, completedItems: 2, itemsTotal: 40 }),
+      job('elevation', { done: 500, total: 1000, completedItems: 39, itemsTotal: 40 }),
+      job('build', { done: 0, total: 0 }),
+      job('warmup', { done: 3, total: 4 }),
+    ].map(sample => routingJobProgress(sample).overall ?? -1)
+    check('routing progress only moves forward across steps and terrain files',
+      samples.every((value, index) => index === 0 || value >= samples[index - 1]) && samples[0] > 0 && samples[samples.length - 1] < 1,
+      samples.map(value => value.toFixed(3)).join(','))
+    check('the terrain step advances by tiles, not by the current file',
+      routingJobProgress(job('elevation', { done: 999, total: 1000, completedItems: 20, itemsTotal: 40 })).overall === 0.5 &&
+        routingJobProgress(job('elevation', { done: 999, total: 1000, completedItems: 20, itemsTotal: 40 })).step === 3)
+    check('routing progress is unknown before the first step reports',
+      routingJobProgress(undefined).overall === null && routingJobProgress(job('mystery', {})).overall === null)
   }
 
   check('routing jobs count as active only while queued or running',

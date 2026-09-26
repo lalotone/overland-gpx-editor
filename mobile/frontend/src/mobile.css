@@ -1485,3 +1485,17 @@ progress {
     display: none;
   }
 }
+.resource-group {
+  background: color-mix(in srgb, var(--line) 30%, transparent);
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.resource-group strong {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.resource-download .icon-button {
+  width: 32px;
+  height: 32px;
+}

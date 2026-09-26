@@ -9,6 +9,7 @@ import {
   startPack,
 } from './offline'
 import type {
+  RoutingDataJob,
   PackBounds,
   PackEstimateRequest,
   PackResourceProgress,
@@ -18,9 +19,12 @@ import type {
 } from './offline'
 
 /**
- * Region downloads shared by the web and mobile frontends. A download is a
- * Broom routing region plus regional map packs (vector maps, elevation, POIs
- * and fuel) over the same bounds. One pack is capped at 100,000 resources, so
+ * Region downloads shared by the web and mobile frontends. A region offers
+ * four resources that download independently, as in OsmAnd: its Broom routing
+ * data, which planning needs even online, and three pack groups — maps,
+ * terrain and points of interest — needed only offline, since online they are
+ * fetched as they are viewed. Each group downloads as regional map packs over
+ * the same bounds. One pack is capped at 100,000 resources, so
  * an area that is too large for it — any sizeable country — is downloaded as
  * one pack per catalogue sub-region, halving areas that have none. Routing
  * still uses the single covering extract, so routes cross those boundaries.
@@ -48,6 +52,22 @@ export interface DownloadRegion {
   active: boolean
 }
 
+/** Offline-only resources, each stored in its own packs. */
+export type ResourceGroup = 'maps' | 'terrain' | 'places'
+export type DownloadResource = 'routing' | ResourceGroup
+
+export const RESOURCE_GROUPS: Record<ResourceGroup, { label: string; kinds: string[]; layers: string[]; scopes: string[] }> = {
+  maps: { label: 'Maps', kinds: ['vector-map'], layers: ['openfreemap'], scopes: [] },
+  terrain: { label: 'Terrain', kinds: ['elevation'], layers: [], scopes: ['elevation'] },
+  places: { label: 'Points of interest', kinds: ['fuel-stations', 'water', 'campsites', 'fuel-prices'], layers: [], scopes: ['pois', 'fuel'] },
+}
+export const PACK_GROUPS: ResourceGroup[] = ['maps', 'terrain', 'places']
+export const ALL_RESOURCES: DownloadResource[] = ['routing', ...PACK_GROUPS]
+
+export function isPackGroup(resource: DownloadResource): resource is ResourceGroup {
+  return resource !== 'routing'
+}
+
 export const RESOURCE_LABELS: Record<string, string> = {
   'vector-map': 'Vector maps',
   elevation: 'Elevation',
@@ -67,8 +87,51 @@ export function routingJobActive(status: RoutingDataStatus | null | undefined): 
   return status?.job?.state === 'queued' || status?.job?.state === 'running'
 }
 
+/** Broom's preparation steps, in the order it runs them. */
+export const ROUTING_STAGES = [
+  { id: 'pbf', label: 'Road data' },
+  { id: 'planning', label: 'Select terrain tiles' },
+  { id: 'elevation', label: 'Terrain tiles' },
+  { id: 'build', label: 'Build routing graph' },
+  { id: 'warmup', label: 'Prepare riding profiles' },
+]
+
+/**
+ * One forward-moving progress for a routing preparation. Broom reports each
+ * step's own progress, and in the terrain step each file's bytes, so a raw
+ * bar restarts at every step and tile. Steps count as equal shares; the
+ * terrain step advances by tiles finished, not by the current file.
+ */
+export function routingJobProgress(job: RoutingDataJob | undefined): {
+  step: number
+  steps: number
+  label: string
+  /** Overall share done, 0..1; null before the first step reports. */
+  overall: number | null
+} {
+  const index = ROUTING_STAGES.findIndex(stage => stage.id === job?.phase)
+  const steps = ROUTING_STAGES.length
+  if (!job || index < 0) return { step: 0, steps, label: 'Checking routing data', overall: null }
+  const within = job.phase === 'elevation'
+    ? job.itemsTotal ? (job.completedItems ?? 0) / job.itemsTotal : 0
+    : job.total ? (job.done ?? 0) / job.total : 0
+  return {
+    step: index + 1,
+    steps,
+    label: ROUTING_STAGES[index].label,
+    overall: (index + Math.min(1, Math.max(0, within))) / steps,
+  }
+}
+
 export function packAreaName(pack: PackSummary): string {
-  return pack.name?.replace(/^(Map|Route):\s*/i, '').trim() || 'Downloaded area'
+  return pack.name?.replace(/^(Map|Maps|Route|Terrain|Points of interest|[\w ]+ \+ [\w +]+):\s*/i, '').trim() || 'Downloaded area'
+}
+
+/** The resource groups a pack holds, read from what it reports progress for. */
+export function packGroups(pack: PackSummary): ResourceGroup[] {
+  return PACK_GROUPS.filter(group => RESOURCE_GROUPS[group].kinds.some(kind =>
+    pack.resources[kind] !== undefined ||
+    pack.unavailable?.some(item => item.resource === kind || (kind === 'vector-map' && item.layer === 'openfreemap'))))
 }
 
 export function resourceTransferText(progress: PackResourceProgress | undefined): string | null {
@@ -258,15 +321,22 @@ export function splitArea(area: DownloadArea): DownloadArea[] {
   return [half('south', { south, west, north: middle, east }), half('north', { south: middle, west, north, east })]
 }
 
-function packFinished(pack: PackSummary): boolean {
-  const maps = pack.resources['vector-map']
-  return (pack.status === 'complete' || pack.detail === 'provider_limits' || pack.detail === 'resource_failures') &&
-    maps?.failed === 0 && maps.total > 0 && maps.done === maps.total
+function packSettled(pack: PackSummary): boolean {
+  return pack.status === 'complete' || pack.detail === 'provider_limits' || pack.detail === 'resource_failures'
 }
 
-function coveringPack(packs: PackSummary[], bounds: PackBounds): PackSummary | undefined {
+/** A settled pack whose resources in the group all arrived. */
+function packFinished(pack: PackSummary, group?: ResourceGroup): boolean {
+  if (!packSettled(pack)) return false
+  const kinds = group ? RESOURCE_GROUPS[group].kinds : Object.keys(pack.resources)
+  const present = kinds.map(kind => pack.resources[kind]).filter(progress => progress !== undefined)
+  return present.every(progress => progress.failed === 0 && progress.done === progress.total) &&
+    (group !== 'maps' || present.some(progress => progress.total > 0))
+}
+
+function coveringPack(packs: PackSummary[], bounds: PackBounds, group?: ResourceGroup): PackSummary | undefined {
   // A finished pack already holds the maps; otherwise follow the live attempt.
-  const rank = (pack: PackSummary) => (packFinished(pack) ? 0 : packIsActive(pack) ? 1 : 2)
+  const rank = (pack: PackSummary) => (packFinished(pack, group) ? 0 : packIsActive(pack) ? 1 : 2)
   return packs
     .filter(pack => coversBounds(pack.bbox, bounds))
     .sort((a, b) => rank(a) - rank(b) || (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0]
@@ -280,15 +350,15 @@ function areaParts(packs: PackSummary[], area: DownloadArea, depth: number): Dow
   return halved ? splitArea(area) : []
 }
 
-function collectAreaPacks(packs: PackSummary[], area: DownloadArea, depth: number, found: Map<string, PackSummary>): number {
-  const direct = coveringPack(packs, area.bounds)
+function collectAreaPacks(packs: PackSummary[], area: DownloadArea, depth: number, found: Map<string, PackSummary>, group?: ResourceGroup): number {
+  const direct = coveringPack(packs, area.bounds, group)
   if (direct) {
     found.set(direct.id, direct)
     return 0
   }
   const parts = areaParts(packs, area, depth)
   if (!parts.length) return 1
-  return parts.reduce((missing, part) => missing + collectAreaPacks(packs, part, depth + 1, found), 0)
+  return parts.reduce((missing, part) => missing + collectAreaPacks(packs, part, depth + 1, found, group), 0)
 }
 
 export interface AreaDownloadState {
@@ -305,10 +375,15 @@ export interface AreaDownloadState {
   failed?: PackSummary
 }
 
-/** Combine the packs that make up an area, whether it took one or many. */
-export function areaDownloadState(packs: PackSummary[], area: DownloadArea | null): AreaDownloadState {
+/**
+ * Combine the packs that make up an area, whether it took one or many. With a
+ * group, only packs holding that resource count, and completion is judged on
+ * it alone; without one, any pack counts.
+ */
+export function areaDownloadState(packs: PackSummary[], area: DownloadArea | null, group?: ResourceGroup): AreaDownloadState {
   const found = new Map<string, PackSummary>()
-  const missing = area ? collectAreaPacks(packs, area, 0, found) : 1
+  const relevant = group ? packs.filter(pack => packGroups(pack).includes(group)) : packs
+  const missing = area ? collectAreaPacks(relevant, area, 0, found, group) : 1
   const members = [...found.values()]
   const resources: Record<string, PackResourceProgress> = {}
   for (const pack of members) {
@@ -329,7 +404,7 @@ export function areaDownloadState(packs: PackSummary[], area: DownloadArea | nul
   return {
     packs: members,
     covers: missing === 0 && members.length > 0,
-    complete: missing === 0 && members.length > 0 && members.every(packFinished),
+    complete: missing === 0 && members.length > 0 && members.every(pack => packFinished(pack, group)),
     active: members.some(packIsActive),
     resources,
     unavailable: members.flatMap(pack => pack.unavailable ?? []),
@@ -339,30 +414,37 @@ export function areaDownloadState(packs: PackSummary[], area: DownloadArea | nul
 
 /** Whether the area's maps are fully downloaded, in one pack or several. */
 export function mapsComplete(packs: PackSummary[], area: DownloadArea | null): boolean {
-  return areaDownloadState(packs, area).complete
+  return areaDownloadState(packs, area, 'maps').complete
 }
 
-/** Finished or partial map packs, one per name and extent (retries reuse names). */
+/** Finished or partial area packs, one per name and extent (retries reuse names). */
 export function savedMapAreas(packs: PackSummary[]): PackSummary[] {
   return packs.filter((pack, index, all) =>
     pack.bbox &&
-    pack.name?.startsWith('Map:') &&
+    !pack.name?.startsWith('Route:') &&
+    packGroups(pack).length > 0 &&
     (pack.status === 'complete' || pack.incomplete) &&
     all.findIndex(p => p.name === pack.name && JSON.stringify(p.bbox) === JSON.stringify(pack.bbox)) === index,
   )
 }
 
-export function regionalPackRequest(area: DownloadArea): PackEstimateRequest {
+/**
+ * The pack for some resource groups of an area. All three together keep the
+ * original "Map:" name and request, so earlier downloads still match.
+ */
+export function regionalPackRequest(area: DownloadArea, groups: ResourceGroup[] = PACK_GROUPS): PackEstimateRequest {
+  const chosen = PACK_GROUPS.filter(group => groups.includes(group))
+  const label = chosen.length === PACK_GROUPS.length ? 'Map' : chosen.map(group => RESOURCE_GROUPS[group].label).join(' + ')
   return {
     regional: true,
     coverageKind: area.kind,
-    name: `Map: ${area.name}`,
+    name: `${label}: ${area.name}`,
     bbox: [area.bounds.south, area.bounds.west, area.bounds.north, area.bounds.east],
     paddingKm: 0,
     minZoom: 5,
     maxZoom: 14,
-    layers: ['openfreemap'],
-    scopes: ['elevation', 'pois', 'fuel'],
+    layers: chosen.flatMap(group => RESOURCE_GROUPS[group].layers),
+    scopes: chosen.flatMap(group => RESOURCE_GROUPS[group].scopes),
   }
 }
 
@@ -422,8 +504,8 @@ async function suggestRoutingRegion(
 export interface RegionDownloadHooks {
   /** Short human-readable step, for a status line. */
   phase?: (text: string) => void
-  /** The area was matched to a routing region; fires before any download starts. */
-  resolved?: (area: DownloadArea, regionId: string) => void
+  /** The area was resolved (and, with routing, matched to a region); fires before any download starts. */
+  resolved?: (area: DownloadArea, regionId?: string) => void
 }
 
 interface MapPlan {
@@ -435,17 +517,18 @@ interface MapPlan {
 }
 
 /** One pack request per piece of the area that fits the pack limits. */
-async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: RegionDownloadHooks, depth = 0, top = true): Promise<MapPlan> {
+async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, groups: ResourceGroup[], hooks: RegionDownloadHooks, depth = 0, top = true): Promise<MapPlan> {
+  // Parts do not depend on the groups chosen, so every group's packs line up.
   const known = downloadParts(area)
-  if (known.length) return planPartPacks(runtime, known, hooks, depth)
-  const request = regionalPackRequest(area)
+  if (known.length) return planPartPacks(runtime, known, groups, hooks, depth)
+  const request = regionalPackRequest(area, groups)
   try {
     const estimate = await estimatePack(runtime, request)
     // Map/elevation batches can cover whole regions. Do not turn provider
     // limits on broad POI searches into tiled Overpass harvesting.
     const blockedMaps = estimate.blocked.filter(item => item.layer)
     if (blockedMaps.length) throw new Error(blockedMaps.map(item => item.reason).join(' · '))
-    if (!estimate.resources) throw new Error('No map resources are available for this area.')
+    if (!estimate.resources) throw new Error('Nothing of this kind is available for this area.')
     return { requests: [{ name: area.name, request, bytes: estimate.genericBytes ?? 0 }], skipped: [], available: estimate.quotaRemaining }
   } catch (reason) {
     // The arithmetic says it fits but the server disagrees (more map sources,
@@ -457,15 +540,15 @@ async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: R
       if (top) throw reason
       return { requests: [], skipped: [`${area.name}: ${(reason as Error).message}`] }
     }
-    return planPartPacks(runtime, parts, hooks, depth + 1)
+    return planPartPacks(runtime, parts, groups, hooks, depth + 1)
   }
 }
 
-async function planPartPacks(runtime: RuntimeConfig, parts: DownloadArea[], hooks: RegionDownloadHooks, depth: number): Promise<MapPlan> {
+async function planPartPacks(runtime: RuntimeConfig, parts: DownloadArea[], groups: ResourceGroup[], hooks: RegionDownloadHooks, depth: number): Promise<MapPlan> {
   const plan: MapPlan = { requests: [], skipped: [] }
   for (const [index, part] of parts.entries()) {
     hooks.phase?.(`Checking maps for ${part.name} (${index + 1}/${parts.length})…`)
-    const partPlan = await planMapPacks(runtime, part, hooks, depth, false)
+    const partPlan = await planMapPacks(runtime, part, groups, hooks, depth, false)
     plan.requests.push(...partPlan.requests)
     plan.skipped.push(...partPlan.skipped)
     plan.available = partPlan.available ?? plan.available
@@ -503,8 +586,12 @@ export async function startRegionDownload(
   runtime: RuntimeConfig,
   area: DownloadArea,
   hooks: RegionDownloadHooks = {},
-): Promise<{ area: DownloadArea; regionId: string; pack?: PackSummary; packs: PackSummary[]; skipped: string[]; warning?: string }> {
-  if (!runtime.offline?.routing) throw new Error('The local routing backend is unavailable.')
+  resources: DownloadResource[] = ALL_RESOURCES,
+): Promise<{ area: DownloadArea; regionId?: string; pack?: PackSummary; packs: PackSummary[]; skipped: string[]; warning?: string }> {
+  const routing = resources.includes('routing')
+  const groups = PACK_GROUPS.filter(group => resources.includes(group))
+  if (!routing && !groups.length) throw new Error('Choose something to download.')
+  if (routing && !runtime.offline?.routing) throw new Error('The local routing backend is unavailable.')
   const bounds = normalizePackBounds(
     { lat: area.bounds.south, lon: area.bounds.west },
     { lat: area.bounds.north, lon: area.bounds.east },
@@ -512,36 +599,41 @@ export async function startRegionDownload(
   if (!bounds) throw new Error('Choose a smaller region before downloading.')
   let regionId = area.regionId
   let name = area.name
-  hooks.phase?.('Finding routing coverage…')
-  if (!regionId) {
+  if (!regionId && routing) {
+    hooks.phase?.('Finding routing coverage…')
     const region = await suggestRoutingRegion(runtime, bounds)
     if (!region || !region.coversView)
       throw new Error('This area is not covered by one local routing region. Choose a smaller area or a named region.')
     regionId = region.regionId
     if (area.kind === 'area') name = `Visible area near ${region.name}`
   }
-  const selected: DownloadArea = { ...area, name, bounds, regionId }
+  const selected: DownloadArea = { ...area, name, bounds, ...(regionId ? { regionId } : {}) }
   hooks.resolved?.(selected, regionId)
-  hooks.phase?.('Checking maps and storage…')
-  const plan = await planMapPacks(runtime, selected, hooks)
-  if (!plan.requests.length) throw new Error(plan.skipped.join(' · ') || 'No map resources are available for this area.')
-  // Check storage before the routing build starts. Only a part that cannot fit
-  // on its own is refused: summed estimates count tiles shared by neighbouring
-  // parts more than once, so a larger total is a warning, not a verdict.
-  const available = plan.available
-  const largest = Math.max(...plan.requests.map(part => part.bytes))
-  if (available !== undefined && largest > available)
-    throw new Error(`${name} needs about ${formatBytes(largest)} for its largest map download, but only ${formatBytes(available)} of storage is available for offline data.`)
-  const total = plan.requests.reduce((sum, part) => sum + part.bytes, 0)
-  const warning = available !== undefined && total > available
-    ? `${name} may need up to ${formatBytes(total)} for maps and ${formatBytes(available)} is available. Downloads that run out of space stop and can be resumed later.`
-    : undefined
-  hooks.phase?.(`Preparing ${name}…`)
-  await prepareRegionRouting(runtime, regionId)
+  let plan: MapPlan = { requests: [], skipped: [] }
+  let warning: string | undefined
+  if (groups.length) {
+    hooks.phase?.('Checking maps and storage…')
+    plan = await planMapPacks(runtime, selected, groups, hooks)
+    if (!plan.requests.length) throw new Error(plan.skipped.join(' · ') || 'Nothing of this kind is available for this area.')
+    // Check storage before the routing build starts. Only a part that cannot fit
+    // on its own is refused: summed estimates count tiles shared by neighbouring
+    // parts more than once, so a larger total is a warning, not a verdict.
+    const available = plan.available
+    const largest = Math.max(...plan.requests.map(part => part.bytes))
+    if (available !== undefined && largest > available)
+      throw new Error(`${name} needs about ${formatBytes(largest)} for its largest download, but only ${formatBytes(available)} of storage is available for offline data.`)
+    const total = plan.requests.reduce((sum, part) => sum + part.bytes, 0)
+    if (available !== undefined && total > available)
+      warning = `${name} may need up to ${formatBytes(total)} and ${formatBytes(available)} is available. Downloads that run out of space stop and can be resumed later.`
+  }
+  if (routing && regionId) {
+    hooks.phase?.(`Preparing routing for ${name}…`)
+    await prepareRegionRouting(runtime, regionId)
+  }
   const packs: PackSummary[] = []
   const skipped = [...plan.skipped]
   for (const [index, part] of plan.requests.entries()) {
-    if (plan.requests.length > 1) hooks.phase?.(`Queueing maps ${index + 1} of ${plan.requests.length}…`)
+    if (plan.requests.length > 1) hooks.phase?.(`Queueing downloads ${index + 1} of ${plan.requests.length}…`)
     try {
       const pack = await startPack(runtime, part.request)
       if (pack) packs.push(pack)
@@ -551,6 +643,6 @@ export async function startRegionDownload(
       skipped.push(`${part.name}: ${(reason as Error).message}`)
     }
   }
-  if (!packs.length) throw new Error(skipped.join(' · ') || 'No map downloads could be started.')
+  if (groups.length && !packs.length) throw new Error(skipped.join(' · ') || 'No downloads could be started.')
   return { area: selected, regionId, pack: packs[0], packs, skipped, warning }
 }

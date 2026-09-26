@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RuntimeConfig, RoutingDataStatus, PackSummary } from '../../../src/lib/offline'
 import { cancelRoutingData, prepareRoutingData, fetchPacks, cancelPack } from '../../../src/lib/offline'
 import { packFailure, startRegionDownload } from '../../../src/lib/offlineRegions'
-import type { DownloadArea } from '../../../src/lib/offlineRegions'
+import type { DownloadArea, DownloadResource } from '../../../src/lib/offlineRegions'
 
 export {
   RESOURCE_LABELS,
@@ -26,7 +26,7 @@ export function useDownloads(
   const [error, setError] = useState('')
   const [target, setTarget] = useState<{
     area: DownloadArea
-    region: string
+    region?: string
     pack?: string
   } | null>(null)
   const notified = useRef(new Set<string>())
@@ -63,8 +63,9 @@ export function useDownloads(
     }
   }, [packs, status, target, notify])
 
-  const start = async (area: DownloadArea) => {
-    if (!runtime.offline?.routing) {
+  /** Download some or all of an area's resources; everything by default. */
+  const start = async (area: DownloadArea, resources?: DownloadResource[]) => {
+    if (!runtime.offline?.routing && (!resources || resources.includes('routing'))) {
       notify('The local routing backend is unavailable.')
       return
     }
@@ -75,7 +76,7 @@ export function useDownloads(
       const { area: selected, regionId, pack, skipped, warning } = await startRegionDownload(runtime, area, {
         phase: setPhase,
         resolved: (resolved, region) => setTarget({ area: resolved, region }),
-      })
+      }, resources)
       if (pack) {
         // Retries now keep their pack ID. Replace its old failed snapshot before
         // allowing notifications for the new attempt.

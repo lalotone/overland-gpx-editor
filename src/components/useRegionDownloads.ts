@@ -2,13 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { cancelPack, cancelRoutingData, deletePack, fetchPacks, prepareRoutingData } from '../lib/offline'
 import type { PackSummary, RoutingDataStatus, RuntimeConfig } from '../lib/offline'
 import { packAreaName, packFailure, packIsActive, routingJobActive, startRegionDownload } from '../lib/offlineRegions'
-import type { DownloadArea } from '../lib/offlineRegions'
+import type { DownloadArea, DownloadResource } from '../lib/offlineRegions'
 
 type Notify = (message: string, type?: 'info' | 'success' | 'error') => void
 
 export interface DownloadTarget {
   area: DownloadArea
-  region: string
+  region?: string
   /** Every map pack this download started; large areas take several. */
   packs?: string[]
 }
@@ -87,8 +87,9 @@ export function useRegionDownloads({
     }
   }, [packs, routing, target, notify])
 
-  const start = async (area: DownloadArea) => {
-    if (!available) {
+  /** Download some or all of an area's resources; everything by default. */
+  const start = async (area: DownloadArea, resources?: DownloadResource[]) => {
+    if (!available && (!resources || resources.includes('routing'))) {
       notify('The local routing backend is unavailable.', 'error')
       return
     }
@@ -99,7 +100,7 @@ export function useRegionDownloads({
       const { area: selected, regionId, packs: started, skipped, warning } = await startRegionDownload(runtime, area, {
         phase: setPhase,
         resolved: (resolved, region) => setTarget({ area: resolved, region }),
-      })
+      }, resources)
       // Retries keep their pack ID. Replace old failed snapshots before
       // allowing notifications for the new attempt.
       const ids = new Set(started.map(item => item.id))

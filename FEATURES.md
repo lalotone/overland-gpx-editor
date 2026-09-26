@@ -134,8 +134,9 @@ the service is down, the OSM fuel layer answers as before.
 ## Offline preparation
 
 - Offline data is downloaded per city, region or country from **Offline
-  regions**, shared with the Android app: one Broom routing region plus a
-  regional map pack of vector maps, elevation, fuel, water and campsites.
+  regions**, shared with the Android app. Routing, maps, terrain and points of
+  interest download separately (routing alone is enough to plan online), or
+  all together.
   Opening a GPX or moving the map never starts a download. Countries too large
   for one pack download region by region through a server-side queue, sharing
   one country-wide routing graph.

@@ -557,7 +557,7 @@ html.dark .offline-regions-stages li.is-done {
 
 .offline-regions-resources li {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto 34px;
   align-items: center;
   gap: 5px 10px;
   padding: 10px 12px;
@@ -609,7 +609,13 @@ html.dark .offline-regions-resources strong.is-ready {
   border: 0;
 }
 
+.offline-regions-resource-action {
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
 .offline-regions-resources.is-compact li {
+  grid-template-columns: 1fr auto;
   padding: 2px 0;
   border: 0;
   font-size: 0.74rem;

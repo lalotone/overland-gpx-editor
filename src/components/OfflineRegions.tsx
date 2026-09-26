@@ -5,6 +5,10 @@ import type { PackSummary, RoutingDataJob, RoutingDataStatus, RuntimeConfig } fr
 import { searchPlaces } from '../lib/geocoding'
 import type { PlaceResult } from '../lib/geocoding'
 import {
+  PACK_GROUPS,
+  ROUTING_STAGES,
+  routingJobProgress,
+  RESOURCE_GROUPS,
   RESOURCE_LABELS,
   areaForRegion,
   boundsLabel,
@@ -15,21 +19,37 @@ import {
   mapsComplete,
   packAreaName,
   packFailure,
+  packGroups,
   packIsActive,
   resourceTransferText,
 } from '../lib/offlineRegions'
-import type { DownloadArea, DownloadRegion } from '../lib/offlineRegions'
+import type { AreaDownloadState, DownloadArea, DownloadRegion, DownloadResource, ResourceGroup } from '../lib/offlineRegions'
 import type { RegionDownloads } from './useRegionDownloads'
 import { ESCAPE_PRIORITY, useEscapeDismiss } from './useEscapeDismiss'
 import './OfflineRegions.css'
 
-const ROUTING_STAGES = [
-  { id: 'pbf', label: 'Road data' },
-  { id: 'planning', label: 'Select terrain tiles' },
-  { id: 'elevation', label: 'Terrain tiles' },
-  { id: 'build', label: 'Build routing graph' },
-  { id: 'warmup', label: 'Prepare riding profiles' },
-]
+
+const GROUP_HINTS: Record<ResourceGroup, string> = {
+  maps: 'Vector map tiles, zoom 5–14',
+  terrain: 'Elevation for profiles and slope colours',
+  places: 'Fuel stations and prices, water, campsites',
+}
+
+/** Sum a group's resources across the packs that hold them. */
+function groupProgress(state: AreaDownloadState, group: ResourceGroup) {
+  const kinds = RESOURCE_GROUPS[group].kinds
+  const present = kinds.map(kind => state.resources[kind]).filter(progress => progress !== undefined)
+  const unavailable = state.unavailable.filter(item => (item.resource && kinds.includes(item.resource)) || (group === 'maps' && item.layer === 'openfreemap'))
+  return {
+    done: present.reduce((sum, progress) => sum + progress.done, 0),
+    total: present.reduce((sum, progress) => sum + progress.total, 0),
+    failed: present.reduce((sum, progress) => sum + progress.failed, 0),
+    bytes: present.reduce((sum, progress) => sum + progress.bytes, 0),
+    transfer: group === 'maps' ? resourceTransferText(state.resources['vector-map']) : null,
+    unavailable,
+    allUnavailable: present.length === 0 && unavailable.length > 0,
+  }
+}
 
 type Tab = 'downloads' | 'browse'
 type Mode = 'cities' | 'regions' | 'countries'
@@ -56,7 +76,7 @@ function packState(pack: PackSummary): { label: string; tone: 'ready' | 'partial
 }
 
 function stageLabel(job: RoutingDataJob | undefined): string {
-  return ROUTING_STAGES.find(stage => stage.id === job?.phase)?.label ?? 'Checking routing data'
+  return routingJobProgress(job).label
 }
 
 function Icon({ name }: { name: 'download' | 'check' | 'close' | 'back' | 'forward' | 'search' | 'trash' | 'route' | 'map' | 'stop' }) {
@@ -349,7 +369,8 @@ export function OfflineRegionsDialog({
   }
 
   const routingJob = routing?.job
-  const routingPercent = percent(routingJob?.done, routingJob?.total)
+  const routingSteps = routingJobProgress(routingJob)
+  const routingPercent = routingSteps.overall === null ? null : Math.round(routingSteps.overall * 100)
   const stageIndex = ROUTING_STAGES.findIndex(stage => stage.id === routingJob?.phase)
   const routingProgress = downloads.routingBusy && routingJob && (
     <article className="offline-regions-card" aria-label={`Routing download ${regionName(routingJob.regionId)}`}>
@@ -374,6 +395,7 @@ export function OfflineRegionsDialog({
         ))}
       </ol>
       <progress max={100} value={routingPercent ?? undefined} aria-label="Routing download progress" />
+      {routingSteps.step > 0 && <small className="offline-regions-step">Step {routingSteps.step} of {routingSteps.steps} · {routingSteps.label}{routingPercent !== null ? ` · ${routingPercent}% overall` : ''}</small>}
       <small role="status">
         {routingJob.retrying
           ? `Retrying · attempt ${routingJob.attempt ?? 1}${routingJob.retrySeconds ? ` in ${Math.ceil(routingJob.retrySeconds)}s` : ''}`
@@ -381,7 +403,7 @@ export function OfflineRegionsDialog({
             ? `${routingJob.completedItems ?? 0}${routingJob.itemsTotal ? ` of ${routingJob.itemsTotal}` : ''} terrain tiles · ${routingJob.itemsDownloaded ?? 0} downloaded · ${routingJob.itemsReused ?? 0} reused`
             : routingJob.phase === 'pbf'
               ? `${formatBytes(routingJob.done ?? 0)}${routingJob.total ? ` of ${formatBytes(routingJob.total)}` : ''}`
-              : routingPercent !== null ? `${stageLabel(routingJob)} · ${routingPercent}%` : `${stageLabel(routingJob)}…`}
+              : `${stageLabel(routingJob)}…`}
       </small>
       {routingJob.upgrading && routing?.ready && <small>Your downloaded region stays available while it rebuilds.</small>}
     </article>
@@ -517,7 +539,9 @@ export function OfflineRegionsDialog({
             const name = packAreaName(pack)
             const state = packState(pack)
             const area = packArea(pack)
-            const resumable = state.tone !== 'ready' && area && pack.name?.startsWith('Map:')
+            // Resume only what this pack holds; routing is managed separately.
+            const packResources = packGroups(pack)
+            const resumable = state.tone !== 'ready' && area && packResources.length > 0 && !pack.name?.startsWith('Route:')
             return (
               <li className="offline-regions-row" key={pack.id}>
                 <button
@@ -549,7 +573,7 @@ export function OfflineRegionsDialog({
                         aria-label={`Resume ${name}`}
                         title={`Resume ${name}`}
                         disabled={downloads.preparing || downloads.downloading || offline || !routingAvailable}
-                        onClick={() => { openDetail({ area, record: null }); void downloads.start(area) }}
+                        onClick={() => { openDetail({ area, record: null }); void downloads.start(area, packResources) }}
                       >
                         <Icon name="download" />
                       </button>
@@ -681,9 +705,17 @@ export function OfflineRegionsDialog({
     const matchingTarget = target?.area.id === selected?.id ? target : undefined
     // Rebuilt from the catalogue so a country knows its sub-regions.
     const detailArea = (record && areaForRegion(record, catalogue)) || selected
+    const groups = Object.fromEntries(PACK_GROUPS.map(group => [group, areaDownloadState(downloads.packs, detailArea, group)])) as Record<ResourceGroup, AreaDownloadState>
     const maps = areaDownloadState(downloads.packs, detailArea)
     const hasMaps = maps.packs.length > 0
     const finishedParts = maps.packs.filter(pack => pack.status === 'complete').length
+    const otherRegionPreparing = downloads.routingBusy && !regionRunning
+    const missing: DownloadResource[] = [
+      ...(regionInstalled || regionRunning || !routingAvailable ? [] : ['routing' as const]),
+      ...PACK_GROUPS.filter(group => !groups[group].complete && !groups[group].active),
+    ]
+    const nothingYet = !regionInstalled && !regionRunning && PACK_GROUPS.every(group => !groups[group].packs.length)
+    const failedPack = PACK_GROUPS.map(group => groups[group]).find(state => state.failed && !state.active)?.failed
     const children = record ? catalogue.filter(region => region.parent === record.id) : []
     // No catalogue regions to offer: a too-large area splits into a grid.
     const areaParts = detailArea && children.length === 0 ? gridParts(detailArea) : []
@@ -713,70 +745,109 @@ export function OfflineRegionsDialog({
         {matchingTarget && downloads.preparing && (
           <p className="offline-regions-working" role="status"><span className="offline-regions-spinner" />{downloads.phase}</p>
         )}
-        <ul className="offline-regions-resources">
+        <ul className="offline-regions-resources" aria-label="Resources">
           <li>
             <span className="offline-regions-resource-name"><Icon name="route" />Routing</span>
             <strong className={regionInstalled && !regionRunning ? 'is-ready' : ''}>
-              {regionRunning ? stageLabel(job) : regionInstalled ? 'Downloaded' : regionID ? 'Not downloaded' : 'Not checked yet'}
+              {regionRunning
+                ? routingJobProgress(job).step ? `Step ${routingJobProgress(job).step}/${routingJobProgress(job).steps} · ${stageLabel(job)}` : stageLabel(job)
+                : regionInstalled ? 'Downloaded' : regionID ? 'Not downloaded' : 'Not checked yet'}
             </strong>
-            {regionRunning && <progress max={job?.total || undefined} value={job?.total ? (job.done ?? 0) : undefined} aria-label="Routing progress" />}
+            <span className="offline-regions-resource-action">
+              {regionRunning ? (
+                <button type="button" className="offline-regions-icon-button" aria-label="Stop routing download" title="Stop routing download" disabled={downloads.busyPack !== null} onClick={() => void downloads.stopRouting()}>
+                  <Icon name="stop" />
+                </button>
+              ) : !regionInstalled && (
+                <button
+                  type="button"
+                  className="offline-regions-icon-button"
+                  aria-label="Download routing"
+                  title={otherRegionPreparing ? 'Another region is preparing routing' : 'Download routing'}
+                  disabled={!detailArea || downloads.preparing || offline || !routingAvailable || otherRegionPreparing}
+                  onClick={() => detailArea && void downloads.start(detailArea, ['routing'])}
+                >
+                  <Icon name="download" />
+                </button>
+              )}
+            </span>
+            <small>Needed to plan routes, online or offline{regionInstalled && regionID !== routing?.regionId ? ' · downloaded, not in use' : ''}</small>
+            {regionRunning && <progress max={100} value={routingJobProgress(job).overall === null ? undefined : Math.round(routingJobProgress(job).overall! * 100)} aria-label="Routing progress" />}
           </li>
-          {Object.entries(RESOURCE_LABELS).map(([kind, label]) => {
-            const progress = hasMaps ? maps.resources[kind] : undefined
-            const unavailable = maps.unavailable.find(item => item.resource === kind || (kind === 'vector-map' && item.layer === 'openfreemap'))
-            const done = Boolean(
-              progress && progress.total > 0 && progress.done === progress.total && !progress.failed && !unavailable && maps.covers,
-            )
-            const transfer = resourceTransferText(progress)
+          {PACK_GROUPS.map(group => {
+            const state = groups[group]
+            const { label } = RESOURCE_GROUPS[group]
+            const progress = groupProgress(state, group)
+            const done = state.complete
             return (
-              <li key={kind}>
+              <li key={group}>
                 <span className="offline-regions-resource-name"><Icon name={done ? 'check' : 'map'} />{label}</span>
-                <strong className={done ? 'is-ready' : progress?.failed ? 'is-failed' : ''}>
-                  {unavailable
+                <strong className={done ? 'is-ready' : progress.failed ? 'is-failed' : ''}>
+                  {progress.allUnavailable
                     ? 'Provider limit'
                     : done
                       ? 'Downloaded'
-                      : progress?.failed
-                        ? `${progress.failed} missing`
-                        : maps.active
-                          ? `${progress?.done ?? 0} / ${progress?.total ?? '…'}`
-                          : progress && !maps.covers ? 'Partial area' : 'Not downloaded'}
+                      : state.active
+                        ? state.packs.every(pack => pack.status === 'queued' || !packIsActive(pack))
+                          ? 'Queued'
+                          : `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()}`
+                        : progress.failed
+                          ? `${progress.failed} missing`
+                          : state.packs.length && !state.covers ? 'Partial area' : state.packs.length ? 'Incomplete' : 'Not downloaded'}
                 </strong>
-                {progress && maps.active && !done && !unavailable && <progress max={progress.total || 1} value={progress.done} aria-label={`${label} progress`} />}
-                {(transfer || (progress && progress.bytes > 0) || unavailable) && (
-                  <small>{[transfer, progress && progress.bytes > 0 ? `${formatBytes(progress.bytes)} stored` : '', unavailable?.reason].filter(Boolean).join(' · ')}</small>
-                )}
+                <span className="offline-regions-resource-action">
+                  {!done && !state.active && (
+                    <button
+                      type="button"
+                      className="offline-regions-icon-button"
+                      aria-label={`Download ${label.toLowerCase()}`}
+                      title={`Download ${label.toLowerCase()}`}
+                      disabled={!detailArea || downloads.preparing || offline}
+                      onClick={() => detailArea && void downloads.start(detailArea, [group])}
+                    >
+                      <Icon name="download" />
+                    </button>
+                  )}
+                </span>
+                <small>
+                  {[
+                    GROUP_HINTS[group],
+                    progress.transfer,
+                    progress.bytes > 0 ? `${formatBytes(progress.bytes)} stored` : '',
+                    // Every part of a large area reports the same limit; say it once.
+                    ...new Set(progress.unavailable.map(item => item.reason)),
+                  ].filter(Boolean).join(' · ')}
+                </small>
+                {state.active && <progress max={progress.total || 1} value={progress.done} aria-label={`${label} progress`} />}
               </li>
             )
           })}
         </ul>
-        {maps.failed && !maps.active && <p className="offline-regions-error" role="alert">{maps.packs.length > 1 ? `${packAreaName(maps.failed)}: ` : ''}{packFailure(maps.failed)}</p>}
+        {failedPack && <p className="offline-regions-error" role="alert">{maps.packs.length > 1 ? `${packAreaName(failedPack)}: ` : ''}{packFailure(failedPack)}</p>}
         {matchingTarget && downloads.error && <p className="offline-regions-error" role="alert">{downloads.error}</p>}
         {regionRunning && routing?.error && <p className="offline-regions-error" role="alert">{routing.error}</p>}
         <div className="offline-regions-detail-actions">
-          {downloads.downloading ? (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={!detailArea || !missing.length || downloads.preparing || offline || (missing.includes('routing') && otherRegionPreparing)}
+            onClick={() => detailArea && void downloads.start(detailArea, missing)}
+          >
+            <Icon name="download" />
+            {downloads.preparing
+              ? 'Preparing…'
+              : !missing.length
+                ? 'Everything downloaded'
+                : nothingYet ? 'Download everything' : 'Download the rest'}
+          </button>
+          {downloads.downloading && (
             <button type="button" className="btn btn-ghost btn-sm" disabled={downloads.busyPack !== null} onClick={() => void downloads.stopAll()}>
               <Icon name="stop" />Stop downloads
             </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={!selected || downloads.preparing || offline || !routingAvailable}
-              onClick={() => detailArea && void downloads.start(detailArea)}
-            >
-              <Icon name="download" />
-              {downloads.preparing ? 'Preparing…' : regionInstalled || hasMaps ? 'Download missing resources' : `Download ${selected?.name ?? record?.name}`}
-            </button>
           )}
           {regionInstalled && regionID && regionID !== routing?.regionId && (
-            <button type="button" className="btn btn-ghost btn-sm" disabled={downloads.preparing || downloads.downloading} onClick={() => void downloads.useRegion(regionID)}>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={downloads.preparing || downloads.routingBusy} onClick={() => void downloads.useRegion(regionID)}>
               Use for routing
-            </button>
-          )}
-          {!regionInstalled && record && matchingTarget && downloads.error && (
-            <button type="button" className="btn btn-ghost btn-sm" disabled={downloads.preparing || downloads.downloading || offline} onClick={() => void downloads.useRegion(record.id)}>
-              Download routing only
             </button>
           )}
         </div>

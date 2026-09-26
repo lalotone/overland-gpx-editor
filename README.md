@@ -211,9 +211,14 @@ The Go server keeps policy-permitted provider responses in
 `$XDG_CACHE_HOME/overland/responses` (normally
 `~/.cache/overland/responses`). Offline data is downloaded by region, the same
 way as on Android: open **Offline regions** (next to Work offline on every
-screen) and pick a city, region or country under **Add region**. A region
-download fetches its Broom routing extract plus one map pack covering vector
-maps (zooms 5–14), elevation, fuel prices and stations, water and campsites.
+screen) and pick a city, region or country under **Add region**. A region has
+four resources that download separately, as in OsmAnd: **Routing** (the Broom
+extract, needed to plan routes even online), **Maps** (vector tiles, zooms
+5–14), **Terrain** (elevation) and **Points of interest** (fuel stations and
+prices, water, campsites). Maps, terrain and POIs are fetched as you view them
+while online, so download them only for areas you will ride offline. Each has
+its own button in the region view; **Download everything** or **Download the
+rest** takes whatever is missing.
 One map pack holds at most 100,000 resources, so a large country downloads its
 maps region by region while routing uses the single country extract. Most
 countries are one extract with no catalogue regions (Geofabrik divides only

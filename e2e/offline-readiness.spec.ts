@@ -498,7 +498,9 @@ test('offline regions manager downloads a region and reports its progress', asyn
   await manager.getByRole('button', { name: 'Back' }).click()
   await manager.getByRole('tab', { name: 'Downloads' }).click()
   const routingCard = manager.getByRole('article', { name: 'Routing download Aragon' })
-  await expect(routingCard.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '50')
+  // Step 3 of 5, 12 of 55 terrain tiles: (2 + 12/55) / 5 of the whole preparation.
+  await expect(routingCard.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '44')
+  await expect(routingCard).toContainText('Step 3 of 5 · Terrain tiles · 44% overall')
   await expect(routingCard).toContainText('12 of 55 terrain tiles · 8 downloaded · 4 reused')
   await expect(manager.getByText('4.00 KiB of routing data (last measured)')).toBeVisible()
   // Storage inspection is explicit (once per opening), never part of polling.
@@ -578,7 +580,7 @@ test('a country too large for one pack downloads region by region', async ({ pag
   expect(estimated).toEqual(['Map: Aragon', 'Map: Cataluña'])
   expect(prepared).toEqual(['spain'])
   await expect(manager.getByText('Maps are split into 2 downloads', { exact: false })).toBeVisible()
-  await expect(manager.locator('.offline-regions-resources li').filter({ hasText: 'Vector maps' })).toContainText('3 / 18')
+  await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('3 / 18')
 
   await manager.getByRole('button', { name: 'Back' }).click()
   await manager.getByRole('tab', { name: 'Downloads' }).click()
@@ -634,6 +636,67 @@ test('a country without catalogue regions offers grid areas to download one by o
   await expect.poll(() => started).toEqual(['Map: Morocco · row 2, column 1'])
   expect(prepared).toEqual(['morocco'])
   await expect(manager.getByRole('heading', { name: 'Morocco · row 2, column 1' })).toBeVisible()
+})
+
+test('routing and each offline resource download separately', async ({ page }) => {
+  await mockRuntime(page)
+  const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }
+  const prepared: string[] = []
+  const requests: { name: string; layers: string[]; scopes: string[] }[] = []
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: false, cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [{ id: 'spain/aragon', name: 'Aragon', kind: 'region', bbox: aragon, installed: false, active: false }],
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    prepared.push((route.request().postDataJSON() as { regionId: string }).regionId)
+    return json(route, { enabled: true, ready: false, cached: [] }, 202)
+  })
+  await page.route(/\/offline\/packs\/estimate$/, route => json(route, { resources: 9, counts: {}, blocked: [], scopes: {} }))
+  const packs: Record<string, unknown>[] = []
+  await page.route(/\/offline\/packs$/, route => {
+    if (route.request().method() !== 'POST') return json(route, packs)
+    const request = route.request().postDataJSON() as { name: string; layers: string[]; scopes: string[]; bbox: number[] }
+    requests.push({ name: request.name, layers: request.layers, scopes: request.scopes })
+    const pack = {
+      id: String(packs.length + 1).padStart(32, 'c'), name: request.name, state: 'complete', done: 3, total: 3,
+      bbox: { south: request.bbox[0], west: request.bbox[1], north: request.bbox[2], east: request.bbox[3] },
+      resources: { 'vector-map': { done: 3, total: 3, failed: 0, bytes: 10, items: 0 } },
+    }
+    packs.push(pack)
+    return json(route, pack, 202)
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await manager.getByRole('button', { name: 'Aragon', exact: false }).first().click()
+  const resources = manager.getByRole('list', { name: 'Resources' })
+  await expect(resources.getByRole('listitem')).toHaveCount(4)
+  await expect(manager.getByRole('button', { name: 'Download everything' })).toBeEnabled()
+
+  // Maps alone: no routing, and only the map layer.
+  await resources.getByRole('button', { name: 'Download maps' }).click()
+  await expect.poll(() => requests).toEqual([{ name: 'Maps: Aragon', layers: ['openfreemap'], scopes: [] }])
+  expect(prepared).toEqual([])
+  await expect(resources.getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('Downloaded')
+  await expect(resources.getByRole('button', { name: 'Download maps' })).toHaveCount(0)
+
+  // Routing alone: no packs.
+  await resources.getByRole('button', { name: 'Download routing' }).click()
+  await expect.poll(() => prepared).toEqual(['spain/aragon'])
+  expect(requests).toHaveLength(1)
+
+  // The rest: terrain and points of interest together, no routing again.
+  await expect(manager.getByRole('button', { name: 'Download the rest' })).toBeEnabled()
+  await manager.getByRole('button', { name: 'Download the rest' }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  expect(requests[1]).toEqual({ name: 'Terrain + Points of interest: Aragon', layers: [], scopes: ['elevation', 'pois', 'fuel'] })
 })
 
 test('offline regions manager lists, inspects and removes stored downloads', async ({ page }) => {
@@ -700,7 +763,7 @@ test('offline regions manager lists, inspects and removes stored downloads', asy
   await regions.getByRole('button', { name: /Aragon/ }).first().click()
   await expect(manager.getByRole('heading', { name: 'Aragon' })).toBeVisible()
   await expect(manager).toContainText('In use for routing')
-  await expect(manager.locator('.offline-regions-resources li').filter({ hasText: 'Vector maps' })).toContainText('Downloaded')
+  await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('Downloaded')
   await page.keyboard.press('Escape')
   await expect(manager.getByRole('heading', { name: 'Offline regions' })).toBeVisible()
   await page.keyboard.press('Escape')

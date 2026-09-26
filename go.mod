@@ -3,7 +3,7 @@ module github.com/lalotone/overland-gpx-editor
 go 1.27.0
 
 require (
-	code.rbel.co/rubiojr/broom v0.13.1
+	code.rbel.co/rubiojr/broom v0.13.2
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-chi/cors v1.2.2

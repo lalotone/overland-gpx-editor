@@ -1,6 +1,7 @@
 import {
   PackTooLargeError,
   estimatePack,
+  fetchRoutingDataStatus,
   formatBytes,
   normalizePackBounds,
   prepareRoutingData,
@@ -135,24 +136,125 @@ export function areaForRegion(region: DownloadRegion, catalogue: DownloadRegion[
   }
 }
 
-const SPLIT_DEPTH = 3
+// Zooms every region download stores (regionalPackRequest) and the zoom the
+// server keeps terrain at.
+const MAP_MIN_ZOOM = 5
+const MAP_MAX_ZOOM = 14
+const TERRAIN_ZOOM = 13
+// One pack holds 100,000 resources and 16,384 terrain tiles. Parts aim well
+// below both: neighbouring parts repeat low-zoom tiles, and the server adds
+// glyphs, POIs and fuel on top.
+const PART_MAP_TILES = 75_000
+const PART_TERRAIN_TILES = 14_000
+const MAX_GRID_PARTS = 400
+// Halvings allowed when the server still finds a part too large.
+const SPLIT_DEPTH = 2
 
 function longitudeSpan(bounds: PackBounds): number {
   return bounds.east >= bounds.west ? bounds.east - bounds.west : bounds.east + 360 - bounds.west
 }
 
-/** Halve an area across its longer side; used when it has no sub-regions. */
+function wrapLongitude(value: number): number {
+  return value >= 180 ? value - 360 : value
+}
+
+/** Web Mercator y in [0, 1], north at 0. */
+function mercatorY(lat: number): number {
+  const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180
+  return (1 - Math.log(Math.tan(clamped) + 1 / Math.cos(clamped)) / Math.PI) / 2
+}
+
+function latitudeAt(y: number): number {
+  return Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI
+}
+
+function tilesAt(bounds: PackBounds, zoom: number): number {
+  const n = 2 ** zoom
+  const column = (lon: number) => Math.min(n - 1, Math.floor(((lon + 180) / 360) * n))
+  const x0 = column(bounds.west)
+  const x1 = column(bounds.east)
+  const columns = bounds.east >= bounds.west ? x1 - x0 + 1 : n - x0 + x1 + 1
+  const rows = Math.min(n - 1, Math.floor(mercatorY(bounds.south) * n)) - Math.floor(mercatorY(bounds.north) * n) + 1
+  return columns * rows
+}
+
+/** Tiles a bbox spans over a zoom range, as the server enumerates them. */
+export function tileCount(bounds: PackBounds, minZoom = MAP_MIN_ZOOM, maxZoom = MAP_MAX_ZOOM): number {
+  let total = 0
+  for (let zoom = minZoom; zoom <= maxZoom; zoom++) total += tilesAt(bounds, zoom)
+  return total
+}
+
+function fitsOnePack(bounds: PackBounds): boolean {
+  return tileCount(bounds) <= PART_MAP_TILES && tilesAt(bounds, TERRAIN_ZOOM) <= PART_TERRAIN_TILES
+}
+
+function gridLabel(row: number, rows: number, column: number, columns: number): string {
+  const words = (count: number, names: string[][]) => count <= 3 ? names[count - 1] : undefined
+  const vertical = words(rows, [[''], ['north', 'south'], ['north', 'central', 'south']])?.[row]
+  const horizontal = words(columns, [[''], ['west', 'east'], ['west', 'central', 'east']])?.[column]
+  if (vertical === undefined || horizontal === undefined) return `row ${row + 1}, column ${column + 1}`
+  if (vertical === 'central' && horizontal === 'central') return 'centre'
+  return [vertical, horizontal].filter(Boolean).join('-')
+}
+
+/**
+ * Split an area too large for one pack into a grid of parts that each fit,
+ * or nothing when it fits already. Rows are even in Mercator space, so parts
+ * carry similar tile counts. Deterministic: the same bounds always give the
+ * same parts, which is how a later visit recognises a gridded download.
+ */
+export function gridParts(area: DownloadArea): DownloadArea[] {
+  if (fitsOnePack(area.bounds)) return []
+  const top = mercatorY(area.bounds.north)
+  const bottom = mercatorY(area.bounds.south)
+  const span = longitudeSpan(area.bounds)
+  const aspect = Math.max(1e-6, (span / 360) / Math.max(1e-6, bottom - top))
+  let count = Math.ceil(Math.max(
+    tileCount(area.bounds) / PART_MAP_TILES,
+    tilesAt(area.bounds, TERRAIN_ZOOM) / PART_TERRAIN_TILES,
+  ))
+  for (;;) {
+    const columns = Math.max(1, Math.round(Math.sqrt(count * aspect)))
+    const rows = Math.max(1, Math.ceil(count / columns))
+    const parts: DownloadArea[] = []
+    for (let row = 0; row < rows; row++) {
+      const north = latitudeAt(top + ((bottom - top) * row) / rows)
+      const south = latitudeAt(top + ((bottom - top) * (row + 1)) / rows)
+      for (let column = 0; column < columns; column++) {
+        const west = wrapLongitude(area.bounds.west + (span * column) / columns)
+        const east = column === columns - 1 ? area.bounds.east : wrapLongitude(area.bounds.west + (span * (column + 1)) / columns)
+        parts.push({
+          id: `${area.id}:${row}-${column}`,
+          name: `${area.name} · ${gridLabel(row, rows, column, columns)}`,
+          kind: 'area',
+          bounds: { south: row === rows - 1 ? area.bounds.south : south, west, north: row === 0 ? area.bounds.north : north, east },
+          ...(area.regionId ? { regionId: area.regionId } : {}),
+        })
+      }
+    }
+    if (parts.every(part => fitsOnePack(part.bounds)) || parts.length >= MAX_GRID_PARTS) return parts
+    count++
+  }
+}
+
+/** The parts a too-large area downloads as: its catalogue sub-regions, else a grid. */
+export function downloadParts(area: DownloadArea): DownloadArea[] {
+  if (fitsOnePack(area.bounds)) return []
+  return area.parts?.length ? area.parts : gridParts(area)
+}
+
+/** Halve an area across its longer side, when the server finds a part too large. */
 export function splitArea(area: DownloadArea): DownloadArea[] {
   const { south, west, north, east } = area.bounds
   const span = longitudeSpan(area.bounds)
   const half = (suffix: string, bounds: PackBounds): DownloadArea =>
-    ({ id: `${area.id}:${suffix}`, name: `${area.name} · ${suffix}`, kind: 'area', bounds })
+    ({ id: `${area.id}:${suffix}`, name: `${area.name} · ${suffix}`, kind: 'area', bounds, ...(area.regionId ? { regionId: area.regionId } : {}) })
   if (span * Math.cos(((south + north) / 2) * Math.PI / 180) >= north - south) {
-    let middle = west + span / 2
-    if (middle >= 180) middle -= 360
+    const middle = wrapLongitude(west + span / 2)
     return [half('west', { south, west, north, east: middle }), half('east', { south, west: middle, north, east })]
   }
-  const middle = (south + north) / 2
+  const middle = latitudeAt((mercatorY(south) + mercatorY(north)) / 2)
   return [half('south', { south, west, north: middle, east }), half('north', { south: middle, west, north, east })]
 }
 
@@ -171,9 +273,11 @@ function coveringPack(packs: PackSummary[], bounds: PackBounds): PackSummary | u
 }
 
 function areaParts(packs: PackSummary[], area: DownloadArea, depth: number): DownloadArea[] {
-  if (area.parts?.length) return area.parts
-  const prefix = `Map: ${area.name} · `
-  return depth < SPLIT_DEPTH && packs.some(pack => pack.name?.startsWith(prefix)) ? splitArea(area) : []
+  const planned = area.parts?.length ? area.parts : gridParts(area)
+  if (planned.length) return planned
+  // A part the server still found too large was halved; its halves lie inside.
+  const halved = depth < SPLIT_DEPTH && packs.some(pack => pack.bbox && coversBounds(area.bounds, pack.bbox) && !coversBounds(pack.bbox, area.bounds))
+  return halved ? splitArea(area) : []
 }
 
 function collectAreaPacks(packs: PackSummary[], area: DownloadArea, depth: number, found: Map<string, PackSummary>): number {
@@ -331,7 +435,9 @@ interface MapPlan {
 }
 
 /** One pack request per piece of the area that fits the pack limits. */
-async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: RegionDownloadHooks, depth = 0): Promise<MapPlan> {
+async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: RegionDownloadHooks, depth = 0, top = true): Promise<MapPlan> {
+  const known = downloadParts(area)
+  if (known.length) return planPartPacks(runtime, known, hooks, depth)
   const request = regionalPackRequest(area)
   try {
     const estimate = await estimatePack(runtime, request)
@@ -342,22 +448,47 @@ async function planMapPacks(runtime: RuntimeConfig, area: DownloadArea, hooks: R
     if (!estimate.resources) throw new Error('No map resources are available for this area.')
     return { requests: [{ name: area.name, request, bytes: estimate.genericBytes ?? 0 }], skipped: [], available: estimate.quotaRemaining }
   } catch (reason) {
-    const parts = reason instanceof PackTooLargeError
-      ? area.parts?.length ? area.parts : depth < SPLIT_DEPTH ? splitArea(area) : []
+    // The arithmetic says it fits but the server disagrees (more map sources,
+    // say): halve it, a bounded number of times.
+    const parts = reason instanceof PackTooLargeError && depth < SPLIT_DEPTH
+      ? area.parts?.length ? area.parts : splitArea(area)
       : []
     if (!parts.length) {
-      if (depth === 0) throw reason
+      if (top) throw reason
       return { requests: [], skipped: [`${area.name}: ${(reason as Error).message}`] }
     }
-    const plan: MapPlan = { requests: [], skipped: [] }
-    for (const [index, part] of parts.entries()) {
-      hooks.phase?.(`Checking maps for ${part.name} (${index + 1}/${parts.length})…`)
-      const partPlan = await planMapPacks(runtime, part, hooks, depth + 1)
-      plan.requests.push(...partPlan.requests)
-      plan.skipped.push(...partPlan.skipped)
-      plan.available = partPlan.available ?? plan.available
+    return planPartPacks(runtime, parts, hooks, depth + 1)
+  }
+}
+
+async function planPartPacks(runtime: RuntimeConfig, parts: DownloadArea[], hooks: RegionDownloadHooks, depth: number): Promise<MapPlan> {
+  const plan: MapPlan = { requests: [], skipped: [] }
+  for (const [index, part] of parts.entries()) {
+    hooks.phase?.(`Checking maps for ${part.name} (${index + 1}/${parts.length})…`)
+    const partPlan = await planMapPacks(runtime, part, hooks, depth, false)
+    plan.requests.push(...partPlan.requests)
+    plan.skipped.push(...partPlan.skipped)
+    plan.available = partPlan.available ?? plan.available
+  }
+  return plan
+}
+
+/**
+ * Start routing preparation, or share one already running for the same
+ * region — downloading one area of a country while another area of it is
+ * preparing. A different region's preparation must finish first.
+ */
+async function prepareRegionRouting(runtime: RuntimeConfig, regionId: string): Promise<void> {
+  try {
+    await prepareRoutingData(runtime, regionId)
+  } catch (reason) {
+    const status = await fetchRoutingDataStatus(runtime).catch(() => null)
+    const job = status?.job
+    if (job && (job.state === 'queued' || job.state === 'running')) {
+      if (job.regionId === regionId) return
+      throw new Error(`Routing for ${status.name && status.regionId === job.regionId ? status.name : job.regionId} is still being prepared. Start this download when it finishes.`)
     }
-    return plan
+    throw reason
   }
 }
 
@@ -406,7 +537,7 @@ export async function startRegionDownload(
     ? `${name} may need up to ${formatBytes(total)} for maps and ${formatBytes(available)} is available. Downloads that run out of space stop and can be resumed later.`
     : undefined
   hooks.phase?.(`Preparing ${name}…`)
-  await prepareRoutingData(runtime, regionId)
+  await prepareRegionRouting(runtime, regionId)
   const packs: PackSummary[] = []
   const skipped = [...plan.skipped]
   for (const [index, part] of plan.requests.entries()) {

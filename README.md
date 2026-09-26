@@ -215,8 +215,10 @@ screen) and pick a city, region or country under **Add region**. A region
 download fetches its Broom routing extract plus one map pack covering vector
 maps (zooms 5–14), elevation, fuel prices and stations, water and campsites.
 One map pack holds at most 100,000 resources, so a large country downloads its
-maps region by region (halving any region still too large) while routing uses
-the single country extract. Two packs run at a time; the rest wait in the
+maps region by region while routing uses the single country extract. Most
+countries are one extract with no catalogue regions (Geofabrik divides only
+about 18, Spain and France among them); those are split into a grid of map
+areas instead, each of which can also be downloaded on its own. Two packs run at a time; the rest wait in the
 server's queue, so closing the browser does not stop them.
 The **Downloads** tab shows routing stages and per-resource progress, lets you
 stop downloads, switch routing to another downloaded region, resume partial

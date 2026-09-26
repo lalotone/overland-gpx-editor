@@ -39,8 +39,8 @@ continues to use its existing entry point.
 Regional downloads process up to 100,000 resources in bounded batches of 128,
 with four vector-tile workers under the shared four-request provider limit. One durable pack owns every batch, so later batches
 cannot evict earlier downloaded tiles. Areas beyond that limit, such as most
-countries, are downloaded as one pack per region (halving regions still too
-large) behind the country's single routing extract; packs beyond the two
+countries, are downloaded as one pack per region, or per grid area where the
+catalogue has no regions, behind the country's single routing extract; packs beyond the two
 running jobs wait in the backend queue. Ordinary trip packs keep their
 10,000-resource limit. Region manifests checkpoint batches and always flush their
 terminal state; interrupted downloads can reuse existing cached resources.

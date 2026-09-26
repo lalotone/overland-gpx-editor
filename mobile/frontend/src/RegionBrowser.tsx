@@ -6,7 +6,7 @@ import type { PlaceResult } from '../../../src/lib/geocoding'
 import { request } from './model'
 import Icon from './Icon'
 import { RESOURCE_LABELS, packFailure, resourceTransferText, coverageLabel, boundsLabel } from './downloads'
-import { areaDownloadState, areaForRegion, mapsComplete, savedMapAreas } from '../../../src/lib/offlineRegions'
+import { areaDownloadState, areaForRegion, gridParts, mapsComplete, savedMapAreas } from '../../../src/lib/offlineRegions'
 import type { DownloadArea, DownloadRegion, Downloads } from './downloads'
 
 function normalized(value: string) {
@@ -169,8 +169,40 @@ export default function RegionBrowser({
   const regionChildren = selectedRecord
     ? catalogue.filter((region) => region.parent === selectedRecord.id)
     : []
+  // No catalogue regions to offer: a too-large area splits into a grid.
+  const areaParts = detailArea && regionChildren.length === 0 ? gridParts(detailArea) : []
   const isOffline = runtime.offline?.mode === 'cache-only'
   const savedAreas = savedMapAreas(downloads.packs)
+
+  const partRow = (part: DownloadArea) => {
+    const state = areaDownloadState(downloads.packs, part)
+    return (
+      <button
+        className="list-row"
+        key={part.id}
+        onClick={() => {
+          if (selectedRecord) setTrail((previous) => [...previous, selectedRecord])
+          setSelectedRecord(null)
+          setSelected(part)
+        }}
+      >
+        <Icon name={state.complete ? 'check' : 'layers'} />
+        <span>
+          {part.name}
+          <small>
+            {state.complete
+              ? 'Downloaded'
+              : state.active
+                ? 'Downloading…'
+                : state.covers
+                  ? 'Partial download'
+                  : boundsLabel(part.bounds)}
+          </small>
+        </span>
+        <Icon name="arrow" size={18} />
+      </button>
+    )
+  }
 
   const row = (region: DownloadRegion) => {
     const downloaded = installed.has(region.id) || region.installed
@@ -209,6 +241,14 @@ export default function RegionBrowser({
       </div>
     )
   }
+  // Most countries are a single extract with no catalogue regions: offer the
+  // country itself and its map areas instead of an empty list.
+  const unsplitCountry =
+    mode === 'regions' && country && !catalogue.some((region) => region.parent === country)
+      ? byID.get(country)
+      : undefined
+  const unsplitArea = unsplitCountry ? areaFor(unsplitCountry) : null
+  const unsplitAreas = unsplitArea ? gridParts(unsplitArea) : []
   const filtered = catalogue.filter(
     (region) =>
       region.kind === (mode === 'countries' ? 'country' : 'region') &&
@@ -283,10 +323,11 @@ export default function RegionBrowser({
               Map downloads cover the city. Routing uses the provider's covering regional extract.
             </p>
           )}
-          {selectedRecord?.kind === 'country' && regionChildren.length > 0 && maps.packs.length === 0 && (
+          {(regionChildren.length > 0 || areaParts.length > 0) && maps.packs.length === 0 && (
             <p className="muted">
-              Large countries download their maps region by region, queued one after another.
-              Routing uses the whole-country extract.
+              Too large for one download, so its maps download{' '}
+              {regionChildren.length > 0 ? 'region by region' : `as ${areaParts.length} areas`}, queued
+              one after another. Routing uses the single extract. Download it all, or pick below.
             </p>
           )}
           {matchingTarget && downloads.preparing && (
@@ -448,6 +489,14 @@ export default function RegionBrowser({
               {regionChildren.map(row)}
             </>
           )}
+          {areaParts.length > 0 && (
+            <>
+              <div className="section-heading">
+                <h3>Choose a smaller area</h3>
+              </div>
+              {areaParts.map(partRow)}
+            </>
+          )}
           {!selected && <p className="muted">Connect once to load this region's map boundaries.</p>}
         </div>
       ) : (
@@ -593,7 +642,25 @@ export default function RegionBrowser({
                   </h3>
                 </div>
                 {filtered.map(row)}
-                {!loading && !filtered.length && (
+                {!loading && !filtered.length && unsplitCountry && !query && (
+                  <>
+                    <p className="muted catalog-message">
+                      The routing catalogue does not divide {unsplitCountry.name} into regions.
+                      Download the whole country
+                      {unsplitAreas.length ? ', or just the map areas you need' : ''}.
+                    </p>
+                    {row(unsplitCountry)}
+                    {unsplitAreas.length > 0 && (
+                      <>
+                        <div className="section-heading">
+                          <h3>{unsplitCountry.name} · areas</h3>
+                        </div>
+                        {unsplitAreas.map(partRow)}
+                      </>
+                    )}
+                  </>
+                )}
+                {!loading && !filtered.length && !(unsplitCountry && !query) && (
                   <p className="muted catalog-message">No matching regions.</p>
                 )}
               </>

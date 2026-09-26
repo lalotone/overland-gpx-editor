@@ -574,7 +574,8 @@ test('a country too large for one pack downloads region by region', async ({ pag
   await manager.getByRole('button', { name: 'Download Spain' }).click()
 
   await expect.poll(() => packs.length).toBe(2)
-  expect(estimated).toEqual(['Map: Spain', 'Map: Aragon', 'Map: Cataluña'])
+  // Too large by arithmetic, so the whole country is never estimated.
+  expect(estimated).toEqual(['Map: Aragon', 'Map: Cataluña'])
   expect(prepared).toEqual(['spain'])
   await expect(manager.getByText('Maps are split into 2 downloads', { exact: false })).toBeVisible()
   await expect(manager.locator('.offline-regions-resources li').filter({ hasText: 'Vector maps' })).toContainText('3 / 18')
@@ -585,6 +586,54 @@ test('a country too large for one pack downloads region by region', async ({ pag
   const queue = manager.getByRole('article', { name: 'Queued map downloads' })
   await expect(queue).toContainText('Cataluña')
   await expect(queue.getByRole('button', { name: 'Stop Cataluña' })).toBeVisible()
+})
+
+test('a country without catalogue regions offers grid areas to download one by one', async ({ page }) => {
+  await mockRuntime(page)
+  const prepared: string[] = []
+  const started: string[] = []
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: false, cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [{ id: 'morocco', name: 'Morocco', kind: 'country', bbox: { south: 20.7, west: -17.1, north: 35.95, east: -1 }, installed: false, active: false }],
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    prepared.push((route.request().postDataJSON() as { regionId: string }).regionId)
+    return json(route, { enabled: true, ready: false, cached: [] }, 202)
+  })
+  await page.route(/\/offline\/packs\/estimate$/, route => json(route, { resources: 9, counts: {}, blocked: [], scopes: {} }))
+  await page.route(/\/offline\/packs$/, route => {
+    if (route.request().method() !== 'POST') return json(route, [])
+    const { name } = route.request().postDataJSON() as { name: string }
+    started.push(name)
+    return json(route, { id: String(started.length).padStart(32, 'b'), name, state: 'queued', resources: {} }, 202)
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  // Filtering regions by a country the catalogue does not divide offers the
+  // country and its areas rather than an empty list.
+  await manager.getByRole('combobox', { name: 'Country filter' }).selectOption('morocco')
+  await expect(manager.getByText('does not divide Morocco into regions', { exact: false })).toBeVisible()
+  await expect(manager.getByRole('button', { name: 'Download Morocco', exact: true })).toBeVisible()
+  await expect(manager.getByRole('list', { name: 'Areas' }).getByRole('listitem')).toHaveCount(12)
+  await expect(manager.getByText('No matching regions.')).toHaveCount(0)
+
+  await manager.getByRole('button', { name: 'Country', exact: true }).click()
+  await manager.getByRole('button', { name: 'Morocco', exact: false }).first().click()
+  await expect(manager.getByText('as 12 areas', { exact: false })).toBeVisible()
+  const areas = manager.getByRole('list', { name: 'Areas' })
+  await expect(areas.getByRole('listitem')).toHaveCount(12)
+  await areas.getByRole('button', { name: 'Download Morocco · row 2, column 1' }).click()
+  await expect.poll(() => started).toEqual(['Map: Morocco · row 2, column 1'])
+  expect(prepared).toEqual(['morocco'])
+  await expect(manager.getByRole('heading', { name: 'Morocco · row 2, column 1' })).toBeVisible()
 })
 
 test('offline regions manager lists, inspects and removes stored downloads', async ({ page }) => {

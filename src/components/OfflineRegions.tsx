@@ -11,6 +11,7 @@ import {
   areaDownloadState,
   coverageLabel,
   fetchRoutingRegions,
+  gridParts,
   mapsComplete,
   packAreaName,
   packFailure,
@@ -269,11 +270,47 @@ export function OfflineRegionsDialog({
     ? { id: `pack:${pack.id}`, name: packAreaName(pack), kind: pack.coverageKind ?? 'area', bounds: pack.bbox }
     : null
 
+  // Most countries are a single extract with no catalogue regions: offer the
+  // country itself and its map areas instead of an empty list.
+  const unsplitCountry = mode === 'regions' && country && !catalogue.some(region => region.parent === country)
+    ? byID.get(country)
+    : undefined
+  const unsplitArea = unsplitCountry ? areaForRegion(unsplitCountry, catalogue) : null
+  const unsplitAreas = unsplitArea ? gridParts(unsplitArea) : []
   const filtered = catalogue.filter(region =>
     region.kind === (mode === 'countries' ? 'country' : 'region') &&
     (!country || mode === 'countries' || countryOf(region) === country) &&
     normalized(region.name).includes(normalized(query)),
   )
+
+  const partRow = (part: DownloadArea) => {
+    const state = areaDownloadState(downloads.packs, part)
+    const status = state.complete ? 'Downloaded' : state.active ? 'Downloading…' : state.covers ? 'Partial download' : boundsLabel(part.bounds)
+    return (
+      <li className="offline-regions-row" key={part.id}>
+        <button type="button" className="offline-regions-row-main" onClick={() => openDetail({ area: part, record: null })}>
+          <span className={`offline-regions-symbol${state.complete ? ' is-ready' : state.active ? ' is-busy' : ''}`}><Icon name={state.complete ? 'check' : 'map'} /></span>
+          <span className="offline-regions-row-text">
+            <strong>{part.name}</strong>
+            <small>{status}</small>
+          </span>
+        </button>
+        <button
+          type="button"
+          className="offline-regions-icon-button"
+          aria-label={state.complete ? `Details for ${part.name}` : `Download ${part.name}`}
+          title={state.complete ? `Details for ${part.name}` : `Download ${part.name}`}
+          disabled={!state.complete && (downloads.preparing || offline || !routingAvailable)}
+          onClick={() => {
+            openDetail({ area: part, record: null })
+            if (!state.complete) void downloads.start(part)
+          }}
+        >
+          <Icon name={state.complete ? 'forward' : 'download'} />
+        </button>
+      </li>
+    )
+  }
 
   const regionRow = (region: DownloadRegion) => {
     const downloaded = installed.has(region.id) || region.installed
@@ -611,7 +648,22 @@ export function OfflineRegionsDialog({
               <span>{filtered.length}</span>
             </div>
             <ul className="offline-regions-list">{filtered.map(regionRow)}</ul>
-            {!loading && !filtered.length && <p className="offline-regions-muted">No matching regions.</p>}
+            {!loading && !filtered.length && (unsplitCountry && !query ? (
+              <>
+                <p className="offline-regions-muted">
+                  The routing catalogue does not divide {unsplitCountry.name} into regions; only some countries are.
+                  Download the whole country{unsplitAreas.length ? ', or just the map areas you need' : ''}. Routing
+                  always uses the {unsplitCountry.name} extract.
+                </p>
+                <ul className="offline-regions-list">{regionRow(unsplitCountry)}</ul>
+                {unsplitAreas.length > 0 && (
+                  <>
+                    <div className="offline-regions-heading"><h3>{unsplitCountry.name} · areas</h3><span>{unsplitAreas.length}</span></div>
+                    <ul className="offline-regions-list" aria-label="Areas">{unsplitAreas.map(partRow)}</ul>
+                  </>
+                )}
+              </>
+            ) : <p className="offline-regions-muted">No matching regions.</p>)}
           </>
         )}
       </div>
@@ -633,6 +685,8 @@ export function OfflineRegionsDialog({
     const hasMaps = maps.packs.length > 0
     const finishedParts = maps.packs.filter(pack => pack.status === 'complete').length
     const children = record ? catalogue.filter(region => region.parent === record.id) : []
+    // No catalogue regions to offer: a too-large area splits into a grid.
+    const areaParts = detailArea && children.length === 0 ? gridParts(detailArea) : []
     detailView = (
       <div className="offline-regions-scroll">
         <div className="offline-regions-summary">
@@ -651,8 +705,10 @@ export function OfflineRegionsDialog({
           </p>
         )}
         {selected?.kind === 'city' && <p className="offline-regions-muted">Maps cover the city. Routing uses the provider's regional extract that contains it.</p>}
-        {record?.kind === 'country' && children.length > 0 && !hasMaps && (
-          <p className="offline-regions-muted">Large countries download their maps region by region, queued one after another. Routing uses the whole-country extract so routes cross regional borders.</p>
+        {(children.length > 0 || areaParts.length > 0) && !hasMaps && (
+          <p className="offline-regions-muted">
+            Too large for one download, so its maps download {children.length > 0 ? 'region by region' : `as ${areaParts.length} areas`}, queued one after another. Routing uses the single extract, so routes still cross between them. Download it all, or pick {children.length > 0 ? 'regions' : 'areas'} below.
+          </p>
         )}
         {matchingTarget && downloads.preparing && (
           <p className="offline-regions-working" role="status"><span className="offline-regions-spinner" />{downloads.phase}</p>
@@ -730,6 +786,12 @@ export function OfflineRegionsDialog({
           <>
             <div className="offline-regions-heading"><h3>Choose a smaller region</h3><span>{children.length}</span></div>
             <ul className="offline-regions-list">{children.map(regionRow)}</ul>
+          </>
+        )}
+        {children.length === 0 && areaParts.length > 0 && (
+          <>
+            <div className="offline-regions-heading"><h3>Choose a smaller area</h3><span>{areaParts.length}</span></div>
+            <ul className="offline-regions-list" aria-label="Areas">{areaParts.map(partRow)}</ul>
           </>
         )}
       </div>

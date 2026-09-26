@@ -222,8 +222,11 @@ or country bounds at zooms 5–14 with elevation, POI and fuel scopes. The
 frontend estimates first and refuses areas whose map layers are blocked, then
 starts routing preparation and the pack together. An area beyond one pack's
 limits is reported with code `pack_too_large`; the frontend then plans one pack
-per catalogue sub-region, halving areas without sub-regions up to three times,
-and still prepares the single covering routing extract so routes cross those
+per catalogue sub-region or, for the many countries the catalogue does not
+divide, per cell of a deterministic grid sized from the arithmetic tile count
+(z5–14 maps, z13 terrain) to stay well under both pack limits. A part the
+server still finds too large is halved, at most twice. It still prepares the
+single covering routing extract, sharing a preparation already running for it, so routes cross those
 boundaries. Two pack jobs run at once. Further packs are persisted as `queued`
 and start in order as slots free, re-estimated at that moment because earlier
 packs change quota and reuse; one that no longer fits becomes `incomplete` with

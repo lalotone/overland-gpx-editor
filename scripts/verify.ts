@@ -85,6 +85,8 @@ const {
   areaDownloadState,
   mapsComplete,
   splitArea,
+  gridParts,
+  tileCount,
   startRegionDownload,
   coversBounds,
   decodeRoutingRegions,
@@ -1316,6 +1318,23 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('splitting keeps antimeridian halves in range',
     across[0].bounds.east === 180 || across[0].bounds.east === -180 ? across[1].bounds.west === -180 || across[1].bounds.west === 180 : false)
 
+  const morocco = { id: 'morocco', name: 'Morocco', kind: 'country' as const, bounds: { south: 20.7, west: -17.1, north: 35.95, east: -1.0 }, regionId: 'morocco' }
+  const grid = gridParts(morocco)
+  check('an area without sub-regions becomes a grid of parts that each fit one pack',
+    grid.length > 1 && grid.every(part => tileCount(part.bounds) <= 75_000 && tileCount(part.bounds, 13, 13) <= 14_000),
+    `${grid.length} parts`)
+  check('grid parts keep the routing region and cover the whole area edge to edge',
+    grid.every(part => part.regionId === 'morocco') && grid[0].bounds.north === 35.95 && grid[0].bounds.west === -17.1 &&
+      grid[grid.length - 1].bounds.south === 20.7 && grid[grid.length - 1].bounds.east === -1)
+  check('grid parts are deterministic, so later visits recognise them',
+    JSON.stringify(gridParts(morocco)) === JSON.stringify(grid))
+  check('an area that fits one pack is not split', gridParts({ ...morocco, bounds: region.bounds }).length === 0)
+  const fiji = gridParts({ id: 'fiji', name: 'Fiji', kind: 'country', bounds: { south: -21, west: 176, north: -12, east: -178 } })
+  check('grid parts across the antimeridian stay in longitude range',
+    fiji.length > 1 && fiji.every(part => part.bounds.west >= -180 && part.bounds.west < 180 && part.bounds.east >= -180 && part.bounds.east <= 180))
+  check('grid parts have readable compass names when the grid is small',
+    gridParts({ ...morocco, bounds: { south: 30, west: -9, north: 34, east: -4 } }).every(part => !/row/.test(part.name)))
+
   const partPack = (id: string, name: string, bbox: { south: number; west: number; north: number; east: number }, state: string, done: number) => ({
     id, name, state, bbox, resources: { 'vector-map': mapProgress(done), elevation: mapProgress(done) },
   })
@@ -1415,6 +1434,48 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     check('one part refused by the server does not strand the others',
       !(refused.result instanceof Error) && refused.started.join(',') === 'Map: Cataluña' &&
         refused.result.skipped.some(item => item.startsWith('Aragón:')))
+  }
+
+  {
+    // Morocco: no catalogue regions, so a grid; a second area joins the routing
+    // preparation the first one started.
+    const estimated: string[] = []
+    const started: string[] = []
+    let routingRunning = false
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; regionId?: string } : {}
+      const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/packs/estimate')) {
+        estimated.push(String(body.name))
+        return reply({ resources: 10, counts: {}, blocked: [], scopes: {} })
+      }
+      if (url.endsWith('/routing/prepare')) {
+        if (routingRunning) return reply({ detail: 'routing data preparation is already running' }, 409)
+        routingRunning = true
+        return reply({ enabled: true, ready: false, cached: [] }, 202)
+      }
+      if (url.endsWith('/offline/routing')) {
+        return reply({ enabled: true, ready: false, cached: [], ...(routingRunning ? { job: { id: 'r', regionId: 'morocco', state: 'running' } } : {}) })
+      }
+      if (url.endsWith('/packs')) {
+        started.push(String(body.name))
+        return reply({ id: `${started.length}`.padStart(32, '0'), name: body.name, state: 'queued', resources: {} }, 202)
+      }
+      return reply({}, 404)
+    }) as typeof fetch
+    try {
+      const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+      const whole = await startRegionDownload(runtime, morocco)
+      check('a country without regions downloads as its grid without trying the whole first',
+        !estimated.includes('Map: Morocco') && whole.packs.length === grid.length && started.length === grid.length)
+      const one = await startRegionDownload(runtime, grid[0]).catch((reason: Error) => reason)
+      check('one area can be downloaded while its region is still preparing routing',
+        !(one instanceof Error) && started[started.length - 1] === `Map: ${grid[0].name}`, one instanceof Error ? one.message : '')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   }
 
   check('routing jobs count as active only while queued or running',

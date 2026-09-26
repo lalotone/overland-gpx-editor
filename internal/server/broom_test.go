@@ -21,6 +21,14 @@ import (
 // broomVersion is reported to upstream providers and in route responses; it
 // must follow go.mod rather than the release it was last hand-edited for.
 func TestBroomVersionMatchesModule(t *testing.T) {
+	if linked := linkedBroomVersion(t); linked != "v"+broomVersion {
+		t.Fatalf("broomVersion = %q, go.mod requires %s", broomVersion, linked)
+	}
+}
+
+// linkedBroomVersion is the broom release go.mod resolved for this binary.
+func linkedBroomVersion(t *testing.T) string {
+	t.Helper()
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		t.Skip("no build info")
@@ -30,13 +38,32 @@ func TestBroomVersionMatchesModule(t *testing.T) {
 			if dep.Replace != nil {
 				t.Skip("broom is replaced locally")
 			}
-			if dep.Version != "v"+broomVersion {
-				t.Fatalf("broomVersion = %q, go.mod requires %s", broomVersion, dep.Version)
+			return dep.Version
+		}
+	}
+	t.Fatal("broom is not a dependency of the test binary")
+	return ""
+}
+
+// The mobile module links this package through its replace directive, so its
+// broom requirement must follow ours; otherwise it stops building with
+// "updates to go.mod needed", which make check does not exercise.
+func TestMobileBroomRequirementMatchesModule(t *testing.T) {
+	want := linkedBroomVersion(t)
+	data, err := os.ReadFile(filepath.Join("..", "..", "mobile", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "code.rbel.co/rubiojr/broom" {
+			if fields[1] != want {
+				t.Fatalf("mobile/go.mod requires broom %s, want %s", fields[1], want)
 			}
 			return
 		}
 	}
-	t.Fatal("broom is not a dependency of the test binary")
+	t.Fatal("mobile/go.mod does not require broom")
 }
 
 func writeBroomPBF(t *testing.T) (string, []orb.Point) {

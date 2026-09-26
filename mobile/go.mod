@@ -9,7 +9,7 @@ require (
 )
 
 require (
-	code.rbel.co/rubiojr/broom v0.13.1 // indirect
+	code.rbel.co/rubiojr/broom v0.13.2 // indirect
 	github.com/DataDog/czlib v0.0.0-20240814115052-86a9592b3985 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/coder/websocket v1.8.14 // indirect

@@ -152,6 +152,11 @@ geometry. A real Catalonia plan and rebuild selected 55 tiles, versus 180 with
 the extract polygon is not used to discard their elevations.
 
 With Broom 0.6, build pipeline 3 corrects baked road-access reachability counts.
+Broom 0.13's pipeline 4 maps more via-way turn restrictions (via nodes, repeated
+and closed via ways) and records the member ways of relations it still cannot
+represent. Graph and metric formats are unchanged, so pipeline 3 graphs stay
+directly readable and follow the same migration.
+
 At startup, an incompatible active managed generation is opened directly when
 still readable and warmed with the current profiles, then rebuilt in the
 background. Selecting another incompatible installed region through ordinary

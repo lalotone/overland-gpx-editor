@@ -188,7 +188,7 @@ only supported OSM `surface` tags: sealed road, gravel/compacted, dirt, rough
 ground, and unknown. Road class and track type do not imply a surface.
 
 Planned routes use Broom's inline geometry-aligned annotations and the shared
-Haversine cumulative distances. Imported GPX tracks use Broom 0.9's
+Haversine cumulative distances. Imported GPX tracks use Broom's conservative
 `AnnotateTrack` against the currently open local routing graph. Its spans measure
 the **original track**, including partial segments; the matched road's length is
 not substituted. Annotation does not modify coordinates, elevation, saves or
@@ -197,11 +197,15 @@ undo history.
 Unmatched, ambiguous, untagged and unsupported sections all count as **unknown**
 and remain in the total-distance denominator. They count towards neither paved
 nor unpaved distance. Matching is approximate, not proof of access permission or
-current trail conditions. Default matching leaves input gaps longer than 250 m
-unmatched; tracks outside the installed graph also remain unknown. Requests are
-bounded to 50,001 input points and Broom's 50,000 internal sampling intervals;
-larger workloads report that the track needs splitting rather than silently
-simplifying it. Percentages are rounded for display.
+current trail conditions. Input gaps up to 2 km (simplified exports space
+points 100-600 m apart) match only where every 10 m sample along the straight
+chord stays within 30 m of one road with a compatible heading; a chord across a
+bend keeps its unsupported middle unknown, and a shallow crossing can briefly
+match the crossed road. Longer gaps and tracks outside the installed graph remain
+unknown. Requests are bounded to 50,001 input points and Broom's 1,000,000
+sampling intervals, matched in chunks of 50,000; larger workloads report that
+the track needs splitting rather than silently simplifying it. Percentages are
+rounded for display.
 
 ---
 

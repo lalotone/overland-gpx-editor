@@ -18,7 +18,7 @@ continues to use its existing entry point.
   simplify, split, day-stage, refresh elevation and add waypoints. Multi-track
   inputs are presented as separate selectable tracks rather than silently merged.
   Each saved track has a trash button to delete its GPX file after confirmation.
-  **Route details** also looks up imported GPX surfaces through Broom 0.9's
+  **Route details** also looks up imported GPX surfaces through Broom's
   `AnnotateTrack` API using the open routing region. It works offline, keeps
   ambiguous/unmatched sections unknown, and never changes the track. Surface
   lookup failures leave the distance/elevation summary and editing available.

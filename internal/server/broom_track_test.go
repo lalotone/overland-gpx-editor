@@ -74,7 +74,12 @@ func TestBroomAnnotateTrackOffline(t *testing.T) {
 	assert.NotContains(t, response.Body.String(), "coordinates", "annotation must not return replacement geometry")
 	config := do(t, s, http.MethodGet, "/config", nil)
 	assert.Contains(t, config.Body.String(), `"broomAnnotate":"/routing/broom/annotate"`)
-	tooMuchWork := `{"coordinates":[` + strings.Repeat(`{"lat":42,"lon":1},{"lat":42,"lon":1.002},`, 3000) + `{"lat":42,"lon":1}]}`
+	// About 102k sampling intervals: Broom annotates this in consecutive chunks.
+	chunked := `{"coordinates":[` + strings.Repeat(`{"lat":42,"lon":1},{"lat":42,"lon":1.002},`, 3000) + `{"lat":42,"lon":1}]}`
+	long := do(t, s, http.MethodPost, "/routing/broom/annotate", strings.NewReader(chunked))
+	require.Equal(t, http.StatusOK, long.Code, long.Body.String())
+	// 6000 chords of ~1.99 km at 10 m sampling exceed the 1M interval ceiling.
+	tooMuchWork := `{"coordinates":[` + strings.Repeat(`{"lat":42,"lon":1},{"lat":42,"lon":1.024},`, 3000) + `{"lat":42,"lon":1}]}`
 	limited := do(t, s, http.MethodPost, "/routing/broom/annotate", strings.NewReader(tooMuchWork))
 	assert.Equal(t, http.StatusUnprocessableEntity, limited.Code)
 	assert.Contains(t, limited.Body.String(), "track_annotation_limit")

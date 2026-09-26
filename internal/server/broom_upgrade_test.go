@@ -73,16 +73,18 @@ func TestRoutingUpgradeLifecycle(t *testing.T) {
 			old, err := manager.SetupRegion(t.Context(), "fixture", broom.SetupOptions{Jobs: 1})
 			require.NoError(t, err)
 			require.NoError(t, old.Router.Close())
-			// Emulate a previous build pipeline's catalogue descriptor. The graph
-			// remains directly readable, as real v0.5.1 graphs do in v0.6.0.
+			current := old.Generation.PipelineVersion
+			require.Greater(t, current, uint32(1))
+			// Emulate the previous build pipeline's catalogue descriptor. The graph
+			// remains directly readable, as real pipeline 3 graphs do under 4.
 			cataloguePath := filepath.Join(cache, "graphs", ".broom", "catalogue.json")
 			contents, err := os.ReadFile(cataloguePath)
 			require.NoError(t, err)
 			var catalogue map[string]any
 			require.NoError(t, json.Unmarshal(contents, &catalogue))
 			entry := catalogue["Entries"].([]any)[0].(map[string]any)
-			entry["PipelineVersion"] = 2
-			entry["Build"].(map[string]any)["pipeline_version"] = 2
+			entry["PipelineVersion"] = current - 1
+			entry["Build"].(map[string]any)["pipeline_version"] = current - 1
 			contents, err = json.Marshal(catalogue)
 			require.NoError(t, err)
 			if scenario == "corrupt catalogue" {
@@ -166,7 +168,7 @@ func TestRoutingUpgradeLifecycle(t *testing.T) {
 			assert.NotEqual(t, old.Generation.GenerationID, status.GenerationID)
 			ready, err := manager.OpenRegion(ctx, "fixture", broom.OpenRegionOptions{})
 			require.NoError(t, err)
-			assert.EqualValues(t, 3, ready.Generation.PipelineVersion)
+			assert.Equal(t, current, ready.Generation.PipelineVersion)
 			require.NoError(t, ready.Router.Close())
 		})
 	}

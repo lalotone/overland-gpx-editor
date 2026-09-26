@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -16,6 +17,27 @@ import (
 	"github.com/paulmach/orb"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+// broomVersion is reported to upstream providers and in route responses; it
+// must follow go.mod rather than the release it was last hand-edited for.
+func TestBroomVersionMatchesModule(t *testing.T) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Skip("no build info")
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == "code.rbel.co/rubiojr/broom" {
+			if dep.Replace != nil {
+				t.Skip("broom is replaced locally")
+			}
+			if dep.Version != "v"+broomVersion {
+				t.Fatalf("broomVersion = %q, go.mod requires %s", broomVersion, dep.Version)
+			}
+			return
+		}
+	}
+	t.Fatal("broom is not a dependency of the test binary")
+}
 
 func writeBroomPBF(t *testing.T) (string, []orb.Point) {
 	t.Helper()

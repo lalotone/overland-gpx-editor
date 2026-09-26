@@ -264,11 +264,11 @@ online. Its previous graph remains usable while it rebuilds, and **Offline
 routing** shows progress. In cache-only mode the update waits until you return
 online. Failed or paused updates can be resumed from the same panel.
 
-Broom 0.7.1 reuses existing 0.7.0 graphs and metrics without rebuilding them.
-It reduces allocations during waypoint snapping and improves local metric-cache
-recovery during profile warmup. Missing or corrupt metrics are regenerated
-locally; filesystem access failures are reported instead of silently retried as
-writes. Damaged graphs still require explicit repair or update.
+Broom 0.13 moves to build pipeline 4, which enforces more via-way turn
+restrictions, so regions built by earlier releases go through that update once.
+Missing or corrupt metrics are regenerated locally; filesystem access failures
+are reported instead of silently retried as writes. Damaged graphs still
+require explicit repair or update.
 
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be

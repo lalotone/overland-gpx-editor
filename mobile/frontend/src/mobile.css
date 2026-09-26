@@ -1499,3 +1499,89 @@ progress {
   width: 32px;
   height: 32px;
 }
+.routing-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.routing-steps {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+.routing-steps li {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  counter-increment: step;
+}
+.routing-steps li::before {
+  content: counter(step) '. ';
+}
+.routing-steps li.done {
+  color: #587f45;
+}
+.routing-steps li.done::before {
+  content: '✓ ';
+}
+.routing-steps li.current {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.routing-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.status-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.status-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 50%, transparent);
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.status-chip.done {
+  color: #587f45;
+}
+.status-chip.running,
+.status-chip.queued {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.status-chip.failed,
+.status-chip.partial {
+  color: #ba7850;
+}
+.status-extra {
+  font-size: 9px;
+  opacity: 0.75;
+}
+/* The generic row rule lays children out in a line; progress stacks. */
+.resource-download > .routing-progress {
+  display: grid;
+}
+.region-row-main > .region-row-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+}

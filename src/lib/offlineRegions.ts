@@ -87,39 +87,103 @@ export function routingJobActive(status: RoutingDataStatus | null | undefined): 
   return status?.job?.state === 'queued' || status?.job?.state === 'running'
 }
 
-/** Broom's preparation steps, in the order it runs them. */
-export const ROUTING_STAGES = [
-  { id: 'pbf', label: 'Road data' },
-  { id: 'planning', label: 'Select terrain tiles' },
-  { id: 'elevation', label: 'Terrain tiles' },
-  { id: 'build', label: 'Build routing graph' },
-  { id: 'warmup', label: 'Prepare riding profiles' },
-]
+/** The four steps a routing preparation goes through, as users see them. */
+export const ROUTING_STEPS = [
+  { id: 'data', label: 'Road data' },
+  { id: 'terrain', label: 'Terrain' },
+  { id: 'graph', label: 'Routing graph' },
+  { id: 'profiles', label: 'Riding profiles' },
+] as const
+
+// Broom's progress phases grouped into those steps.
+const PHASE_STEPS: Record<string, number> = {
+  region: 0, index: 0, pbf: 0,
+  planning: 1, elevation: 1,
+  build: 2,
+  warmup: 3,
+}
+
+// Broom's graph-build sub-stages in plain words. Unknown ones fall back to a
+// generic label rather than leaking internal names.
+const BUILD_STAGES: Record<string, string> = {
+  'build-prepare': 'Preparing the build',
+  'pbf-node-index': 'Indexing road nodes',
+  'pbf-required-nodes': 'Reading road nodes',
+  'topology-vertices': 'Assembling the road network',
+  'topology-segments': 'Assembling the road network',
+  'topology-assemble': 'Assembling the road network',
+  'dem-geometry': 'Adding elevation to roads',
+  'sample-elevation': 'Sampling elevation',
+  restrictions: 'Applying turn restrictions',
+  components: 'Connecting the network',
+  partition: 'Partitioning the graph',
+  write: 'Writing the graph',
+  'build-complete': 'Finishing the build',
+}
+
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  return minutes ? `${minutes}m ${Math.floor(seconds % 60)}s` : `${Math.floor(seconds)}s`
+}
+
+export interface RoutingJobView {
+  /** Index into ROUTING_STEPS; -1 before the first phase reports. */
+  step: number
+  /** Plain-language account of what is happening right now. */
+  detail: string
+  /**
+   * Progress of the current activity, 0..1, only when Broom measures it.
+   * Null means working without a measure: show liveness, never a bar.
+   */
+  fraction: number | null
+}
 
 /**
- * One forward-moving progress for a routing preparation. Broom reports each
- * step's own progress, and in the terrain step each file's bytes, so a raw
- * bar restarts at every step and tile. Steps count as equal shares; the
- * terrain step advances by tiles finished, not by the current file.
+ * What a routing preparation is doing, in terms a rider can follow. Broom
+ * reports progress per phase and per build sub-stage, several of which have
+ * no measure at all, so there is no honest single percentage: the view is a
+ * step checklist plus the current activity, measured when it can be.
  */
-export function routingJobProgress(job: RoutingDataJob | undefined): {
-  step: number
-  steps: number
-  label: string
-  /** Overall share done, 0..1; null before the first step reports. */
-  overall: number | null
-} {
-  const index = ROUTING_STAGES.findIndex(stage => stage.id === job?.phase)
-  const steps = ROUTING_STAGES.length
-  if (!job || index < 0) return { step: 0, steps, label: 'Checking routing data', overall: null }
-  const within = job.phase === 'elevation'
-    ? job.itemsTotal ? (job.completedItems ?? 0) / job.itemsTotal : 0
-    : job.total ? (job.done ?? 0) / job.total : 0
-  return {
-    step: index + 1,
-    steps,
-    label: ROUTING_STAGES[index].label,
-    overall: (index + Math.min(1, Math.max(0, within))) / steps,
+export function routingJobView(job: RoutingDataJob | undefined): RoutingJobView {
+  if (!job) return { step: -1, detail: 'Starting…', fraction: null }
+  const step = PHASE_STEPS[job.phase ?? ''] ?? -1
+  const elapsed = job.elapsedSeconds ? ` · ${formatDuration(job.elapsedSeconds)}` : ''
+  const measured = (done: number | undefined, total: number | undefined) =>
+    total ? Math.min(1, Math.max(0, (done ?? 0) / total)) : null
+  if (job.retrying) {
+    return { step, detail: `Connection problem · retrying${job.retrySeconds ? ` in ${Math.ceil(job.retrySeconds)}s` : ''} (attempt ${job.attempt ?? 1})`, fraction: null }
+  }
+  switch (job.phase) {
+    case 'region':
+    case 'index':
+      return { step, detail: 'Looking up the region', fraction: null }
+    case 'pbf':
+      return {
+        step,
+        detail: job.total
+          ? `Downloading road data · ${formatBytes(job.done ?? 0)} of ${formatBytes(job.total)}`
+          : `Downloading road data${elapsed}`,
+        fraction: measured(job.done, job.total),
+      }
+    case 'planning':
+      return { step, detail: `Choosing terrain tiles${elapsed}`, fraction: null }
+    case 'elevation':
+      return {
+        step,
+        detail: job.itemsTotal
+          ? `Downloading terrain · ${(job.completedItems ?? 0).toLocaleString()} of ${job.itemsTotal.toLocaleString()} tiles (${(job.itemsDownloaded ?? 0).toLocaleString()} new, ${(job.itemsReused ?? 0).toLocaleString()} reused)`
+          : `Downloading terrain${elapsed}`,
+        fraction: measured(job.completedItems, job.itemsTotal),
+      }
+    case 'build': {
+      const label = BUILD_STAGES[job.stage ?? job.item ?? ''] ?? 'Building the routing graph'
+      const fraction = measured(job.done, job.total)
+      return { step, detail: fraction === null ? `${label}${elapsed}` : `${label} · ${Math.round(fraction * 100)}%`, fraction }
+    }
+    case 'warmup':
+      return { step, detail: `Preparing riding profiles${job.item ? ` · ${job.item}` : ''}${elapsed}`, fraction: null }
+    default:
+      return { step, detail: `Working${elapsed}`, fraction: null }
   }
 }
 
@@ -415,6 +479,44 @@ export function areaDownloadState(packs: PackSummary[], area: DownloadArea | nul
 /** Whether the area's maps are fully downloaded, in one pack or several. */
 export function mapsComplete(packs: PackSummary[], area: DownloadArea | null): boolean {
   return areaDownloadState(packs, area, 'maps').complete
+}
+
+export type GroupState = 'done' | 'running' | 'queued' | 'failed' | 'partial' | 'unavailable' | 'none'
+
+export interface GroupStatus {
+  state: GroupState
+  /** Share done while running, 0..1. */
+  fraction?: number
+}
+
+/** One resource group's state for one area, from the packs that hold it. */
+export function groupStatus(packs: PackSummary[], area: DownloadArea | null, group: ResourceGroup): GroupStatus {
+  const state = areaDownloadState(packs, area, group)
+  const kinds = RESOURCE_GROUPS[group].kinds
+  const present = kinds.map(kind => state.resources[kind]).filter(progress => progress !== undefined)
+  if (state.complete) return { state: 'done' }
+  if (state.active) {
+    const done = present.reduce((sum, progress) => sum + progress.done, 0)
+    const total = present.reduce((sum, progress) => sum + progress.total, 0)
+    return state.packs.some(pack => pack.status === 'running')
+      ? { state: 'running', fraction: total ? done / total : 0 }
+      : { state: 'queued' }
+  }
+  if (!present.length && state.unavailable.some(item => (item.resource && kinds.includes(item.resource)) || (group === 'maps' && item.layer === 'openfreemap')))
+    return { state: 'unavailable' }
+  if (state.failed) return { state: state.covers ? 'failed' : 'partial' }
+  if (state.packs.length) return { state: 'partial' }
+  return { state: 'none' }
+}
+
+/** How many of an area's parts have a group, for "7 of 19 regions". */
+export function partsProgress(packs: PackSummary[], parts: DownloadArea[], group: ResourceGroup): { done: number; active: number; total: number } {
+  const statuses = parts.map(part => groupStatus(packs, part, group).state)
+  return {
+    done: statuses.filter(state => state === 'done').length,
+    active: statuses.filter(state => state === 'running' || state === 'queued').length,
+    total: parts.length,
+  }
 }
 
 /** Finished or partial area packs, one per name and extent (retries reuse names). */

@@ -3,6 +3,7 @@ import type { RuntimeConfig, RoutingDataStatus } from '../../../src/lib/offline'
 import type { BoundingBox } from '../../../src/lib/poi'
 import Icon from './Icon'
 import { useDownloads, resourceTransferText } from './downloads'
+import { routingJobView } from '../../../src/lib/offlineRegions'
 import RegionBrowser from './RegionBrowser'
 
 export default function OfflineMapControl({
@@ -26,7 +27,7 @@ export default function OfflineMapControl({
   const detail = preparing
     ? phase
     : routingBusy
-      ? `Routing · ${status?.job?.phase || 'starting'}`
+      ? `Routing · ${routingJobView(status?.job).detail}`
       : active.length
         ? total
           ? `Preparing resources · ${active.reduce((sum, pack) => sum + (pack.done || 0), 0)} / ${total}`

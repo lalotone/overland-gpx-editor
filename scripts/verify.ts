@@ -85,7 +85,9 @@ const {
   areaDownloadState,
   mapsComplete,
   splitArea,
-  routingJobProgress,
+  routingJobView,
+  groupStatus,
+  partsProgress,
   packGroups,
   gridParts,
   tileCount,
@@ -1539,23 +1541,44 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
 
   {
     const job = (phase: string, extra: Record<string, number>) => ({ id: 'j', regionId: 'morocco', state: 'running', phase, ...extra })
-    const samples = [
-      job('pbf', { done: 900, total: 1000 }),
-      job('planning', { done: 0, total: 10 }),
-      job('elevation', { done: 999, total: 1000, completedItems: 1, itemsTotal: 40 }),
-      job('elevation', { done: 1, total: 1000, completedItems: 2, itemsTotal: 40 }),
-      job('elevation', { done: 500, total: 1000, completedItems: 39, itemsTotal: 40 }),
-      job('build', { done: 0, total: 0 }),
-      job('warmup', { done: 3, total: 4 }),
-    ].map(sample => routingJobProgress(sample).overall ?? -1)
-    check('routing progress only moves forward across steps and terrain files',
-      samples.every((value, index) => index === 0 || value >= samples[index - 1]) && samples[0] > 0 && samples[samples.length - 1] < 1,
-      samples.map(value => value.toFixed(3)).join(','))
-    check('the terrain step advances by tiles, not by the current file',
-      routingJobProgress(job('elevation', { done: 999, total: 1000, completedItems: 20, itemsTotal: 40 })).overall === 0.5 &&
-        routingJobProgress(job('elevation', { done: 999, total: 1000, completedItems: 20, itemsTotal: 40 })).step === 3)
-    check('routing progress is unknown before the first step reports',
-      routingJobProgress(undefined).overall === null && routingJobProgress(job('mystery', {})).overall === null)
+    const view = (phase: string, extra: Record<string, unknown> = {}) => routingJobView(job(phase, extra as Record<string, number>))
+    check('every Broom phase maps to one of the four routing steps',
+      ['region', 'index', 'pbf'].every(phase => view(phase).step === 0) && ['planning', 'elevation'].every(phase => view(phase).step === 1) &&
+        view('build').step === 2 && view('warmup').step === 3 && routingJobView(undefined).step === -1)
+    check('road data shows bytes and is measured',
+      view('pbf', { done: 512 * 1024 * 1024, total: 1024 * 1024 * 1024 }).detail === 'Downloading road data · 512 MiB of 1.00 GiB' &&
+        view('pbf', { done: 1, total: 2 }).fraction === 0.5)
+    check('terrain counts tiles, not the current file',
+      view('elevation', { done: 999, total: 1000, completedItems: 20, itemsTotal: 40, itemsDownloaded: 15, itemsReused: 5 }).fraction === 0.5 &&
+        /20 of 40 tiles \(15 new, 5 reused\)/.test(view('elevation', { completedItems: 20, itemsTotal: 40, itemsDownloaded: 15, itemsReused: 5 }).detail))
+    check('unmeasured build stages show liveness in plain words, never a bar',
+      view('build', { stage: 'partition', elapsedSeconds: 80 }).fraction === null &&
+        view('build', { stage: 'partition', elapsedSeconds: 80 }).detail === 'Partitioning the graph · 1m 20s' &&
+        view('build', { stage: 'pbf-node-index', done: 3, total: 4 }).detail === 'Indexing road nodes · 75%' &&
+        view('build', { stage: 'something-new' }).detail === 'Building the routing graph')
+    check('retries are explained, not shown as progress',
+      view('pbf', { retrying: true, retrySeconds: 4.2, attempt: 2 } as never).detail === 'Connection problem · retrying in 5s (attempt 2)')
+  }
+  {
+    const parts = gridParts(morocco)
+    const pack = (id: string, name: string, bounds: typeof morocco.bounds, state: string, done: number, resources = ['vector-map']) => ({
+      id, name, state, bbox: bounds, resources: Object.fromEntries(resources.map(kind => [kind, { done, total: 10, failed: 0, bytes: 0, items: 0 }])),
+    })
+    const morePacks = decodePacks([
+      pack('a', `Maps: ${parts[0].name}`, parts[0].bounds, 'complete', 10),
+      pack('b', `Maps: ${parts[1].name}`, parts[1].bounds, 'running', 4),
+      pack('c', `Maps: ${parts[2].name}`, parts[2].bounds, 'queued', 0),
+      pack('d', `Terrain: ${parts[0].name}`, parts[0].bounds, 'complete', 10, ['elevation']),
+    ])
+    check('each part reports its own state per resource',
+      groupStatus(morePacks, parts[0], 'maps').state === 'done' && groupStatus(morePacks, parts[1], 'maps').state === 'running' &&
+        groupStatus(morePacks, parts[1], 'maps').fraction === 0.4 && groupStatus(morePacks, parts[2], 'maps').state === 'queued' &&
+        groupStatus(morePacks, parts[3], 'maps').state === 'none' && groupStatus(morePacks, parts[0], 'terrain').state === 'done' &&
+        groupStatus(morePacks, parts[1], 'terrain').state === 'none')
+    const mapsProgress = partsProgress(morePacks, parts, 'maps')
+    check('a country counts its parts per resource',
+      mapsProgress.done === 1 && mapsProgress.active === 2 && mapsProgress.total === parts.length &&
+        partsProgress(morePacks, parts, 'terrain').done === 1)
   }
 
   check('routing jobs count as active only while queued or running',

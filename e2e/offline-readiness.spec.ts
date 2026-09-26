@@ -366,7 +366,7 @@ test('permit access reroutes and routing upgrades keep the planner usable', asyn
   const permit = page.getByRole('checkbox', { name: 'Restricted access' })
   await expect(permit).not.toBeChecked()
   const regions = page.getByTestId('offline-regions-button')
-  await expect(regions).toContainText('Routing · Build routing graph')
+  await expect(regions).toContainText('Routing · Routing graph')
   await regions.click()
   const manager = page.getByRole('dialog', { name: 'Offline regions' })
   await expect(manager.getByText('Your downloaded region stays available while it rebuilds.')).toBeVisible()
@@ -493,15 +493,15 @@ test('offline regions manager downloads a region and reports its progress', asyn
   })
   await expect(manager.getByRole('heading', { name: 'Aragon' })).toBeVisible()
   await expect(manager.getByRole('button', { name: 'Stop downloads' })).toBeVisible()
-  await expect(regions).toContainText('Routing · Terrain tiles')
+  await expect(regions).toContainText('Routing · Terrain')
 
   await manager.getByRole('button', { name: 'Back' }).click()
   await manager.getByRole('tab', { name: 'Downloads' }).click()
   const routingCard = manager.getByRole('article', { name: 'Routing download Aragon' })
-  // Step 3 of 5, 12 of 55 terrain tiles: (2 + 12/55) / 5 of the whole preparation.
-  await expect(routingCard.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '44')
-  await expect(routingCard).toContainText('Step 3 of 5 · Terrain tiles · 44% overall')
-  await expect(routingCard).toContainText('12 of 55 terrain tiles · 8 downloaded · 4 reused')
+  // The terrain step is current; its bar measures tiles (12 of 55), not files.
+  await expect(routingCard.getByRole('list', { name: 'Routing steps' }).locator('[aria-current="step"]')).toHaveText('Terrain')
+  await expect(routingCard).toContainText('Downloading terrain · 12 of 55 tiles (8 new, 4 reused)')
+  await expect(routingCard.getByRole('progressbar', { name: 'Current routing step progress' })).toHaveAttribute('value', '22')
   await expect(manager.getByText('4.00 KiB of routing data (last measured)')).toBeVisible()
   // Storage inspection is explicit (once per opening), never part of polling.
   const summaryAfterOpen = summaryRequests
@@ -579,8 +579,11 @@ test('a country too large for one pack downloads region by region', async ({ pag
   // Too large by arithmetic, so the whole country is never estimated.
   expect(estimated).toEqual(['Map: Aragon', 'Map: Cataluña'])
   expect(prepared).toEqual(['spain'])
-  await expect(manager.getByText('Maps are split into 2 downloads', { exact: false })).toBeVisible()
-  await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('3 / 18')
+  // Progress is read region by region: counts per resource and a chip per region.
+  await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('0 of 2 regions · 2 in progress')
+  const regionList = manager.getByRole('list', { name: 'Regions' })
+  await expect(regionList.getByRole('listitem').filter({ hasText: 'Aragon' })).toContainText('Maps 33%')
+  await expect(regionList.getByRole('listitem').filter({ hasText: 'Cataluña' })).toContainText('Maps queued')
 
   await manager.getByRole('button', { name: 'Back' }).click()
   await manager.getByRole('tab', { name: 'Downloads' }).click()
@@ -629,10 +632,12 @@ test('a country without catalogue regions offers grid areas to download one by o
 
   await manager.getByRole('button', { name: 'Country', exact: true }).click()
   await manager.getByRole('button', { name: 'Morocco', exact: false }).first().click()
-  await expect(manager.getByText('as 12 areas', { exact: false })).toBeVisible()
+  await expect(manager.getByText('Whole country · 12 areas', { exact: true })).toBeVisible()
+  await expect(manager.getByRole('region', { name: 'Routing' })).toContainText('One download for all of Morocco')
   const areas = manager.getByRole('list', { name: 'Areas' })
   await expect(areas.getByRole('listitem')).toHaveCount(12)
-  await areas.getByRole('button', { name: 'Download Morocco · row 2, column 1' }).click()
+  await areas.getByRole('button', { name: /Morocco · row 2, column 1/ }).click()
+  await manager.getByRole('button', { name: 'Download everything' }).click()
   await expect.poll(() => started).toEqual(['Map: Morocco · row 2, column 1'])
   expect(prepared).toEqual(['morocco'])
   await expect(manager.getByRole('heading', { name: 'Morocco · row 2, column 1' })).toBeVisible()
@@ -677,7 +682,7 @@ test('routing and each offline resource download separately', async ({ page }) =
   const manager = page.getByRole('dialog', { name: 'Offline regions' })
   await manager.getByRole('button', { name: 'Aragon', exact: false }).first().click()
   const resources = manager.getByRole('list', { name: 'Resources' })
-  await expect(resources.getByRole('listitem')).toHaveCount(4)
+  await expect(resources.getByRole('listitem')).toHaveCount(3)
   await expect(manager.getByRole('button', { name: 'Download everything' })).toBeEnabled()
 
   // Maps alone: no routing, and only the map layer.
@@ -688,7 +693,7 @@ test('routing and each offline resource download separately', async ({ page }) =
   await expect(resources.getByRole('button', { name: 'Download maps' })).toHaveCount(0)
 
   // Routing alone: no packs.
-  await resources.getByRole('button', { name: 'Download routing' }).click()
+  await manager.getByRole('region', { name: 'Routing' }).getByRole('button', { name: 'Download routing' }).click()
   await expect.poll(() => prepared).toEqual(['spain/aragon'])
   expect(requests).toHaveLength(1)
 
@@ -762,7 +767,7 @@ test('offline regions manager lists, inspects and removes stored downloads', asy
 
   await regions.getByRole('button', { name: /Aragon/ }).first().click()
   await expect(manager.getByRole('heading', { name: 'Aragon' })).toBeVisible()
-  await expect(manager).toContainText('In use for routing')
+  await expect(manager.getByRole('region', { name: 'Routing' })).toContainText('Downloaded · in use')
   await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('Downloaded')
   await page.keyboard.press('Escape')
   await expect(manager.getByRole('heading', { name: 'Offline regions' })).toBeVisible()

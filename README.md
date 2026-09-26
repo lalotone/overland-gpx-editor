@@ -218,7 +218,10 @@ extract, needed to plan routes even online), **Maps** (vector tiles, zooms
 prices, water, campsites). Maps, terrain and POIs are fetched as you view them
 while online, so download them only for areas you will ride offline. Each has
 its own button in the region view; **Download everything** or **Download the
-rest** takes whatever is missing.
+rest** takes whatever is missing. For a country, routing is one country-wide
+download (so routes cross its regions), shown as four steps with the current
+activity in plain words; maps, terrain and POIs download region by region, and
+the country's region list shows each region's progress per resource.
 One map pack holds at most 100,000 resources, so a large country downloads its
 maps region by region while routing uses the single country extract. Most
 countries are one extract with no catalogue regions (Geofabrik divides only

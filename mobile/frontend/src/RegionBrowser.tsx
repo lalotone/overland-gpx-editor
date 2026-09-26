@@ -6,8 +6,9 @@ import type { PlaceResult } from '../../../src/lib/geocoding'
 import { request } from './model'
 import Icon from './Icon'
 import { RESOURCE_LABELS, packFailure, resourceTransferText, coverageLabel, boundsLabel } from './downloads'
-import { PACK_GROUPS, RESOURCE_GROUPS, routingJobProgress, areaDownloadState, areaForRegion, gridParts, mapsComplete, savedMapAreas } from '../../../src/lib/offlineRegions'
-import type { AreaDownloadState, DownloadResource, ResourceGroup } from '../../../src/lib/offlineRegions'
+import { PACK_GROUPS, RESOURCE_GROUPS, ROUTING_STEPS, areaDownloadState, areaForRegion, gridParts, groupStatus, mapsComplete, partsProgress, routingJobView, savedMapAreas } from '../../../src/lib/offlineRegions'
+import type { AreaDownloadState, DownloadResource, GroupStatus, ResourceGroup } from '../../../src/lib/offlineRegions'
+import type { RoutingDataJob } from '../../../src/lib/offline'
 import type { DownloadArea, DownloadRegion, Downloads } from './downloads'
 
 function normalized(value: string) {
@@ -16,6 +17,47 @@ function normalized(value: string) {
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
 }
+const GROUP_SHORT: Record<ResourceGroup, string> = { maps: 'Maps', terrain: 'Terrain', places: 'POIs' }
+
+function chipText(status: GroupStatus): string {
+  switch (status.state) {
+    case 'done': return '✓'
+    case 'running': return `${Math.round((status.fraction ?? 0) * 100)}%`
+    case 'queued': return 'queued'
+    case 'failed':
+    case 'partial': return 'partial'
+    case 'unavailable': return 'n/a'
+    default: return '—'
+  }
+}
+
+/** Steps, the current activity in plain words, and a bar only when measured. */
+function RoutingProgress({ job }: { job: RoutingDataJob | undefined }) {
+  const view = routingJobView(job)
+  return (
+    <div className="routing-progress">
+      <ol className="routing-steps" aria-label="Routing steps">
+        {ROUTING_STEPS.map((step, index) => (
+          <li
+            key={step.id}
+            className={index < view.step ? 'done' : index === view.step ? 'current' : ''}
+            aria-current={index === view.step ? 'step' : undefined}
+          >
+            {step.label}
+          </li>
+        ))}
+      </ol>
+      <p className="routing-activity" role="status">
+        {view.fraction === null && <span className="spinner" />}
+        {view.detail}
+      </p>
+      {view.fraction !== null && (
+        <progress max={100} value={Math.round(view.fraction * 100)} aria-label="Current routing step progress" />
+      )}
+    </div>
+  )
+}
+
 export default function RegionBrowser({
   runtime,
   status,
@@ -174,8 +216,20 @@ export default function RegionBrowser({
   const regionChildren = selectedRecord
     ? catalogue.filter((region) => region.parent === selectedRecord.id)
     : []
-  // No catalogue regions to offer: a too-large area splits into a grid.
-  const areaParts = detailArea && regionChildren.length === 0 ? gridParts(detailArea) : []
+  // Sub-areas: catalogue regions, else the grid a too-large area splits into.
+  const children = regionChildren.flatMap((region) => {
+    const area = areaFor(region)
+    return area ? [{ area, record: region as DownloadRegion | null }] : []
+  })
+  const subAreas = children.length
+    ? children.map((child) => child.area)
+    : detailArea
+      ? gridParts(detailArea)
+      : []
+  const subLabel = children.length ? 'regions' : 'areas'
+  const groupStatuses = Object.fromEntries(
+    PACK_GROUPS.map((group) => [group, groupStatus(downloads.packs, detailArea, group)]),
+  ) as Record<ResourceGroup, GroupStatus>
   const isOffline = runtime.offline?.mode === 'cache-only'
   const missing: DownloadResource[] = [
     ...(detailInstalled || regionRunning ? [] : ['routing' as const]),
@@ -183,34 +237,33 @@ export default function RegionBrowser({
   ]
   const savedAreas = savedMapAreas(downloads.packs)
 
-  const partRow = (part: DownloadArea) => {
-    const state = areaDownloadState(downloads.packs, part)
-    return (
-      <button
-        className="list-row"
-        key={part.id}
-        onClick={() => {
-          if (selectedRecord) setTrail((previous) => [...previous, selectedRecord])
-          setSelectedRecord(null)
-          setSelected(part)
-        }}
-      >
-        <Icon name={state.complete ? 'check' : 'layers'} />
-        <span>
-          {part.name}
-          <small>
-            {state.complete
-              ? 'Downloaded'
-              : state.active
-                ? 'Downloading…'
-                : state.covers
-                  ? 'Partial download'
-                  : boundsLabel(part.bounds)}
+  // Area rows with one chip per offline resource: a country's regions (or
+  // an area's grid cells) are its progress view.
+  const areaRow = (area: DownloadArea, open: () => void, extra?: string) => (
+    <div className="region-row" key={area.id}>
+      <button className="region-row-main" onClick={open}>
+        <span className="region-row-text">
+          <strong>{area.name}</strong>
+          <small className="status-chips">
+            {PACK_GROUPS.map((group) => {
+              const status = groupStatus(downloads.packs, area, group)
+              return (
+                <span key={group} className={`status-chip ${status.state}`}>
+                  {GROUP_SHORT[group]} {chipText(status)}
+                </span>
+              )
+            })}
+            {extra && <span className="status-extra">{extra}</span>}
           </small>
         </span>
         <Icon name="arrow" size={18} />
       </button>
-    )
+    </div>
+  )
+  const openPart = (area: DownloadArea, record: DownloadRegion | null) => {
+    if (selectedRecord) setTrail((previous) => [...previous, selectedRecord])
+    setSelectedRecord(record)
+    setSelected(area)
   }
 
   const row = (region: DownloadRegion) => {
@@ -296,18 +349,16 @@ export default function RegionBrowser({
             <Icon name="explore" size={32} />
             <div>
               <strong>
-                {detailInstalled
-                  ? 'Routing downloaded'
-                  : selected?.kind === 'city'
-                    ? 'City maps & local routing'
-                    : 'Maps & routing'}
+                {regionRunning || PACK_GROUPS.some((group) => groupStates[group].active)
+                  ? 'Downloading'
+                  : detailInstalled
+                    ? 'Routing downloaded'
+                    : 'Not downloaded yet'}
               </strong>
               <small>
-                {detailInstalled
-                  ? status?.regionId === detailRegionID
-                    ? 'Currently in use'
-                    : 'Available on this device'
-                  : 'Download for offline use'}
+                {detailInstalled && status?.regionId === detailRegionID
+                  ? 'Routing in use · maps, terrain and POIs download separately'
+                  : 'Routing, maps, terrain and POIs download separately'}
               </small>
             </div>
             {detailInstalled && <span className="region-badge">Routing ready</span>}
@@ -318,13 +369,10 @@ export default function RegionBrowser({
               {boundsLabel(selected.bounds)}
             </p>
           )}
-          {maps.packs.length > 0 && !maps.covers && (
-            <p className="muted">The saved map downloads cover only part of the selected area.</p>
-          )}
-          {maps.packs.length > 1 && (
+          {subAreas.length > 0 && (
             <p className="muted">
-              Maps are split into {maps.packs.length} downloads ·{' '}
-              {maps.packs.filter((pack) => pack.status === 'complete').length} finished.
+              {subAreas.length} {subLabel} · too large for one map download, so maps, terrain and POIs
+              download {subLabel === 'regions' ? 'region by region' : 'area by area'}.
             </p>
           )}
           {selected?.kind === 'city' && (
@@ -332,24 +380,10 @@ export default function RegionBrowser({
               Map downloads cover the city. Routing uses the provider's covering regional extract.
             </p>
           )}
-          {(regionChildren.length > 0 || areaParts.length > 0) && maps.packs.length === 0 && (
-            <p className="muted">
-              Too large for one download, so its maps download{' '}
-              {regionChildren.length > 0 ? 'region by region' : `as ${areaParts.length} areas`}, queued
-              one after another. Routing uses the single extract. Download it all, or pick below.
-            </p>
-          )}
           {matchingTarget && downloads.preparing && (
             <p className="working" role="status">
               <span className="spinner" />
               {downloads.phase}
-            </p>
-          )}
-          {!!matchingPack?.batchesTotal && matchingPack.batchesTotal > 1 && (
-            <p className="muted" role="status">
-              {matchingPack.total !== undefined && matchingPack.done === matchingPack.total && matchingPack.status !== 'running' && matchingPack.status !== 'queued'
-                ? `${matchingPack.batchesTotal} batches finished`
-                : `Batch ${Math.min((matchingPack.batchesDone ?? 0) + 1, matchingPack.batchesTotal)} of ${matchingPack.batchesTotal}`}
             </p>
           )}
           <div className="resource-downloads">
@@ -359,14 +393,12 @@ export default function RegionBrowser({
                 <strong>Routing</strong>
                 <span className={detailInstalled && !regionRunning ? 'ready-text' : ''}>
                   {regionRunning
-                    ? routingJobProgress(relevantJob).step
-                      ? `Step ${routingJobProgress(relevantJob).step}/${routingJobProgress(relevantJob).steps} · ${routingJobProgress(relevantJob).label}`
-                      : 'Preparing'
+                    ? 'Downloading'
                     : detailInstalled
-                      ? 'Downloaded'
-                      : detailRegionID
-                        ? 'Not downloaded'
-                        : 'Not checked yet'}
+                      ? status?.regionId === detailRegionID ? 'Downloaded · in use' : 'Downloaded'
+                      : relevantJob?.state === 'failed'
+                        ? 'Download failed'
+                        : 'Not downloaded'}
                 </span>
                 {!detailInstalled && !regionRunning && (
                   <button
@@ -379,36 +411,51 @@ export default function RegionBrowser({
                   </button>
                 )}
               </div>
-              <small>Needed to plan routes, online or offline</small>
-              {regionRunning && (
-                <progress
-                  max={100}
-                  value={
-                    routingJobProgress(relevantJob).overall === null
-                      ? undefined
-                      : Math.round(routingJobProgress(relevantJob).overall! * 100)
-                  }
-                />
-              )}
+              <small>
+                {subAreas.length > 0
+                  ? `One download for all of ${detailArea?.name ?? 'this area'}, so routes cross its ${subLabel}. Needed to plan routes, online or offline.`
+                  : 'Needed to plan routes, online or offline.'}
+              </small>
+              {regionRunning && <RoutingProgress job={relevantJob} />}
             </div>
+          </div>
+          <div className="section-heading">
+            <h3>Offline data</h3>
+          </div>
+          <p className="muted">
+            Only needed where you will have no connection; online, these load as you view the map.
+          </p>
+          {!!matchingPack?.batchesTotal && matchingPack.batchesTotal > 1 && (
+            <p className="muted" role="status">
+              {matchingPack.total !== undefined && matchingPack.done === matchingPack.total && matchingPack.status !== 'running' && matchingPack.status !== 'queued'
+                ? `${matchingPack.batchesTotal} batches finished`
+                : `Batch ${Math.min((matchingPack.batchesDone ?? 0) + 1, matchingPack.batchesTotal)} of ${matchingPack.batchesTotal}`}
+            </p>
+          )}
+          <div className="resource-downloads">
             {PACK_GROUPS.map((group) => {
               const groupState = groupStates[group]
+              const status = groupStatuses[group]
+              const counts = subAreas.length ? partsProgress(downloads.packs, subAreas, group) : null
+              const busy = status.state === 'running' || status.state === 'queued'
               const { label: groupLabel, kinds } = RESOURCE_GROUPS[group]
               return (
                 <Fragment key={group}>
                   <div className="resource-download resource-group">
                     <div>
                       <strong>{groupLabel}</strong>
-                      <span className={groupState.complete ? 'ready-text' : ''}>
-                        {groupState.complete
-                          ? 'Downloaded'
-                          : groupState.active
-                            ? groupState.packs.some((pack) => pack.status === 'running')
+                      <span className={status.state === 'done' ? 'ready-text' : ''}>
+                        {counts
+                          ? `${counts.done} of ${counts.total} ${subLabel}${counts.active ? ` · ${counts.active} in progress` : ''}`
+                          : status.state === 'done'
+                            ? 'Downloaded'
+                            : status.state === 'running'
                               ? 'Downloading'
-                              : 'Queued'
-                            : ''}
+                              : status.state === 'queued'
+                                ? 'Queued'
+                                : ''}
                       </span>
-                      {!groupState.complete && !groupState.active && (
+                      {status.state !== 'done' && !busy && (
                         <button
                           className="icon-button"
                           aria-label={`Download ${groupLabel.toLowerCase()}`}
@@ -419,8 +466,11 @@ export default function RegionBrowser({
                         </button>
                       )}
                     </div>
+                    {counts && [...new Set(groupState.unavailable.map((item) => item.reason))].map((reason) => (
+                      <small key={reason}>{reason}</small>
+                    ))}
                   </div>
-                  {kinds.map((kind) => {
+                  {!counts && kinds.map((kind) => {
                     const label = RESOURCE_LABELS[kind]
                     const progress = groupState.packs.length ? groupState.resources[kind] : undefined
                     const unavailable = groupState.unavailable.find(
@@ -533,20 +583,21 @@ export default function RegionBrowser({
               now.
             </p>
           )}
-          {regionChildren.length > 0 && (
+          {subAreas.length > 0 && (
             <>
               <div className="section-heading">
-                <h3>Choose a smaller region</h3>
+                <h3>
+                  {detailArea?.name} · {subLabel}
+                </h3>
+                <span>{subAreas.length}</span>
               </div>
-              {regionChildren.map(row)}
-            </>
-          )}
-          {areaParts.length > 0 && (
-            <>
-              <div className="section-heading">
-                <h3>Choose a smaller area</h3>
-              </div>
-              {areaParts.map(partRow)}
+              {(children.length ? children : subAreas.map((area) => ({ area, record: null }))).map((child) =>
+                areaRow(
+                  child.area,
+                  () => openPart(child.area, child.record),
+                  child.record ? undefined : boundsLabel(child.area.bounds),
+                ),
+              )}
             </>
           )}
           {!selected && <p className="muted">Connect once to load this region's map boundaries.</p>}
@@ -707,7 +758,9 @@ export default function RegionBrowser({
                         <div className="section-heading">
                           <h3>{unsplitCountry.name} · areas</h3>
                         </div>
-                        {unsplitAreas.map(partRow)}
+                        {unsplitAreas.map((area) =>
+                          areaRow(area, () => openPart(area, null), boundsLabel(area.bounds)),
+                        )}
                       </>
                     )}
                   </>

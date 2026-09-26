@@ -8,10 +8,10 @@ import {
   RESOURCE_LABELS,
   areaForRegion,
   boundsLabel,
-  completeMapPack,
+  areaDownloadState,
   coverageLabel,
-  coversBounds,
   fetchRoutingRegions,
+  mapsComplete,
   packAreaName,
   packFailure,
   packIsActive,
@@ -239,7 +239,7 @@ export function OfflineRegionsDialog({
     setDetail(next)
   }
   const chooseRegion = (region: DownloadRegion, download = false) => {
-    const area = areaForRegion(region)
+    const area = areaForRegion(region, catalogue)
     openDetail({ area, record: region })
     if (download && area) void downloads.start(area)
   }
@@ -277,7 +277,7 @@ export function OfflineRegionsDialog({
 
   const regionRow = (region: DownloadRegion) => {
     const downloaded = installed.has(region.id) || region.installed
-    const mapped = Boolean(completeMapPack(downloads.packs, areaForRegion(region)))
+    const mapped = mapsComplete(downloads.packs, areaForRegion(region, catalogue))
     const inUse = routing?.ready && routing.regionId === region.id
     const working = routing?.job?.regionId === region.id && downloads.routingBusy
     const parentName = byID.get(region.parent ?? '')?.name
@@ -391,6 +391,7 @@ export function OfflineRegionsDialog({
   }
 
   const storedPacks = downloads.packs.filter(pack => !packIsActive(pack))
+  const waitingPacks = downloads.activePacks.filter(pack => pack.status === 'queued')
   const packBytes = downloads.packs.reduce((sum, pack) => sum + (pack.bytes ?? 0), 0)
   const downloadsView = (
     <div className="offline-regions-scroll">
@@ -425,7 +426,35 @@ export function OfflineRegionsDialog({
           </div>
           {downloads.preparing && <p className="offline-regions-working" role="status"><span className="offline-regions-spinner" />{downloads.phase || 'Preparing…'}</p>}
           {routingProgress}
-          {downloads.activePacks.map(packProgress)}
+          {downloads.activePacks.filter(pack => pack.status !== 'queued').map(packProgress)}
+          {waitingPacks.length > 0 && (
+            <article className="offline-regions-card" aria-label="Queued map downloads">
+              <header>
+                <span className="offline-regions-symbol"><Icon name="map" /></span>
+                <span className="offline-regions-row-text">
+                  <strong>Queued</strong>
+                  <small>{waitingPacks.length} map download{waitingPacks.length === 1 ? '' : 's'} · each starts when a running one finishes</small>
+                </span>
+              </header>
+              <ul className="offline-regions-queue">
+                {waitingPacks.map(pack => (
+                  <li key={pack.id}>
+                    <span>{packAreaName(pack)}</span>
+                    <button
+                      type="button"
+                      className="offline-regions-icon-button"
+                      aria-label={`Stop ${packAreaName(pack)}`}
+                      title={`Stop ${packAreaName(pack)}`}
+                      disabled={downloads.busyPack !== null}
+                      onClick={() => void downloads.stopPack(pack.id)}
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </article>
+          )}
         </section>
       )}
 
@@ -598,12 +627,11 @@ export function OfflineRegionsDialog({
     const job = regionID && routing?.job?.regionId === regionID ? routing.job : undefined
     const regionRunning = job?.state === 'running' || job?.state === 'queued'
     const matchingTarget = target?.area.id === selected?.id ? target : undefined
-    const matchingPack =
-      downloads.packs.find(pack => pack.id === matchingTarget?.pack || `pack:${pack.id}` === selected?.id) ??
-      downloads.packs.find(pack => selected && coversBounds(pack.bbox, selected.bounds)) ??
-      downloads.packs.find(pack => pack.name === `Map: ${selected?.name}`)
-    const coversSelection = selected ? coversBounds(matchingPack?.bbox, selected.bounds) : false
-    const packRunning = matchingPack ? packIsActive(matchingPack) : false
+    // Rebuilt from the catalogue so a country knows its sub-regions.
+    const detailArea = (record && areaForRegion(record, catalogue)) || selected
+    const maps = areaDownloadState(downloads.packs, detailArea)
+    const hasMaps = maps.packs.length > 0
+    const finishedParts = maps.packs.filter(pack => pack.status === 'complete').length
     const children = record ? catalogue.filter(region => region.parent === record.id) : []
     detailView = (
       <div className="offline-regions-scroll">
@@ -616,10 +644,15 @@ export function OfflineRegionsDialog({
           </small>
           {selected && <small>{coverageLabel(selected.kind)} · {boundsLabel(selected.bounds)}</small>}
         </div>
-        {matchingPack && !coversSelection && <p className="offline-regions-muted">The saved map download covers only part of this area.</p>}
+        {hasMaps && !maps.covers && <p className="offline-regions-muted">The saved map downloads cover only part of this area.</p>}
+        {maps.packs.length > 1 && (
+          <p className="offline-regions-muted">
+            Maps are split into {maps.packs.length} downloads to stay within the per-download limit · {finishedParts} finished.
+          </p>
+        )}
         {selected?.kind === 'city' && <p className="offline-regions-muted">Maps cover the city. Routing uses the provider's regional extract that contains it.</p>}
-        {record?.kind === 'country' && children.length > 0 && (
-          <p className="offline-regions-muted">For large countries, pick a region below to keep maps and place data within provider and storage limits.</p>
+        {record?.kind === 'country' && children.length > 0 && !hasMaps && (
+          <p className="offline-regions-muted">Large countries download their maps region by region, queued one after another. Routing uses the whole-country extract so routes cross regional borders.</p>
         )}
         {matchingTarget && downloads.preparing && (
           <p className="offline-regions-working" role="status"><span className="offline-regions-spinner" />{downloads.phase}</p>
@@ -633,11 +666,10 @@ export function OfflineRegionsDialog({
             {regionRunning && <progress max={job?.total || undefined} value={job?.total ? (job.done ?? 0) : undefined} aria-label="Routing progress" />}
           </li>
           {Object.entries(RESOURCE_LABELS).map(([kind, label]) => {
-            const progress = matchingPack?.resources[kind]
-            const unavailable = matchingPack?.unavailable?.find(item => item.resource === kind || (kind === 'vector-map' && item.layer === 'openfreemap'))
+            const progress = hasMaps ? maps.resources[kind] : undefined
+            const unavailable = maps.unavailable.find(item => item.resource === kind || (kind === 'vector-map' && item.layer === 'openfreemap'))
             const done = Boolean(
-              progress && progress.total > 0 && progress.done === progress.total && !progress.failed && !unavailable && coversSelection &&
-              (packRunning || matchingPack?.status === 'complete' || matchingPack?.detail === 'provider_limits' || matchingPack?.detail === 'resource_failures'),
+              progress && progress.total > 0 && progress.done === progress.total && !progress.failed && !unavailable && maps.covers,
             )
             const transfer = resourceTransferText(progress)
             return (
@@ -650,11 +682,11 @@ export function OfflineRegionsDialog({
                       ? 'Downloaded'
                       : progress?.failed
                         ? `${progress.failed} missing`
-                        : packRunning
+                        : maps.active
                           ? `${progress?.done ?? 0} / ${progress?.total ?? '…'}`
-                          : progress && !coversSelection ? 'Partial area' : 'Not downloaded'}
+                          : progress && !maps.covers ? 'Partial area' : 'Not downloaded'}
                 </strong>
-                {progress && packRunning && !done && !unavailable && <progress max={progress.total || 1} value={progress.done} aria-label={`${label} progress`} />}
+                {progress && maps.active && !done && !unavailable && <progress max={progress.total || 1} value={progress.done} aria-label={`${label} progress`} />}
                 {(transfer || (progress && progress.bytes > 0) || unavailable) && (
                   <small>{[transfer, progress && progress.bytes > 0 ? `${formatBytes(progress.bytes)} stored` : '', unavailable?.reason].filter(Boolean).join(' · ')}</small>
                 )}
@@ -662,7 +694,7 @@ export function OfflineRegionsDialog({
             )
           })}
         </ul>
-        {matchingPack?.incomplete && !packRunning && <p className="offline-regions-error" role="alert">{packFailure(matchingPack)}</p>}
+        {maps.failed && !maps.active && <p className="offline-regions-error" role="alert">{maps.packs.length > 1 ? `${packAreaName(maps.failed)}: ` : ''}{packFailure(maps.failed)}</p>}
         {matchingTarget && downloads.error && <p className="offline-regions-error" role="alert">{downloads.error}</p>}
         {regionRunning && routing?.error && <p className="offline-regions-error" role="alert">{routing.error}</p>}
         <div className="offline-regions-detail-actions">
@@ -675,10 +707,10 @@ export function OfflineRegionsDialog({
               type="button"
               className="btn btn-primary btn-sm"
               disabled={!selected || downloads.preparing || offline || !routingAvailable}
-              onClick={() => selected && void downloads.start(selected)}
+              onClick={() => detailArea && void downloads.start(detailArea)}
             >
               <Icon name="download" />
-              {downloads.preparing ? 'Preparing…' : regionInstalled || matchingPack ? 'Download missing resources' : `Download ${selected?.name ?? record?.name}`}
+              {downloads.preparing ? 'Preparing…' : regionInstalled || hasMaps ? 'Download missing resources' : `Download ${selected?.name ?? record?.name}`}
             </button>
           )}
           {regionInstalled && regionID && regionID !== routing?.regionId && (

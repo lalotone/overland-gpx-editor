@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { cancelPack, cancelRoutingData, deletePack, fetchPacks, prepareRoutingData } from '../lib/offline'
 import type { PackSummary, RoutingDataStatus, RuntimeConfig } from '../lib/offline'
-import { packFailure, packIsActive, routingJobActive, startRegionDownload } from '../lib/offlineRegions'
+import { packAreaName, packFailure, packIsActive, routingJobActive, startRegionDownload } from '../lib/offlineRegions'
 import type { DownloadArea } from '../lib/offlineRegions'
 
 type Notify = (message: string, type?: 'info' | 'success' | 'error') => void
@@ -9,7 +9,8 @@ type Notify = (message: string, type?: 'info' | 'success' | 'error') => void
 export interface DownloadTarget {
   area: DownloadArea
   region: string
-  pack?: string
+  /** Every map pack this download started; large areas take several. */
+  packs?: string[]
 }
 
 /**
@@ -72,11 +73,13 @@ export function useRegionDownloads({
   }, [polling, refreshPacks])
 
   useEffect(() => {
-    // Report the current/latest pack, not every historical failed attempt.
-    const pack = target?.pack ? packs.find(p => p.id === target.pack) : undefined
-    if (pack && (pack.status === 'failed' || pack.incomplete) && !notified.current.has(pack.id)) {
-      notified.current.add(pack.id)
-      notify(packFailure(pack), 'error')
+    // Report this download's packs, not every historical failed attempt.
+    for (const id of target?.packs ?? []) {
+      const pack = packs.find(p => p.id === id)
+      if (pack && (pack.status === 'failed' || pack.incomplete) && !notified.current.has(pack.id)) {
+        notified.current.add(pack.id)
+        notify(`${packAreaName(pack)}: ${packFailure(pack)}`, 'error')
+      }
     }
     if (routing?.job?.state === 'failed' && !notified.current.has(routing.job.id)) {
       notified.current.add(routing.job.id)
@@ -93,17 +96,17 @@ export function useRegionDownloads({
     setError('')
     setTarget(null)
     try {
-      const { area: selected, regionId, pack } = await startRegionDownload(runtime, area, {
+      const { area: selected, regionId, packs: started, skipped } = await startRegionDownload(runtime, area, {
         phase: setPhase,
         resolved: (resolved, region) => setTarget({ area: resolved, region }),
       })
-      if (pack) {
-        // Retries keep their pack ID. Replace the old failed snapshot before
-        // allowing notifications for the new attempt.
-        setPacks(previous => [pack, ...previous.filter(item => item.id !== pack.id)])
-        notified.current.delete(pack.id)
-      }
-      setTarget({ area: selected, region: regionId, pack: pack?.id })
+      // Retries keep their pack ID. Replace old failed snapshots before
+      // allowing notifications for the new attempt.
+      const ids = new Set(started.map(item => item.id))
+      setPacks(previous => [...started, ...previous.filter(item => !ids.has(item.id))])
+      for (const id of ids) notified.current.delete(id)
+      setTarget({ area: selected, region: regionId, packs: [...ids] })
+      if (skipped.length) notify(`Some parts could not be downloaded: ${skipped.join(' · ')}`, 'error')
       await refreshPacks()
     } catch (reason) {
       const message = (reason as Error).message

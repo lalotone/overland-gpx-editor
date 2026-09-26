@@ -619,6 +619,30 @@ html.dark .offline-regions-resources strong.is-ready {
   color: var(--text-muted);
 }
 
+.offline-regions-queue {
+  display: flex;
+  max-height: 180px;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.offline-regions-queue li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.offline-regions-queue .offline-regions-icon-button {
+  width: 26px;
+  height: 26px;
+}
+
 .offline-regions-summary {
   display: flex;
   flex-direction: column;

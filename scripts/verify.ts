@@ -82,7 +82,10 @@ const {
 } = await import('../src/lib/offline')
 const {
   areaForRegion,
-  completeMapPack,
+  areaDownloadState,
+  mapsComplete,
+  splitArea,
+  startRegionDownload,
   coversBounds,
   decodeRoutingRegions,
   packAreaName,
@@ -1292,13 +1295,82 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     { id: 'd', name: 'Map: Teruel', state: 'running', bbox: region.bounds, resources: { 'vector-map': mapProgress(2) } },
   ])
   check('a complete map pack is recognised for a covered region',
-    completeMapPack(regionPacks, region)?.id === 'a' && completeMapPack(regionPacks.slice(1), region) === undefined)
+    mapsComplete(regionPacks, region) && !mapsComplete(regionPacks.slice(1), region))
   check('saved map areas keep one entry per name and extent and skip route packs',
     savedMapAreas(regionPacks).map(pack => pack.id).join(',') === 'a')
   check('pack activity and names are derived consistently',
     packIsActive(regionPacks[3]) && !packIsActive(regionPacks[0]) && packAreaName(regionPacks[2]) === 'Old trip')
   check('interrupted packs explain how to resume',
     /Download again to resume/.test(packFailure(regionPacks[1])))
+  const country = areaForRegion(catalogue.regions[0], [
+    ...catalogue.regions,
+    { id: 'spain/cataluna', name: 'Cataluña', parent: 'spain', kind: 'region', bbox: { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, installed: false, active: false },
+  ])
+  check('a country lists its catalogue regions as download parts',
+    country?.parts?.map(part => part.id).join(',') === 'spain/aragon,spain/cataluna' && country.parts[0].kind === 'region')
+  const halves = splitArea({ id: 'wide', name: 'Wide', kind: 'region', bounds: { south: 40, west: -4, north: 41, east: 4 } })
+  check('areas without sub-regions split across their longer side',
+    halves.map(half => half.name).join(',') === 'Wide · west,Wide · east' &&
+      halves[0].bounds.east === 0 && halves[1].bounds.west === 0 && halves[1].bounds.east === 4)
+  const across = splitArea({ id: 'am', name: 'Across', kind: 'area', bounds: { south: 0, west: 170, north: 1, east: -170 } })
+  check('splitting keeps antimeridian halves in range',
+    across[0].bounds.east === 180 || across[0].bounds.east === -180 ? across[1].bounds.west === -180 || across[1].bounds.west === 180 : false)
+
+  const partPack = (id: string, name: string, bbox: { south: number; west: number; north: number; east: number }, state: string, done: number) => ({
+    id, name, state, bbox, resources: { 'vector-map': mapProgress(done), elevation: mapProgress(done) },
+  })
+  const countryPacks = decodePacks([
+    partPack('p1', 'Map: Aragón', region.bounds, 'complete', 10),
+    partPack('p2', 'Map: Cataluña', { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, 'running', 4),
+  ])
+  const countryState = areaDownloadState(countryPacks, country!)
+  check('a country made of region packs aggregates their progress',
+    countryState.covers && countryState.active && !countryState.complete && countryState.packs.length === 2 &&
+      countryState.resources['vector-map'].done === 14 && countryState.resources['vector-map'].total === 20)
+  check('a country is complete only once every region pack is',
+    mapsComplete(decodePacks([
+      partPack('p1', 'Map: Aragón', region.bounds, 'complete', 10),
+      partPack('p2', 'Map: Cataluña', { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, 'complete', 10),
+    ]), country!) && !areaDownloadState(countryPacks.slice(0, 1), country!).covers)
+  const halvedState = areaDownloadState(decodePacks([
+    partPack('h1', 'Map: Wide · west', halves[0].bounds, 'complete', 10),
+    partPack('h2', 'Map: Wide · east', halves[1].bounds, 'complete', 10),
+  ]), { id: 'wide', name: 'Wide', kind: 'region', bounds: { south: 40, west: -4, north: 41, east: 4 } })
+  check('a region downloaded in halves is recognised as complete', halvedState.complete && halvedState.packs.length === 2)
+
+  {
+    // Whole country too large: expect one queued pack per region, one routing prepare.
+    const calls: string[] = []
+    const started: string[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; regionId?: string } : {}
+      calls.push(url.replace(/^.*\/offline/, ''))
+      const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/packs/estimate')) {
+        return body.name === 'Map: Spain'
+          ? reply({ detail: 'pack exceeds 100000 resources', code: 'pack_too_large' }, 400)
+          : reply({ resources: 10, counts: {}, blocked: [], scopes: {} })
+      }
+      if (url.endsWith('/routing/prepare')) return reply({ enabled: true, ready: false, cached: [], regionId: body.regionId }, 202)
+      if (url.endsWith('/packs')) {
+        started.push(String(body.name))
+        return reply({ id: `${started.length}`.padStart(32, '0'), name: body.name, state: 'queued', resources: {} }, 202)
+      }
+      return reply({}, 404)
+    }) as typeof fetch
+    try {
+      const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+      const result = await startRegionDownload(runtime, country!)
+      check('an oversized country queues one map pack per region',
+        started.join(',') === 'Map: Aragón,Map: Cataluña' && result.packs.length === 2 && result.skipped.length === 0, started.join(','))
+      check('an oversized country still prepares its single routing extract',
+        calls.filter(call => call.endsWith('/routing/prepare')).length === 1 && result.regionId === 'spain')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
   check('routing jobs count as active only while queued or running',
     routingJobActive({ job: { id: 'j', regionId: 'r', state: 'running' } } as never) &&
       !routingJobActive({ job: { id: 'j', regionId: 'r', state: 'failed' } } as never) && !routingJobActive(null))

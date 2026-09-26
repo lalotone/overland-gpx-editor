@@ -207,7 +207,17 @@ The web and Android frontends create packs only from an explicit region
 download (`src/lib/offlineRegions.ts`): a `regional` pack over the city, region
 or country bounds at zooms 5–14 with elevation, POI and fuel scopes. The
 frontend estimates first and refuses areas whose map layers are blocked, then
-starts routing preparation and the pack together. Packs remain pinned until removed;
+starts routing preparation and the pack together. An area beyond one pack's
+limits is reported with code `pack_too_large`; the frontend then plans one pack
+per catalogue sub-region, halving areas without sub-regions up to three times,
+and still prepares the single covering routing extract so routes cross those
+boundaries. Two pack jobs run at once. Further packs are persisted as `queued`
+and start in order as slots free, re-estimated at that moment because earlier
+packs change quota and reuse; one that no longer fits becomes `incomplete` with
+`start_failed` and the reason. Waiting packs are charged their manifest size,
+not the 8 MiB a running regional manifest reserves, and can be cancelled or
+deleted before they start. A restart reports queued packs as interrupted, like
+running ones. Packs remain pinned until removed;
 there is no fixed retained-pack count. Their metadata is charged to storage:
 running jobs reserve room to grow, completed manifests occupy their actual size,
 and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its

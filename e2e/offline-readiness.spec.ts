@@ -523,6 +523,70 @@ test('offline regions manager downloads a region and reports its progress', asyn
   await expect(manager.getByRole('region', { name: 'Map downloads' })).toContainText('Downloaded')
 })
 
+test('a country too large for one pack downloads region by region', async ({ page }) => {
+  await mockRuntime(page)
+  const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }
+  const cataluna = { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }
+  const prepared: string[] = []
+  const estimated: string[] = []
+  const packs: Record<string, unknown>[] = []
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: false, cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [
+      { id: 'spain', name: 'Spain', kind: 'country', bbox: { south: 35.9, west: -9.4, north: 43.8, east: 4.4 }, installed: false, active: false },
+      { id: 'spain/aragon', name: 'Aragon', parent: 'spain', kind: 'region', bbox: aragon, installed: false, active: false },
+      { id: 'spain/cataluna', name: 'Cataluña', parent: 'spain', kind: 'region', bbox: cataluna, installed: false, active: false },
+    ],
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    prepared.push((route.request().postDataJSON() as { regionId: string }).regionId)
+    return json(route, { enabled: true, ready: false, cached: [] }, 202)
+  })
+  await page.route(/\/offline\/packs\/estimate$/, route => {
+    const { name } = route.request().postDataJSON() as { name: string }
+    estimated.push(name)
+    return name === 'Map: Spain'
+      ? json(route, { detail: 'pack exceeds 100000 resources', code: 'pack_too_large' }, 400)
+      : json(route, { resources: 9, counts: {}, blocked: [], scopes: {} })
+  })
+  await page.route(/\/offline\/packs$/, route => {
+    if (route.request().method() !== 'POST') return json(route, packs)
+    const { name, bbox } = route.request().postDataJSON() as { name: string; bbox: number[] }
+    const pack = {
+      id: String(packs.length + 1).padStart(32, 'a'), name, state: packs.length === 0 ? 'running' : 'queued', coverageKind: 'region',
+      done: packs.length === 0 ? 3 : 0, total: 9, resources: { 'vector-map': { done: packs.length === 0 ? 3 : 0, total: 9, failed: 0, bytes: 0, items: 0 } },
+      bbox: { south: bbox[0], west: bbox[1], north: bbox[2], east: bbox[3] },
+    }
+    packs.push(pack)
+    return json(route, pack, 202)
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await manager.getByRole('button', { name: 'Country', exact: true }).click()
+  await manager.getByRole('button', { name: 'Download Spain' }).click()
+
+  await expect.poll(() => packs.length).toBe(2)
+  expect(estimated).toEqual(['Map: Spain', 'Map: Aragon', 'Map: Cataluña'])
+  expect(prepared).toEqual(['spain'])
+  await expect(manager.getByText('Maps are split into 2 downloads', { exact: false })).toBeVisible()
+  await expect(manager.locator('.offline-regions-resources li').filter({ hasText: 'Vector maps' })).toContainText('3 / 18')
+
+  await manager.getByRole('button', { name: 'Back' }).click()
+  await manager.getByRole('tab', { name: 'Downloads' }).click()
+  await expect(manager.getByRole('article', { name: 'Map download Aragon' })).toBeVisible()
+  const queue = manager.getByRole('article', { name: 'Queued map downloads' })
+  await expect(queue).toContainText('Cataluña')
+  await expect(queue.getByRole('button', { name: 'Stop Cataluña' })).toBeVisible()
+})
+
 test('offline regions manager lists, inspects and removes stored downloads', async ({ page }) => {
   await mockRuntime(page)
   const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }

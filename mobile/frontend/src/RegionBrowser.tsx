@@ -5,8 +5,8 @@ import { searchPlaces } from '../../../src/lib/geocoding'
 import type { PlaceResult } from '../../../src/lib/geocoding'
 import { request } from './model'
 import Icon from './Icon'
-import { coversBounds, RESOURCE_LABELS, packFailure, resourceTransferText, coverageLabel, boundsLabel } from './downloads'
-import { areaForRegion as areaFor, completeMapPack as fullPack, savedMapAreas } from '../../../src/lib/offlineRegions'
+import { RESOURCE_LABELS, packFailure, resourceTransferText, coverageLabel, boundsLabel } from './downloads'
+import { areaDownloadState, areaForRegion, mapsComplete, savedMapAreas } from '../../../src/lib/offlineRegions'
 import type { DownloadArea, DownloadRegion, Downloads } from './downloads'
 
 function normalized(value: string) {
@@ -56,6 +56,7 @@ export default function RegionBrowser({
         })
     return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name))
   }, [regions, status?.cached, status?.regionId])
+  const areaFor = (region: DownloadRegion) => areaForRegion(region, catalogue)
   const byID = useMemo(() => new Map(catalogue.map((region) => [region.id, region])), [catalogue])
   const countries = catalogue.filter((region) => region.kind === 'country')
   const cached = catalogue.filter((region) => installed.has(region.id) || region.installed)
@@ -147,7 +148,7 @@ export default function RegionBrowser({
     })
   }
   const begin = () => {
-    if (selected) void downloads.start(selected)
+    if (detailArea) void downloads.start(detailArea)
   }
   const detailRegionID =
     selected?.regionId ||
@@ -160,13 +161,11 @@ export default function RegionBrowser({
     detailRegionID && status?.job?.regionId === detailRegionID ? status?.job : undefined
   const regionRunning = relevantJob?.state === 'running' || relevantJob?.state === 'queued'
   const matchingTarget = downloads.target?.area.id === selected?.id ? downloads.target : undefined
-  const matchingPack =
-    downloads.packs.find(
-      (pack) => pack.id === matchingTarget?.pack || `pack:${pack.id}` === selected?.id,
-    ) ??
-    downloads.packs.find((pack) => selected && coversBounds(pack.bbox, selected.bounds)) ??
-    downloads.packs.find((pack) => pack.name === `Map: ${selected?.name}`)
-  const coversSelection = selected ? coversBounds(matchingPack?.bbox, selected.bounds) : false
+  // Rebuilt from the catalogue so a country knows its sub-regions; large
+  // areas are stored as several packs.
+  const detailArea = (selectedRecord && areaFor(selectedRecord)) || selected
+  const maps = areaDownloadState(downloads.packs, detailArea)
+  const matchingPack = maps.packs.length === 1 ? maps.packs[0] : undefined
   const regionChildren = selectedRecord
     ? catalogue.filter((region) => region.parent === selectedRecord.id)
     : []
@@ -175,7 +174,7 @@ export default function RegionBrowser({
 
   const row = (region: DownloadRegion) => {
     const downloaded = installed.has(region.id) || region.installed
-    const mapped = Boolean(fullPack(downloads.packs, areaFor(region)))
+    const mapped = mapsComplete(downloads.packs, areaFor(region))
     const inUse = status?.ready && status.regionId === region.id
     const working = status?.job?.regionId === region.id && downloads.routingBusy
     const parentName = byID.get(region.parent || '')?.name
@@ -270,18 +269,24 @@ export default function RegionBrowser({
               {boundsLabel(selected.bounds)}
             </p>
           )}
-          {matchingPack && !coversSelection && (
-            <p className="muted">This saved pack covers only part of the selected area.</p>
+          {maps.packs.length > 0 && !maps.covers && (
+            <p className="muted">The saved map downloads cover only part of the selected area.</p>
+          )}
+          {maps.packs.length > 1 && (
+            <p className="muted">
+              Maps are split into {maps.packs.length} downloads ·{' '}
+              {maps.packs.filter((pack) => pack.status === 'complete').length} finished.
+            </p>
           )}
           {selected?.kind === 'city' && (
             <p className="muted">
               Map downloads cover the city. Routing uses the provider's covering regional extract.
             </p>
           )}
-          {selectedRecord?.kind === 'country' && regionChildren.length > 0 && (
+          {selectedRecord?.kind === 'country' && regionChildren.length > 0 && maps.packs.length === 0 && (
             <p className="muted">
-              For large countries, select a region below to keep detailed maps and place downloads
-              within provider and storage limits.
+              Large countries download their maps region by region, queued one after another.
+              Routing uses the whole-country extract.
             </p>
           )}
           {matchingTarget && downloads.preparing && (
@@ -320,23 +325,19 @@ export default function RegionBrowser({
               )}
             </div>
             {Object.entries(RESOURCE_LABELS).map(([kind, label]) => {
-              const progress = matchingPack?.resources[kind]
-              const unavailable = matchingPack?.unavailable?.find(
+              const progress = maps.packs.length ? maps.resources[kind] : undefined
+              const unavailable = maps.unavailable.find(
                 (item) =>
                   item.resource === kind || (kind === 'vector-map' && item.layer === 'openfreemap'),
               )
-              const running =
-                matchingPack?.status === 'running' || matchingPack?.status === 'queued'
+              const running = maps.active
               const done =
                 progress &&
                 progress.total > 0 &&
                 progress.done === progress.total &&
                 !progress.failed &&
                 !unavailable &&
-                (running || matchingPack?.status === 'complete' ||
-                  matchingPack?.detail === 'provider_limits' ||
-                  matchingPack?.detail === 'resource_failures') &&
-                coversSelection
+                maps.covers
               return (
                 <div className="resource-download" key={kind}>
                   <div>
@@ -362,7 +363,7 @@ export default function RegionBrowser({
                             ? `${progress.failed} missing`
                             : running
                               ? `${progress?.done ?? 0} / ${progress?.total ?? '…'}`
-                              : progress && !coversSelection
+                              : progress && !maps.covers
                                 ? 'Partial area'
                                 : 'Not downloaded'}
                     </span>
@@ -377,9 +378,9 @@ export default function RegionBrowser({
               )
             })}
           </div>
-          {matchingPack?.incomplete && (
+          {maps.failed && !maps.active && (
             <p className="inline-error" role="alert">
-              {packFailure(matchingPack)}
+              {packFailure(maps.failed)}
             </p>
           )}
           {matchingTarget && downloads.error && (

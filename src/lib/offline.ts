@@ -146,6 +146,8 @@ export interface PackSummary extends OfflineJob {
   createdAt?: string
   updatedAt?: string
   incomplete?: boolean
+  /** Why a queued pack could not start, when it could not. */
+  reason?: string
   durableBytes?: number
   failed?: number
   resources: Record<string, PackResourceProgress>
@@ -412,6 +414,7 @@ export async function responseError(response: Response, fallback: string): Promi
   const code = text(record(body)?.code)
   const scope = text(record(body)?.scope)
   if (code === 'offline_cache_miss') return new OfflineCacheMissError(detail, scope)
+  if (code === 'pack_too_large') return new PackTooLargeError(detail)
   return new Error(detail ?? fallback)
 }
 
@@ -693,6 +696,7 @@ export function decodePacks(value: unknown): PackSummary[] {
       createdAt: text(item.createdAt),
       updatedAt: text(item.updatedAt),
       incomplete: boolean(item.incomplete) ?? job.status === 'incomplete',
+      reason: text(item.errorDetail),
       durableBytes: number(item.durableBytes),
       failed: number(item.failed),
       resources: decodePackResources(item.resources),
@@ -769,6 +773,14 @@ export function formatCacheContext(metadata: CacheMetadata, compact = false): st
 }
 
 const managementHeaders = { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' }
+
+/** The area is beyond one pack's limits; split it into smaller packs. */
+export class PackTooLargeError extends Error {
+  constructor(message = 'This area is too large for one download') {
+    super(message)
+    this.name = 'PackTooLargeError'
+  }
+}
 
 async function managementResponse(response: Response, action: string): Promise<Response> {
   if (!response.ok) throw await responseError(response, `${action} failed (${response.status})`)

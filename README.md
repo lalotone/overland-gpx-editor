@@ -214,6 +214,10 @@ way as on Android: open **Offline regions** (next to Work offline on every
 screen) and pick a city, region or country under **Add region**. A region
 download fetches its Broom routing extract plus one map pack covering vector
 maps (zooms 5–14), elevation, fuel prices and stations, water and campsites.
+One map pack holds at most 100,000 resources, so a large country downloads its
+maps region by region (halving any region still too large) while routing uses
+the single country extract. Two packs run at a time; the rest wait in the
+server's queue, so closing the browser does not stop them.
 The **Downloads** tab shows routing stages and per-resource progress, lets you
 stop downloads, switch routing to another downloaded region, resume partial
 map downloads and remove stored ones. The button itself doubles as a status

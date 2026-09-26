@@ -98,8 +98,8 @@ func Flags() []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:    "elevation-tile-cache-max-bytes",
-			Usage:   `terrain tile cache byte quota (for example 20GiB), or "available" to use free disk space`,
-			Value:   availableStorage,
+			Usage:   `quota for terrain tiles cached while browsing (for example 1GiB), or "available" for free disk space; downloaded tiles are bounded by the disk`,
+			Value:   "1GiB",
 			Sources: util.NonEmptyEnv("ELEVATION_TILE_CACHE_MAX_BYTES"),
 		},
 		&cli.StringFlag{
@@ -109,7 +109,7 @@ func Flags() []cli.Flag {
 			Sources: util.NonEmptyEnv("NOMINATIM_URL"),
 		},
 		&cli.StringFlag{Name: "offline-cache-dir", Usage: "persistent provider response cache; empty disables persistence", Value: util.DefaultOfflineCacheDir(), Sources: util.StringEnv("OFFLINE_CACHE_DIR")},
-		&cli.StringFlag{Name: "offline-cache-max-bytes", Usage: `response-cache byte quota (for example 20GiB), or "available" to use free disk space`, Value: availableStorage, Sources: util.NonEmptyEnv("OFFLINE_CACHE_MAX_BYTES")},
+		&cli.StringFlag{Name: "offline-cache-max-bytes", Usage: `quota for responses cached while browsing (for example 1GiB), or "available" for free disk space; downloads are bounded by the disk`, Value: "1GiB", Sources: util.NonEmptyEnv("OFFLINE_CACHE_MAX_BYTES")},
 		// The entry index lives in memory at about 0.9 KB per entry; a large
 		// country's maps need several hundred thousand entries.
 		&cli.IntFlag{Name: "offline-cache-max-entries", Usage: "response-cache entry limit (about 0.9 KB of memory each when used)", Value: 1000000, Sources: util.IntEnv("OFFLINE_CACHE_MAX_ENTRIES")},
@@ -396,8 +396,8 @@ func valueOrNone(value string) string {
 	return strings.TrimSpace(value)
 }
 
-// availableStorage sizes a cache from free disk space: downloads are limited by
-// the disk, not an arbitrary quota, while a safety margin stays free.
+// availableStorage lets browsing data, like downloads, use free disk space
+// down to the safety margin instead of a fixed quota.
 const availableStorage = "available"
 
 // parseCacheQuota reads a byte quota or the "available" keyword.

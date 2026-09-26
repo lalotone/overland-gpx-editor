@@ -229,6 +229,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	cache.useAvailableStorage = availableCache
+	// Where free space is measurable, downloads are bounded by the disk and the
+	// byte quota applies only to data cached while browsing.
+	cache.downloadsUseDisk = cache.writable && diskSpaceMeasurable(cache.dir)
 	trustedUIOrigin := ""
 	if strings.TrimSpace(cfg.TrustedUIOrigin) != "" {
 		trustedUIOrigin, err = normalizeOrigin(cfg.TrustedUIOrigin)
@@ -318,6 +321,7 @@ func New(cfg Config) (*Server, error) {
 		// Pack-owned terrain pins must be restored before any disk eviction.
 		tiles = newTileStoreWithQuota(cfg.ElevationTileURL, cfg.ElevationTileZoom, cfg.ElevationTileCache, cfg.ElevationTileCacheMaxBytes, client, true)
 		tiles.useAvailableStorage = availableTiles
+		tiles.downloadsUseDisk = tiles.cacheRoot != nil && diskSpaceMeasurable(tiles.cacheDir)
 		if tiles.cacheErr != nil {
 			cancel()
 			gpxRoot.Close()

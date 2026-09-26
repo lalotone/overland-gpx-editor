@@ -8,28 +8,31 @@ Broom graph prepared before going offline.
 ## Storage
 
 The generic response cache defaults to
-`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`). Its byte
-limit defaults to `available`: free disk space minus a 64 MiB margin, rechecked
-on every write, as on Android, so a region download is limited by the disk
-rather than an arbitrary quota. A size (`OFFLINE_CACHE_MAX_BYTES=20GiB`)
-restores a fixed quota with least-recently-used eviction. Where free space
-cannot be measured (Windows) the fixed 1 GiB defaults apply. The index holds
-up to 1,000,000 entries by default, about 0.9 KB of memory each in use; in
-`available` mode that count is what bounds passive browsing cache, since
-unpinned entries are evicted only at the entry limit or when the disk nears
-its margin. An explicitly empty `OFFLINE_CACHE_DIR`
+`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`). Storage
+is split in two. Responses cached while browsing are bounded by
+`OFFLINE_CACHE_MAX_BYTES` (1 GiB) and a per-scope quarter of the entry limit,
+with least-recently-used eviction. Downloaded data — entries pinned by a pack,
+and pack manifests — is not charged to that quota and never evicts browsing
+data; it is bounded by free disk space less a 64 MiB margin, rechecked on
+every write, so a region download is limited by the disk rather than an
+arbitrary quota. Removing a download returns its entries to browsing, trimmed
+back under the quota. `available` lifts the browsing quota as well (the
+Android policy). Where free space cannot be measured (Windows), downloads
+count against the quota as before. The index holds up to 1,000,000 entries,
+about 0.9 KB of memory each in use. An explicitly empty `OFFLINE_CACHE_DIR`
 disables new persistent response storage while retaining bounded pass-through
 APIs. Terrarium elevation keeps its existing, separate
 `$XDG_CACHE_HOME/overland/tiles` tree so upgrades do not move or invalidate
-already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` sizes that
-separate tree the same way, `available` by default; with a fixed size the
-oldest disk tiles are evicted first.
+already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` splits that
+separate tree the same way: browsing tiles within the 1 GiB quota, oldest
+evicted first, and pack tiles bounded by the disk.
 
 Response filenames are hashes. Search text and POI bounds do
 not appear in paths or request logs. Cache directories use mode `0700` and files
-use `0600`; writes use temporary files followed by rename. Bodies, sidecars and
-pack manifests count towards the quota. Expired entries are removed first,
-then least-recently-used unpinned entries. A pack cannot extend a provider's
+use `0600`; writes use temporary files followed by rename. Bodies and sidecars
+of browsing entries count towards the quota; downloaded entries and pack
+manifests count towards free disk space instead. Expired entries are removed
+first, then least-recently-used unpinned entries. A pack cannot extend a provider's
 retention ceiling.
 
 Place and POI caches reveal location history. Set `OFFLINE_CACHE_DIR=`
@@ -148,8 +151,9 @@ with terminal states always flushed. One manifest owns all cache pins; terrain
 pins are restored before quota eviction at startup. Quota shortages fail admission
 rather than silently replacing previously downloaded packs.
 
-Regional elevation work allows up to 16,384 tiles / 2 GiB, still subject to the
-configured terrain quota and existing pack reservations. Broad POI searches keep
+Regional elevation work allows up to 16,384 tiles per pack, bounded in bytes
+by free disk space (or, where it cannot be measured, by the terrain quota and
+existing pack reservations). Broad POI searches keep
 their provider bounds: `unavailable` reports unsupported resources and a terminal
 `provider_limits` result distinguishes those from a network failure. There is no
 tiled Overpass sweep. Supported map/elevation work can finish independently.
@@ -227,9 +231,10 @@ packs change quota and reuse; one that no longer fits becomes `incomplete` with
 not the 8 MiB a running regional manifest reserves, and can be cancelled or
 deleted before they start. A restart reports queued packs as interrupted, like
 running ones. Packs remain pinned until removed;
-there is no fixed retained-pack count. Their metadata is charged to storage:
-running jobs reserve room to grow, completed manifests occupy their actual size,
-and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
+there is no fixed retained-pack count. Their metadata is written against free
+disk space, rechecked on every write; where free space cannot be measured it is
+charged to the quota instead: running jobs reserve room to grow, completed
+manifests occupy their actual size, and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
 identity and preserves its pins. Editing an already loaded track does not
 restart the job.
 

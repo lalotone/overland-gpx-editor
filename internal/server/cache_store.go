@@ -79,11 +79,18 @@ type cacheStore struct {
 	reserved            int64
 	writable            bool
 	useAvailableStorage bool
+	// downloadsUseDisk bounds pinned (downloaded) entries by free disk space
+	// instead of maxBytes, which then limits only browsing (unpinned) data and
+	// its per-scope share. It is set where free space can be measured; elsewhere
+	// every byte, including pack manifest reservations, counts against maxBytes.
+	downloadsUseDisk bool
 
 	mu                  sync.Mutex
 	writeMu             sync.Mutex
 	entries             map[string]*cacheMetadata
 	scopeCounts         map[string]int
+	unpinnedScopeCounts map[string]int
+	pinnedBytes         int64
 	nextExpiry          time.Time // conservative earliest unpinned stale or mandatory deletion deadline
 	bytes               int64
 	now                 func() time.Time
@@ -105,7 +112,7 @@ func (s *cacheStore) setReservedBytes(bytes int64) error {
 		s.reserved = 0
 		return nil
 	}
-	if bytes < 0 || bytes > s.maxBytes {
+	if bytes < 0 || !s.downloadsUseDisk && bytes > s.maxBytes {
 		return fmt.Errorf("offline cache quota is smaller than required control storage")
 	}
 	s.reserved = bytes
@@ -119,10 +126,12 @@ func (s *cacheStore) reserveControlStorage(bytes int64) error {
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if bytes < 0 || bytes > s.maxBytes {
+	if bytes < 0 || !s.downloadsUseDisk && bytes > s.maxBytes {
 		return cacheStorageLimitError("pack metadata exceeds cache storage quota")
 	}
-	if bytes > s.reserved {
+	// Manifests belong to downloads; with free space measurable they are
+	// checked against the disk when written, not against the browsing quota.
+	if bytes > s.reserved && !s.downloadsUseDisk {
 		for s.bytes > s.maxBytes-bytes {
 			evicted, err := s.evictLRULocked("")
 			if err != nil {
@@ -451,7 +460,9 @@ func (s *cacheStore) loadedEvictionStateLocked() (map[string]int, []*cacheMetada
 	counts := make(map[string]int)
 	candidates := make([]*cacheMetadata, 0, len(s.entries))
 	for _, meta := range s.entries {
-		counts[meta.Scope]++
+		if s.chargedLocked(meta) {
+			counts[meta.Scope]++
+		}
 		if len(meta.Pins) == 0 {
 			candidates = append(candidates, meta)
 		}
@@ -461,7 +472,7 @@ func (s *cacheStore) loadedEvictionStateLocked() (map[string]int, []*cacheMetada
 
 func (s *cacheStore) evictLoadedGlobalLocked(candidates []*cacheMetadata, counts map[string]int) error {
 	for _, candidate := range candidates {
-		if len(s.entries) <= s.maxEntries && s.bytes <= s.maxBytes-s.reserved {
+		if len(s.entries) <= s.maxEntries && s.chargedBytesLocked() <= s.maxBytes {
 			break
 		}
 		if err := s.evictLoadedCandidateLocked(candidate, counts); err != nil {
@@ -778,7 +789,10 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 	}
 	meta.metadataLength = int64(len(raw))
 	required := meta.Length + meta.metadataLength
-	if required > s.maxBytes {
+	// Bulk admissions are pack downloads, pinned as soon as they are stored;
+	// refreshing an entry that is already pinned keeps it a download.
+	download := s.downloadsUseDisk && (admit != nil || len(meta.Pins) != 0)
+	if required > s.maxBytes && !download {
 		return 0, cacheStorageLimitError("cache entry exceeds quota")
 	}
 	oldBytes := int64(0)
@@ -806,13 +820,13 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 			return 0, &cacheAdmissionRateError{retryAfter: retryAfter}
 		}
 	}
-	if err := s.admitLocked(meta.Scope, meta.Key, required); err != nil {
+	if err := s.admitLocked(meta.Scope, meta.Key, required, download); err != nil {
 		s.mu.Unlock()
 		return 0, err
 	}
 	s.mu.Unlock()
 	// Rate/quota rejections must not charge the pack's shared byte budget.
-	if s.useAvailableStorage {
+	if s.useAvailableStorage || download {
 		if err := requirePackDiskSpace(s.dir, required); err != nil {
 			return 0, err
 		}
@@ -958,14 +972,17 @@ func syncRootDir(root *os.Root, path string) error {
 	return dir.Sync()
 }
 
-func (s *cacheStore) admitLocked(scope, replacing string, required int64) error {
+// admitLocked makes room for an entry. A download is charged only against the
+// entry-count guard; browsing data is also charged against the byte quota and
+// its scope's share.
+func (s *cacheStore) admitLocked(scope, replacing string, required int64, download bool) error {
 	now := s.now()
 	if !s.nextExpiry.IsZero() && !now.Before(s.nextExpiry) {
 		if err := s.expireLocked(now, replacing); err != nil {
 			return err
 		}
 	}
-	return s.makeRoomLocked(scope, replacing, required)
+	return s.makeRoomLocked(scope, replacing, required, download)
 }
 
 func (s *cacheStore) expireLocked(now time.Time, replacing string) error {
@@ -995,16 +1012,24 @@ func (s *cacheStore) expireLocked(now time.Time, replacing string) error {
 	return nil
 }
 
-func (s *cacheStore) makeRoomLocked(scope, replacing string, required int64) error {
-	oldBytes := int64(0)
-	oldCount := 0
+func (s *cacheStore) makeRoomLocked(scope, replacing string, required int64, download bool) error {
+	oldCount, oldCharged, oldScopeCharged := 0, int64(0), 0
 	if old := s.entries[replacing]; old != nil {
-		oldBytes = old.Length + old.metadataLength
 		oldCount = 1
+		if s.chargedLocked(old) {
+			oldCharged, oldScopeCharged = old.Length+old.metadataLength, 1
+		}
 	}
+	charge := !download || !s.downloadsUseDisk
 	perScopeCap := s.scopeEntryLimit()
-	for len(s.entries)-oldCount >= s.maxEntries || s.scopeCountLocked(scope)-oldCount >= perScopeCap ||
-		s.bytes-oldBytes+required > s.maxBytes-s.reserved {
+	overEntries := func() bool {
+		return len(s.entries)-oldCount >= s.maxEntries ||
+			charge && s.chargedScopeCountLocked(scope)-oldScopeCharged >= perScopeCap
+	}
+	overBytes := func() bool {
+		return charge && s.chargedBytesLocked()-oldCharged+required > s.maxBytes
+	}
+	for overEntries() || overBytes() {
 		evicted, err := s.evictLRULocked(replacing)
 		if err != nil {
 			return fmt.Errorf("evict cache entry: %w", err)
@@ -1013,13 +1038,58 @@ func (s *cacheStore) makeRoomLocked(scope, replacing string, required int64) err
 			break
 		}
 	}
-	if len(s.entries)-oldCount >= s.maxEntries || s.scopeCountLocked(scope)-oldCount >= perScopeCap {
+	if overEntries() {
 		return cacheStorageLimitError("cache entry limit reached by pinned data")
 	}
-	if s.bytes-oldBytes+required > s.maxBytes-s.reserved {
+	if overBytes() {
 		return cacheStorageLimitError("cache byte quota reached by pinned data")
 	}
 	return nil
+}
+
+// chargedLocked reports whether an entry counts against the byte quota.
+func (s *cacheStore) chargedLocked(meta *cacheMetadata) bool {
+	return !s.downloadsUseDisk || len(meta.Pins) == 0
+}
+
+// chargedBytesLocked is the usage the byte quota limits: browsing data only
+// when downloads are bounded by the disk, otherwise everything reserved too.
+func (s *cacheStore) chargedBytesLocked() int64 {
+	if s.downloadsUseDisk {
+		return s.bytes - s.pinnedBytes
+	}
+	return s.bytes + s.reserved
+}
+
+func (s *cacheStore) chargedScopeCountLocked(scope string) int {
+	if s.downloadsUseDisk {
+		return s.unpinnedScopeCounts[scope]
+	}
+	return s.scopeCounts[scope]
+}
+
+// trimBrowsingLocked evicts browsing data back under the quota, best effort.
+// It runs after a download releases entries, so a removal never fails on quota.
+func (s *cacheStore) trimBrowsingLocked() {
+	for s.chargedBytesLocked() > s.maxBytes {
+		if evicted, err := s.evictLRULocked(""); err != nil || !evicted {
+			return
+		}
+	}
+}
+
+// downloadRoom is how many more bytes downloads may store.
+func (s *cacheStore) downloadRoom() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.downloadsUseDisk {
+		return max(0, s.maxBytes-s.bytes-s.reserved)
+	}
+	available, supported, err := availableDiskBytes(s.dir)
+	if err != nil || !supported {
+		return 0
+	}
+	return max(0, quotaWithFreeSpace(0, available))
 }
 
 func (s *cacheStore) scopeCountLocked(scope string) int {
@@ -1051,12 +1121,27 @@ func (s *cacheStore) setEntryLocked(meta *cacheMetadata) {
 	if s.scopeCounts == nil {
 		s.scopeCounts = make(map[string]int)
 	}
+	if s.unpinnedScopeCounts == nil {
+		s.unpinnedScopeCounts = make(map[string]int)
+	}
 	if old := s.entries[meta.Key]; old != nil {
 		s.scopeCounts[old.Scope]--
+		s.countPinningLocked(old, -1)
 	}
 	s.entries[meta.Key] = meta
 	s.scopeCounts[meta.Scope]++
+	s.countPinningLocked(meta, 1)
 	s.nextExpiry = earlierCacheExpiry(s.nextExpiry, meta)
+}
+
+// countPinningLocked keeps pinned bytes and unpinned scope counts in step with
+// the index; pinning or unpinning always republishes the entry through here.
+func (s *cacheStore) countPinningLocked(meta *cacheMetadata, sign int) {
+	if len(meta.Pins) != 0 {
+		s.pinnedBytes += int64(sign) * (meta.Length + meta.metadataLength)
+	} else {
+		s.unpinnedScopeCounts[meta.Scope] += sign
+	}
 }
 
 func (s *cacheStore) evictLRULocked(exclude string) (bool, error) {
@@ -1108,6 +1193,7 @@ func (s *cacheStore) removeLocked(scope, key string) (bool, error) {
 	}
 	s.bytes -= meta.Length + meta.metadataLength
 	s.scopeCounts[meta.Scope]--
+	s.countPinningLocked(meta, -1)
 	delete(s.entries, key)
 	return true, nil
 }
@@ -1136,7 +1222,9 @@ func (s *cacheStore) updateMetadataLocked(meta cacheMetadata) error {
 		s.mu.Unlock()
 		return nil
 	}
-	if err := s.admitLocked(meta.Scope, meta.Key, meta.Length+int64(len(raw))); err != nil {
+	// Metadata of an existing entry: pin changes and access times must not fail
+	// on the browsing quota. An entry a download released is trimmed below.
+	if err := s.admitLocked(meta.Scope, meta.Key, meta.Length+int64(len(raw)), true); err != nil {
 		s.mu.Unlock()
 		return err
 	}
@@ -1151,6 +1239,9 @@ func (s *cacheStore) updateMetadataLocked(meta cacheMetadata) error {
 		copyMeta := meta
 		s.setEntryLocked(&copyMeta)
 		s.bytes += meta.metadataLength
+		if s.downloadsUseDisk && len(old.Pins) != 0 && len(meta.Pins) == 0 {
+			s.trimBrowsingLocked()
+		}
 	}
 	s.mu.Unlock()
 	return nil
@@ -1234,14 +1325,17 @@ func (s *cacheStore) clear(scope string) (int, error) {
 }
 
 type cacheStats struct {
-	Writable bool                      `json:"writable"`
-	Bytes    int64                     `json:"bytes"`
-	Quota    int64                     `json:"quota"`
-	Reserved int64                     `json:"reservedBytes"`
-	Entries  int                       `json:"entries"`
-	Hits     uint64                    `json:"hits"`
-	Misses   uint64                    `json:"misses"`
-	Scopes   map[string]cacheScopeStat `json:"scopes"`
+	Writable bool  `json:"writable"`
+	Bytes    int64 `json:"bytes"`
+	Quota    int64 `json:"quota"`
+	Reserved int64 `json:"reservedBytes"`
+	// PinnedBytes are downloads; with DownloadsUseDisk they sit outside Quota.
+	PinnedBytes      int64                     `json:"pinnedBytes"`
+	DownloadsUseDisk bool                      `json:"downloadsUseDisk"`
+	Entries          int                       `json:"entries"`
+	Hits             uint64                    `json:"hits"`
+	Misses           uint64                    `json:"misses"`
+	Scopes           map[string]cacheScopeStat `json:"scopes"`
 }
 
 type cacheScopeStat struct {
@@ -1253,7 +1347,7 @@ type cacheScopeStat struct {
 func (s *cacheStore) stats() cacheStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stats := cacheStats{Writable: s.writable, Bytes: s.bytes, Quota: s.maxBytes, Reserved: s.reserved, Entries: len(s.entries), Hits: s.getHits.Load(), Misses: s.getMisses.Load(), Scopes: map[string]cacheScopeStat{}}
+	stats := cacheStats{Writable: s.writable, Bytes: s.bytes, Quota: s.maxBytes, Reserved: s.reserved, PinnedBytes: s.pinnedBytes, DownloadsUseDisk: s.downloadsUseDisk, Entries: len(s.entries), Hits: s.getHits.Load(), Misses: s.getMisses.Load(), Scopes: map[string]cacheScopeStat{}}
 	if s.useAvailableStorage {
 		stats.Quota = availableStorageQuota(s.dir, s.bytes+s.reserved)
 	}

@@ -987,8 +987,8 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			return packEstimate{}, err
 		}
 		maxEntries, maxBytes := packElevationLimits(input)
-		if input.Regional && m.server.elevation.tiles.useAvailableStorage {
-			maxBytes = m.server.elevation.tiles.diskQuota()
+		if input.Regional && m.server.elevation.tiles.downloadsUseDisk {
+			maxBytes = m.server.elevation.tiles.downloadCapacity()
 		}
 		if len(tiles) > maxEntries {
 			return packEstimate{}, packTooLargeError(fmt.Sprintf("elevation pack exceeds %d tiles", maxEntries))
@@ -1013,7 +1013,7 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		if estimatedTileBytes > maxBytes {
 			return packEstimate{}, packTooLargeError("elevation pack exceeds its byte limit")
 		}
-		if estimatedTileBytes > m.server.elevation.tiles.diskQuota() {
+		if estimatedTileBytes > m.server.elevation.tiles.downloadCapacity() {
 			return packEstimate{}, errors.New("elevation pack exceeds the configured tile cache quota")
 		}
 		if !m.server.elevation.tiles.canFitPack(tiles) {
@@ -1100,8 +1100,13 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		return packEstimate{}, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", packResourceLimit(input)))
 	}
 	stats := m.server.cache.stats()
-	reserved := m.controlReserve() + int64(packManifestLimit(input))
-	estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-reserved)
+	if stats.DownloadsUseDisk {
+		// Downloads are bounded by free disk, less room for this pack's manifest.
+		estimate.RemainingQuota = max(0, m.server.cache.downloadRoom()-int64(packManifestLimit(input)))
+	} else {
+		reserved := m.controlReserve() + int64(packManifestLimit(input))
+		estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-reserved)
+	}
 	estimate.FinalBytes = stats.Bytes + estimate.GenericBytes
 	estimate.Detail = strings.Join(estimate.Dynamic, "; ")
 	return estimate, nil
@@ -1462,10 +1467,10 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 	elevation := func() bool {
 		_, limit := packElevationLimits(manifest.Input)
 		if m.server.elevation.tiles != nil {
-			if manifest.Input.Regional && m.server.elevation.tiles.useAvailableStorage {
-				limit = m.server.elevation.tiles.diskQuota()
+			if manifest.Input.Regional && m.server.elevation.tiles.downloadsUseDisk {
+				limit = m.server.elevation.tiles.downloadCapacity()
 			} else {
-				limit = min(limit, m.server.elevation.tiles.diskQuota())
+				limit = min(limit, m.server.elevation.tiles.downloadCapacity())
 			}
 		}
 		elevationBudget := &packAdmissionBudget{limit: limit}
@@ -1757,7 +1762,7 @@ func (m *packManager) delete(id string) (bool, error) {
 
 func (m *packManager) cleanupPack(p *packManifest) error {
 	if m.server.elevation.tiles != nil {
-		m.server.elevation.tiles.setPackPins(p.ID, nil)
+		m.server.elevation.tiles.releasePackPins(p.ID)
 	}
 	var persistenceErr error
 	for _, key := range p.CacheKeys {

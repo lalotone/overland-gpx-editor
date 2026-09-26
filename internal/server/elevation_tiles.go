@@ -87,12 +87,16 @@ type tileStore struct {
 	cacheErr            error
 	maxDiskBytes        int64
 	useAvailableStorage bool
-	client              *http.Client
-	userAgent           string
-	sem                 chan struct{}
-	modes               *offlineModeController
-	ctx                 context.Context
-	wg                  *sync.WaitGroup
+	// downloadsUseDisk bounds pack-pinned tiles by free disk space, leaving
+	// maxDiskBytes to limit tiles cached while browsing. Set where free space
+	// can be measured; elsewhere pinned tiles count against the quota too.
+	downloadsUseDisk bool
+	client           *http.Client
+	userAgent        string
+	sem              chan struct{}
+	modes            *offlineModeController
+	ctx              context.Context
+	wg               *sync.WaitGroup
 
 	mu       sync.Mutex
 	lru      *list.List // front = most recently used, values are lruEntry
@@ -101,10 +105,11 @@ type tileStore struct {
 
 	prefetch prefetchState
 
-	diskMu    sync.Mutex
-	diskPins  map[string]map[string]struct{}
-	diskBytes int64
-	diskFiles map[string]tileDiskFile
+	diskMu          sync.Mutex
+	diskPins        map[string]map[string]struct{}
+	diskBytes       int64
+	pinnedDiskBytes int64
+	diskFiles       map[string]tileDiskFile
 
 	memoryHits           atomic.Uint64
 	diskHits             atomic.Uint64
@@ -537,9 +542,11 @@ func (s *tileStore) readDisk(key tileKey) ([]byte, bool) {
 	path := key.path()
 	entry, indexed := s.diskFiles[path]
 	if !indexed {
-		s.diskBytes += int64(len(raw))
-	} else {
-		s.diskBytes += int64(len(raw)) - entry.size
+		entry.size = 0
+	}
+	s.diskBytes += int64(len(raw)) - entry.size
+	if s.pinnedPathLocked(path) {
+		s.pinnedDiskBytes += int64(len(raw)) - entry.size
 	}
 	entry.key = key
 	entry.size = int64(len(raw))
@@ -585,7 +592,10 @@ func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
 	s.diskBytes -= old.size
 	s.diskFiles[path] = tileDiskFile{key: key, size: int64(len(raw)), lastAccess: time.Now().UTC()}
 	s.diskBytes += int64(len(raw))
-	if s.diskBytes > s.maxDiskBytes {
+	if s.pinnedPathLocked(path) {
+		s.pinnedDiskBytes += int64(len(raw)) - old.size
+	}
+	if s.chargedDiskBytesLocked() > s.maxDiskBytes {
 		return cacheStorageLimitError("elevation tile cache quota exceeded after write")
 	}
 	return nil
@@ -656,11 +666,15 @@ func tileKeyFromPath(path string) (tileKey, bool) {
 }
 
 func (s *tileStore) makeDiskRoomLocked(path string, size int64) error {
+	if s.downloadsUseDisk && s.pinnedPathLocked(path) {
+		// A pack's tile: bounded by the disk, never by evicting browsing tiles.
+		return requirePackDiskSpace(s.cacheDir, size)
+	}
 	if size > s.maxDiskBytes {
 		return cacheStorageLimitError("elevation tile exceeds cache quota")
 	}
 	old := s.diskFiles[path]
-	for s.diskBytes-old.size+size > s.maxDiskBytes {
+	for s.chargedDiskBytesLocked()-old.size+size > s.maxDiskBytes {
 		if err := s.evictOldestDiskLocked(path); err != nil {
 			return err
 		}
@@ -668,8 +682,20 @@ func (s *tileStore) makeDiskRoomLocked(path string, size int64) error {
 	return nil
 }
 
+func (s *tileStore) pinnedPathLocked(path string) bool {
+	return len(s.diskPins[path]) > 0
+}
+
+// chargedDiskBytesLocked is the usage maxDiskBytes limits.
+func (s *tileStore) chargedDiskBytesLocked() int64 {
+	if s.downloadsUseDisk {
+		return s.diskBytes - s.pinnedDiskBytes
+	}
+	return s.diskBytes
+}
+
 func (s *tileStore) enforceDiskQuotaLocked(exclude string) error {
-	for s.diskBytes > s.maxDiskBytes {
+	for s.chargedDiskBytesLocked() > s.maxDiskBytes {
 		if err := s.evictOldestDiskLocked(exclude); err != nil {
 			return err
 		}
@@ -885,6 +911,17 @@ func (s *tileStore) diskStats() (int64, int) {
 func (s *tileStore) diskQuota() int64 {
 	if !s.useAvailableStorage {
 		return s.maxDiskBytes
+	}
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	return availableStorageQuota(s.cacheDir, s.diskBytes)
+}
+
+// downloadCapacity is the most terrain a pack may hold, counting tiles it
+// reuses: the disk when it bounds downloads, otherwise the tile quota.
+func (s *tileStore) downloadCapacity() int64 {
+	if !s.downloadsUseDisk {
+		return s.diskQuota()
 	}
 	s.diskMu.Lock()
 	defer s.diskMu.Unlock()

@@ -25,6 +25,25 @@ func (s *tileStore) setPackPins(owner string, paths []string) {
 		}
 		s.diskPins[path][owner] = struct{}{}
 	}
+	// Pin sets change only when packs start, finish restoring or are removed,
+	// so recounting beats tracking every transition.
+	s.pinnedDiskBytes = 0
+	for path := range s.diskPins {
+		s.pinnedDiskBytes += s.diskFiles[path].size
+	}
+}
+
+// releasePackPins drops a removed pack's pins. Its tiles become browsing data
+// again, so the browsing quota is restored, best effort. Never used while
+// restoring pins at startup: evicting then could take a later pack's tiles.
+func (s *tileStore) releasePackPins(owner string) {
+	s.setPackPins(owner, nil)
+	if !s.downloadsUseDisk || s.cacheRoot == nil {
+		return
+	}
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	_ = s.enforceDiskQuotaLocked("")
 }
 
 func (s *tileStore) canFitPack(keys []tileKey) bool {
@@ -37,13 +56,18 @@ func (s *tileStore) canFitPack(keys []tileKey) bool {
 	for _, key := range keys {
 		paths[key.path()] = struct{}{}
 	}
-	var required int64
+	var required, missing int64
 	for path := range paths {
 		if tile, ok := s.diskFiles[path]; ok {
 			required += tile.size
 		} else {
 			required += 120 << 10
+			missing += 120 << 10
 		}
+	}
+	if s.downloadsUseDisk {
+		// Only tiles still to fetch take new space; pinned ones are already there.
+		return missing <= quotaWithFreeSpace(0, availableOrZero(s.cacheDir))
 	}
 	quota := s.maxDiskBytes
 	if s.useAvailableStorage {

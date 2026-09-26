@@ -161,11 +161,11 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			if got := cmd.String("elevation-tile-cache"); got != util.DefaultTileCacheDir() {
 				t.Errorf("elevation-tile-cache = %q, want %q", got, util.DefaultTileCacheDir())
 			}
-			if got := cmd.String("elevation-tile-cache-max-bytes"); got != "available" {
-				t.Errorf("elevation-tile-cache-max-bytes = %q, want available", got)
+			if got := cmd.String("elevation-tile-cache-max-bytes"); got != "1GiB" {
+				t.Errorf("elevation-tile-cache-max-bytes = %q, want 1GiB", got)
 			}
-			if got := cmd.String("offline-cache-max-bytes"); got != "available" {
-				t.Errorf("offline-cache-max-bytes = %q, want available", got)
+			if got := cmd.String("offline-cache-max-bytes"); got != "1GiB" {
+				t.Errorf("offline-cache-max-bytes = %q, want 1GiB", got)
 			}
 			if got := cmd.String("nominatim-url"); got != "https://nominatim.openstreetmap.org" {
 				t.Errorf("nominatim-url = %q", got)
@@ -304,7 +304,7 @@ func TestOfflineFlagDefaultsAndExplicitDisable(t *testing.T) {
 		if got := cmd.String("offline-cache-dir"); got != "" {
 			t.Errorf("offline-cache-dir = %q", got)
 		}
-		if got := cmd.String("offline-cache-max-bytes"); got != "available" {
+		if got := cmd.String("offline-cache-max-bytes"); got != "1GiB" {
 			t.Errorf("max bytes = %q", got)
 		}
 		if got := cmd.Int("offline-cache-max-entries"); got != 1000000 {

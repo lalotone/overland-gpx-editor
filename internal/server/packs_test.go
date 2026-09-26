@@ -558,12 +558,18 @@ func TestPackStartEnforcesQueueCeilingBeforeEstimating(t *testing.T) {
 
 func fuelPackServer(t *testing.T) *Server {
 	t.Helper()
+	return fuelPackServerWith(t, Config{})
+}
+
+func fuelPackServerWith(t *testing.T, cfg Config) *Server {
+	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
 	}))
 	t.Cleanup(upstream.Close)
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL})
+	cfg.GPXDir, cfg.ElevationHost, cfg.OfflineCacheDir, cfg.FuelURL = t.TempDir(), "http://elevation.invalid", t.TempDir(), upstream.URL
+	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,6 +754,7 @@ func TestPackManagerRetainsMoreThanSixteenManifestsAfterRestart(t *testing.T) {
 }
 
 func TestPackReservesManifestQuota(t *testing.T) {
+	countDownloadsAgainstQuota(t)
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		OfflineCacheMaxBytes: int64(maxRegionalManifestBytes),
@@ -781,6 +788,7 @@ func TestElevationPackHasSeparateTileCeiling(t *testing.T) {
 }
 
 func TestElevationPackHonorsConfiguredTileCacheQuota(t *testing.T) {
+	countDownloadsAgainstQuota(t)
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png",
 		ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: 1, OfflineCacheDir: t.TempDir(),
@@ -865,6 +873,7 @@ func TestPackPersistenceFailureBecomesStorageError(t *testing.T) {
 }
 
 func TestPackHardStopsWhenActualResourceExceedsBudget(t *testing.T) {
+	countDownloadsAgainstQuota(t)
 	var calls atomic.Int64
 	oversized := `{"elements":[],"padding":"` + strings.Repeat("x", 6<<20) + `"}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

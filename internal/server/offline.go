@@ -68,13 +68,25 @@ func (s *Server) isTrustedManagementOrigin(origin string, r *http.Request) bool 
 	return s.peerIsLoopback(r) && loopbackOrigin(normalized)
 }
 
+// sameOriginTrustedUI recognises a page served from the trusted UI origin
+// itself. Browsers omit Origin on same-origin GETs, so the UI's status polls
+// carry only Fetch Metadata and Host; both must name that exact origin, which
+// a rebinding page cannot do since its Host is still its own.
+func (s *Server) sameOriginTrustedUI(r *http.Request) bool {
+	if s.trustedUIOrigin == "" || !strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "same-origin") {
+		return false
+	}
+	u, err := url.Parse(s.trustedUIOrigin)
+	return err == nil && strings.EqualFold(u.Host, r.Host)
+}
+
 func (s *Server) authorizedOfflineControl(r *http.Request, requireHeader bool) bool {
 	if s.validAdminToken(r) {
 		return true
 	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return s.peerIsLoopback(r)
+		return s.peerIsLoopback(r) || s.sameOriginTrustedUI(r)
 	}
 	if requireHeader && r.Header.Get("X-GPX-Editor") == "" {
 		return false

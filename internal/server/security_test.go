@@ -80,25 +80,73 @@ func TestOfflineManagementDoesNotTrustGeneralCORSOrigins(t *testing.T) {
 	}
 }
 
-func TestOfflineReadWithoutOriginRejectsRemoteHostAndFetchMetadata(t *testing.T) {
+// Browsers send no Origin on a same-origin GET, so a UI served from the
+// trusted origin itself (the passkey deployment behind a proxy) polls
+// /offline/routing with only Fetch Metadata and Host to go on. Those are
+// trusted only when they name that exact origin; anything else still needs a
+// loopback peer or an admin token.
+func TestOfflineReadWithoutOriginTrustsOnlyTheSameOriginUI(t *testing.T) {
+	tests := []struct {
+		name        string
+		behindProxy bool
+		remote      string
+		host        string
+		site        string
+		want        int
+	}{
+		{"proxied same-origin UI", true, "127.0.0.1:32000", "planner.example.test", "same-origin", 200},
+		{"direct same-origin UI", false, "192.0.2.10:1", "planner.example.test", "same-origin", 200},
+		{"rebound host", true, "127.0.0.1:32000", "attacker.example.test", "same-origin", 403},
+		{"host with another port", true, "127.0.0.1:32000", "planner.example.test:8443", "same-origin", 403},
+		{"sibling subdomain", true, "127.0.0.1:32000", "planner.example.test", "same-site", 403},
+		{"cross-site", true, "127.0.0.1:32000", "planner.example.test", "cross-site", 403},
+		{"no fetch metadata", true, "127.0.0.1:32000", "planner.example.test", "", 403},
+		{"direct remote host", false, "192.0.2.10:1", "attacker.example.test", "same-origin", 403},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := New(Config{
+				GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+				TrustedUIOrigin: "https://planner.example.test", BehindProxy: tt.behindProxy,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanupTestServer(t, s)
+			req := httptest.NewRequest(http.MethodGet, "/offline/packs", nil)
+			req.RemoteAddr = tt.remote
+			req.Host = tt.host
+			if tt.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.site)
+			}
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Errorf("status = %d, want %d (%s)", rec.Code, tt.want, rec.Body)
+			}
+		})
+	}
+}
+
+// Without a declared UI origin there is nothing for Host to match, so an
+// origin-less remote read stays refused however same-origin it claims to be.
+func TestOfflineReadWithoutOriginNeedsADeclaredUIOrigin(t *testing.T) {
 	s, err := New(Config{
 		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
-		TrustedUIOrigin: "https://planner.example.test",
+		AllowedOrigins: []string{"https://planner.example.test"}, BehindProxy: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupTestServer(t, s)
-	for _, host := range []string{"planner.example.test", "attacker.example.test"} {
-		req := httptest.NewRequest(http.MethodGet, "/offline/packs", nil)
-		req.RemoteAddr = "192.0.2.10:1"
-		req.Host = host
-		req.Header.Set("Sec-Fetch-Site", "same-origin")
-		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("host %q status = %d, want %d", host, rec.Code, http.StatusForbidden)
-		}
+	req := httptest.NewRequest(http.MethodGet, "/offline/packs", nil)
+	req.RemoteAddr = "127.0.0.1:32000"
+	req.Host = "planner.example.test"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 }
 

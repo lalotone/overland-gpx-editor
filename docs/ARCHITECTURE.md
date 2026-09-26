@@ -64,8 +64,11 @@ src/
 cmd/overland/
 ├── main.go                     Minimal urfave/cli entry point
 ├── serve/                      HTTP server flags and graceful shutdown
+│   └── auth.go                 Optional passkey guard around the whole handler
 ├── import/                     Create-only GPX library import
+├── user/                       Passkey account management for serve --auth
 └── util/                       Shared CLI flags
+internal/passkeyauth/           WebAuthn sign-in, SQLite accounts/sessions, CLI
 internal/server/
 ├── server.go                   Chi routes, middleware, embedded-frontend handler
 ├── files.go                    Track library: list/read/write/upload/delete
@@ -126,8 +129,35 @@ The listener defaults to `127.0.0.1:8000`, limits header size and read time, and
 has bounded idle and header-read deadlines. Browser-originated writes are
 accepted only from an exact configured origin, or from matching loopback origins
 in the default local setup. Requests without an `Origin` remain valid for CLI
-clients, so these checks are not authentication; public deployments still need
-an authenticated reverse proxy.
+clients, so these checks are not authentication; public deployments need
+`--auth` or an authenticated reverse proxy.
+
+**Passkey sign-in** (`serve --auth`) is deliberately not part of
+`internal/server`. `cmd/overland/serve/auth.go` wraps the finished handler: an
+outer `http.ServeMux` sends `/auth/` to `internal/passkeyauth` and everything
+else to the chi router, and `Protect` guards the lot. The mobile host embeds
+`internal/server` behind its own capability cookie, so keeping auth outside it
+means the Android app neither changes behaviour nor links WebAuthn or SQLite.
+Signed out, a top-level navigation gets the generic sign-in page and every
+other request a JSON 401; the API has no common prefix, so the split is made on
+`Sec-Fetch-Mode`, not the path. Only `/healthz` is answered before the guard.
+Two traps it closes: chi routes on the raw path while exemptions are decided on
+the decoded one, so an escaped path is never public; and nothing under `/auth/`
+may fall through to the SPA catch-all, which would hand the app shell to a
+signed-out visitor. Accounts, passkeys and hashed session and enrollment tokens
+live in a SQLite database created `0600`. A signed-out client creates no
+server state: `begin` seals the WebAuthn challenge into an XChaCha20-Poly1305 token under
+a per-process key, which the browser hands back to `finish`. Any bounded store
+of pending challenges can be filled by an attacker with enough source
+addresses, evicting or refusing every real sign-in, and a rate limit keyed on
+addresses is either bypassed the same way or becomes the lockout lever
+itself. Tokens expire after five minutes and are spent on the challenge they
+carry, so a verified ceremony cannot be replayed even by a synced passkey
+whose signature counter stays at zero; only verified ceremonies are recorded.
+A restart invalidates tokens in flight, which costs a retry. The guard marks its own
+401s with `X-Passkey-Auth: sign-in`, and `session.js` returns to sign-in only
+on those, so the MCP bridge's capability 401 after a restart cannot reload the
+page over unsaved edits.
 
 **`files.go`** is a track library over a directory. Every filename arriving from
 the network goes through `safeGPXFilename`, which requires a bare `*.gpx` with no
@@ -250,14 +280,15 @@ back in order. A point the service has no value for comes back `null`, never
 | `PUT /offline/mode` | Protected runtime transition between `auto` and `cache-only` when startup policy permits |
 | `/offline/packs` | Estimate, create, inspect, cancel and delete trip packs |
 | `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope |
-| `GET /healthz` | Lightweight liveness check; returns 204 |
+| `GET /healthz` | Lightweight liveness check; returns 204. The only route open under `--auth` |
+| `/auth/*` | With `--auth` only: enrollment page, sign-in assets and `/auth/api/{login,enroll}/{begin,finish}`, `enroll/check`, `logout`, `me` |
 | `/mcp/browser/*` | Private browser broker, mounted only with `--mcp`. The agent-facing `/mcp` endpoint is **not** here: it is served by a separate loopback listener so a reverse proxy in front of this one cannot reach it |
 | `GET /*` | The React app; unknown paths fall through to it |
 
 Application errors come back as `{"detail": "…"}` with a matching status.
 An unavailable cached resource adds `code: "offline_cache_miss"` and `scope`.
 Cross-origin access is disabled unless exact origins are configured. There is
-no built-in authentication.
+no authentication unless `serve --auth` is on; see Backend.
 
 ---
 
@@ -325,6 +356,7 @@ make check          # everything below, plus go vet, gofmt, tsc, eslint
 npm run verify      # logic harness
 go test ./internal/...
 npm run test:e2e    # Playwright desktop and mobile Chromium projects
+npm run test:e2e:auth  # passkey sign-in against the real binary
 ```
 
 `npm run verify` is the one that matters when touching parsing, elevation maths

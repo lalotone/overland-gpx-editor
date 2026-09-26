@@ -84,6 +84,7 @@ import type { CacheMetadata, OfflineMode, RoutingDataStatus } from './lib/offlin
 import './App.css'
 import RoutingDownloadControl from './components/RoutingDownloadControl'
 import MapControlLayout from './components/MapControlLayout'
+import { signOut, usePasskeySession } from './usePasskeySession'
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -2298,6 +2299,7 @@ function App() {
   }, [cursorPos, handleCacheMetadata, runtime])
 
   useMcpBridge(API_BASE, getMcpSnapshot, handleMcpCommand)
+  const passkeySession = usePasskeySession(API_BASE)
 
   /* -- Render ------------------------------------------------------- */
 
@@ -2345,6 +2347,18 @@ function App() {
         <div className="corner-actions">
           {offlineModeAction}
           <ThemeToggle theme={theme} onToggle={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))} inline />
+          {passkeySession && (
+            <button
+              className="theme-toggle theme-toggle--inline"
+              title={`Signed in as ${passkeySession.username}`}
+              onClick={() => {
+                if (dirty && !confirm('This track has unsaved edits. Sign out anyway?')) return
+                void signOut()
+              }}
+            >
+              Sign out
+            </button>
+          )}
         </div>
       )}
 

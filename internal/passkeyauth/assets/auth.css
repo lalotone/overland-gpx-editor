@@ -1,0 +1,253 @@
+/* Theme: edit the tokens in :root. */
+:root {
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  color: #293b32;
+  background: #f6f5f0;
+  --accent: #2d493d;
+  --focus: #8957cf;
+  --border: #e1e5da;
+  --muted: #697563;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: #f6f5f0;
+}
+[hidden] {
+  display: none !important;
+}
+.auth-card {
+  width: min(100%, 380px);
+  padding: 28px 24px 22px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fcfcf9;
+  box-shadow: 0 8px 28px #26351c14;
+  text-align: center;
+}
+.auth-code {
+  margin: 0;
+  font-size: 64px;
+  font-weight: 700;
+  line-height: 1;
+  color: #cbd5c1;
+}
+.auth-card h1 {
+  font-size: 21px;
+  font-weight: 600;
+  margin: 10px 0 6px;
+}
+.auth-lead {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+input {
+  width: 100%;
+  font: inherit;
+  font-size: 15px;
+  padding: 9px 11px;
+  border: 1px solid #cbd5c1;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.auth-button {
+  display: block;
+  width: 100%;
+  margin-top: 14px;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.auth-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.auth-button:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+input:focus-visible,
+.auth-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+.auth-status {
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.auth-status:empty {
+  display: none;
+}
+.auth-status.error {
+  color: #b3403a;
+}
+.auth-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.auth-button.quiet {
+  width: auto;
+  margin: 18px auto 0;
+  padding: 7px 14px;
+  border: 1px solid #cbd5c1;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+/* Enrollment: one card, one state at a time. */
+.enroll [data-show] {
+  display: none;
+}
+.enroll[data-state="checking"] [data-show~="checking"],
+.enroll[data-state="ready"] [data-show~="ready"],
+.enroll[data-state="done"] [data-show~="done"],
+.enroll[data-state="invalid"] [data-show~="invalid"] {
+  display: block;
+}
+.enroll {
+  padding-top: 32px;
+}
+.auth-icon {
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  background: #e8efe2;
+  color: var(--accent);
+}
+.enroll[data-state="done"] .auth-icon {
+  background: var(--accent);
+  color: #fff;
+  animation: pop 0.35s ease-out;
+}
+.enroll[data-state="invalid"] .auth-icon {
+  background: #f6e3e1;
+  color: #b3403a;
+}
+.auth-icon svg {
+  width: 32px;
+  height: 32px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.enroll[data-state="checking"] .auth-icon {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.auth-eyebrow {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.enroll h1 {
+  margin: 4px 0 14px;
+}
+.enroll .auth-lead {
+  margin-bottom: 4px;
+}
+.auth-account {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 22px;
+  padding: 4px 12px 4px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 14px;
+  font-weight: 500;
+}
+.auth-avatar {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.enroll .auth-button {
+  margin-top: 0;
+}
+.enroll [data-show="done"] .auth-button {
+  margin-top: 18px;
+}
+.auth-more {
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.auth-more summary {
+  cursor: pointer;
+  width: fit-content;
+  margin: 0 auto;
+}
+.auth-more summary:hover {
+  color: var(--accent);
+}
+.auth-more input {
+  margin-top: 10px;
+}
+.auth-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+@keyframes pop {
+  from {
+    transform: scale(0.6);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-icon {
+    animation: none !important;
+  }
+}

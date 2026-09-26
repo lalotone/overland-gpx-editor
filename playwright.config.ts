@@ -2,6 +2,8 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './e2e',
+  // The passkey suite serves the real binary: npm run test:e2e:auth.
+  testIgnore: 'auth/**',
   fullyParallel: true,
   workers: 2,
   forbidOnly: Boolean(process.env.CI),

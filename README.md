@@ -98,7 +98,7 @@ live as plain `.gpx` files in `$XDG_DATA_HOME/overland/gpx` (normally
 `~/.local/share/overland/gpx`), so your library stays readable by every other
 tool you own and the rest of the app data has room alongside it.
 
-The CLI has two commands:
+The CLI has three commands:
 
 ```bash
 # Start the web app and API.
@@ -106,7 +106,14 @@ The CLI has two commands:
 
 # Add one or more files to the library without replacing existing tracks.
 ./overland import [--gpx-dir DIR] FILE...
+
+# Manage passkey accounts for serve --auth.
+./overland user add|list|show|update|enroll|revoke|logout|delete
 ```
+
+Process managers that pass the port ahead of the command can use
+`./overland --port N serve …`, which listens on `127.0.0.1:N` in place of
+`--addr`.
 
 Run `./overland serve --help` for server and elevation options, or
 `./overland import --help` for import usage. Both commands read `GPX_DIR` and
@@ -151,8 +158,9 @@ Vite proxies the API paths to `:8000`, so the app uses the same URLs in dev as
 it does inside the binary.
 
 **Running it as a service:** the server listens on loopback by default and has
-no authentication. Put it behind a reverse proxy with auth before binding it to
-a public interface. Browser writes are loopback-only by default; pass one or
+no authentication unless you start it with `--auth` (see
+[Passkey sign-in](#passkey-sign-in)). Turn that on, or put it behind a reverse
+proxy with its own auth, before binding it to a public interface. Browser writes are loopback-only by default; pass one or
 more exact `--allowed-origin https://planner.example.com` values for every
 non-loopback UI origin, including a public same-origin deployment. Origin
 checks reduce browser abuse but do not authenticate command-line or network
@@ -284,6 +292,63 @@ one aligned, human-readable table per minute. `--stats-log-interval 0` disables
 it. The summaries contain no URLs, searches, coordinates, cache keys, response
 bodies or pack identities.
 
+### Passkey sign-in
+
+`--auth` puts passkey (WebAuthn) sign-in in front of the whole app: the page,
+its bundle, the API, tiles and the MCP browser bridge. Accounts are created by
+the operator from the CLI; there is no sign-up over HTTP.
+
+```bash
+./overland user add alice                  # prints a single-use enrollment link
+./overland serve --auth                    # http://localhost:8000
+```
+
+Open the link, create a passkey, and you are signed in. After that the browser
+offers the passkey on the sign-in button; nobody types a username. Signed-out
+visitors see a generic 404 page with only a **Sign in** button, and the app is
+named only on the enrollment page, once the server has accepted the link.
+
+| Command | Does |
+| --- | --- |
+| `user add <name>` | Create an account and print an enrollment link (24 h, `--ttl`) |
+| `user enroll <name>` | New link: an extra passkey, or recovery after losing them all |
+| `user list` / `user show <name>` | Accounts, and one account's passkeys |
+| `user revoke <name> <id>` | Remove one passkey by ID prefix and end that account's sessions |
+| `user update <name>` | `--rename NEW`, `--disable` or `--enable` |
+| `user logout <name>` | End every session of that account |
+| `user delete <name>` | Remove the account, its passkeys and sessions |
+
+Passkeys bind to a host name, never an IP address:
+
+- `--auth-origin` is the URL browsers use. It must be `https://host`, or
+  `http://localhost:PORT` for local use, and defaults to
+  `http://localhost:<port of --addr>`. A visit through `127.0.0.1` on that port
+  is redirected to `localhost`.
+- Enrollment links use the same origin: `user` reads `AUTH_ORIGIN`, or pass
+  `--origin`.
+- Behind a reverse proxy, terminate TLS there, set `--auth-origin
+  https://your.host --behind-proxy --allowed-origin https://your.host`, add
+  `--trusted-ui-origin https://your.host` if signed-in users should manage
+  offline data, and **preserve the `Host` header**: sign-in POSTs compare
+  `Origin` with `Host`.
+  `serve` warns at startup about origin settings that leave nobody able to
+  sign in.
+- The session cookie is `SameSite=Strict` and bound to that one origin, so
+  `--auth` does not work with a frontend served from a different origin
+  (`VITE_API_BASE`). `npm run dev` doesn't carry it either; test sign-in against
+  the built binary (`npm run test:e2e:auth`).
+- `/healthz` stays open for liveness probes. Everything else, including CLI
+  clients carrying `OFFLINE_ADMIN_TOKEN`, needs a browser session.
+
+The account database (`--auth-db`, default
+`$XDG_CONFIG_HOME/overland/accounts.db`, created `0600`) holds usernames,
+random 64-byte user handles, passkey public keys with their sign counters, and
+SHA-256 hashes of session and enrollment tokens. It stores no email addresses,
+passkey labels, IP addresses, user agents or sign-in history. Usernames refuse
+`@`, so an email cannot end up there by accident. Sessions last 30 days,
+sliding, and survive restarts. The mobile app never uses any of this: it keeps
+its own per-launch loopback capability.
+
 ---
 
 ## Configuration
@@ -297,6 +362,9 @@ bundle at build time.
 | `ADDR` | backend | `127.0.0.1:8000` | Listen address; use a public interface only behind authentication |
 | `MCP` | backend | `off` | Enable local Streamable HTTP MCP control on its own loopback listener |
 | `MCP_ADDR` | backend | `127.0.0.1:8009` | Address for the MCP endpoint; refuses anything but loopback, and is never behind the proxy |
+| `AUTH` | backend | `off` | Require passkey sign-in for the whole app; accounts come from `overland user` |
+| `AUTH_ORIGIN` | backend | `http://localhost:<port>` | Public URL browsers use with `AUTH`; `https://host`, or `http://localhost:PORT` |
+| `AUTH_DB` | backend | `$XDG_CONFIG_HOME/overland/accounts.db` | Passkey account database shared by `serve --auth` and `user` |
 | `BEHIND_PROXY` | backend | `off` | The server runs behind a reverse proxy; withdraws implicit loopback trust, so management needs `OFFLINE_ADMIN_TOKEN` and the relay needs `ALLOWED_ORIGINS` |
 | `GPX_DIR` | backend | `$XDG_DATA_HOME/overland/gpx` (`~/.local/share/overland/gpx`) | Track library directory |
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
@@ -385,6 +453,7 @@ make android-release  # build/android/overland-release.apk
 npm run dev    # frontend dev server with HMR (needs ./overland serve running)
 npx playwright install chromium  # once, for browser tests
 npm run test:e2e                 # desktop/mobile map and offline UI flows
+npm run test:e2e:auth            # passkey sign-in against the real --auth binary
 ```
 
 Pushing a `v*` tag builds and publishes a release; every push and pull request
@@ -428,8 +497,8 @@ self-hosted services instead.
 
 Backend request queues are process-wide, so several tabs share provider limits;
 standalone direct-provider fallbacks retain their per-browser queues. A public
-deployment still needs authentication and must publish the operator contact
-required by provider terms.
+deployment still needs authentication (`--auth`, or an authenticating proxy)
+and must publish the operator contact required by provider terms.
 
 ---
 
@@ -443,10 +512,11 @@ required by provider terms.
   not flagged.
 - **Desktop-shaped.** The creation screen assumes a wide window.
 - **Distance is 2D**, so steep tracks read very slightly short.
-- **No built-in authentication.** The backend reads, writes and deletes files
-  in the configured track library. It defaults to loopback and rejects
-  untrusted browser-originated writes, but public deployments still need an
-  authenticated reverse proxy.
+- **Authentication is opt-in and all-or-nothing.** Without `--auth` the backend
+  reads, writes and deletes library files for anyone who can reach it; it
+  defaults to loopback and rejects untrusted browser-originated writes, but
+  that is not authentication. With `--auth` every signed-in account has full
+  access: there are no roles or per-account libraries.
 
 ---
 

@@ -104,8 +104,8 @@ The CLI has three commands:
 # Start the web app and API.
 ./overland serve [options]
 
-# Add one or more files to the library without replacing existing tracks.
-./overland import [--gpx-dir DIR] FILE...
+# Add one or more files to a library without replacing existing tracks.
+./overland import [--data-dir DIR] [--user NAME] FILE...
 
 # Manage passkey accounts for serve --auth.
 ./overland user add|list|show|update|enroll|revoke|logout|delete
@@ -116,9 +116,11 @@ Process managers that pass the port ahead of the command can use
 `--addr`.
 
 Run `./overland serve --help` for server and elevation options, or
-`./overland import --help` for import usage. Both commands read `GPX_DIR` and
-default to `$XDG_DATA_HOME/overland/gpx` (normally
-`~/.local/share/overland/gpx`).
+`./overland import --help` for import usage. Both commands read `DATA_DIR` and
+default to `$XDG_DATA_HOME/overland` (normally `~/.local/share/overland`),
+where each account's tracks and trip packs live under `owners/`. Without
+`--auth` everything belongs to the `local` owner; `import --user NAME` puts
+files into one account's library.
 
 Agents can control the open planner and track editor through an optional local
 MCP Streamable HTTP endpoint:
@@ -326,7 +328,19 @@ named only on the enrollment page, once the server has accepted the link.
 | `user revoke <name> <id>` | Remove one passkey by ID prefix and end that account's sessions |
 | `user update <name>` | `--rename NEW`, `--disable` or `--enable` |
 | `user logout <name>` | End every session of that account |
-| `user delete <name>` | Remove the account, its passkeys and sessions |
+| `user delete <name>` | Remove the account, its passkeys, sessions, tracks and trip packs (`--keep-data` leaves the files) |
+
+Each account has its own library, trip packs and search cache; nobody sees
+anyone else's. Server-wide settings — the offline mode, which routing region
+is prepared, the shared cache — are the operator's:
+
+```bash
+./overland serve --auth --auth-operator alice   # repeat for more operators
+```
+
+Everyone else sees routing status read-only and downloads maps for the
+prepared region. Without an operator those settings are reachable only with
+`OFFLINE_ADMIN_TOKEN`; `serve` warns at startup.
 
 Passkeys bind to a host name, never an IP address:
 
@@ -337,10 +351,10 @@ Passkeys bind to a host name, never an IP address:
 - Enrollment links use the same origin: `user` reads `AUTH_ORIGIN`, or pass
   `--origin`.
 - Behind a reverse proxy, terminate TLS there, set `--auth-origin
-  https://your.host --behind-proxy --allowed-origin https://your.host`, add
-  `--trusted-ui-origin https://your.host` if signed-in users should manage
-  offline data, and **preserve the `Host` header**: sign-in POSTs compare
-  `Origin` with `Host`.
+  https://your.host --behind-proxy --allowed-origin https://your.host`, and
+  **preserve the `Host` header**: sign-in POSTs compare `Origin` with
+  `Host`. The auth origin doubles as the trusted UI origin, so signed-in
+  users can build trip packs without a further flag.
   `serve` warns at startup about origin settings that leave nobody able to
   sign in.
 - The session cookie is `SameSite=Strict` and bound to that one origin, so
@@ -359,6 +373,15 @@ passkey labels, IP addresses, user agents or sign-in history. Usernames refuse
 sliding, and survive restarts. The mobile app never uses any of this: it keeps
 its own per-launch loopback capability.
 
+Account details stay there. The backend files each account's data under an
+opaque key derived from its handle with a secret in `owner.key`, created
+`0600` beside the account database the first time `serve --auth` runs. A data
+directory on its own cannot be linked back to accounts; that takes both
+files. **Back up `accounts.db` and `owner.key` together:** without the key the
+owners' directories cannot be recomputed, and every account loses its library.
+Deleting an account deletes its directory too. Stop the server first, or
+restart it afterwards, so it drops the account's trip packs from memory.
+
 ---
 
 ## Configuration
@@ -374,9 +397,10 @@ bundle at build time.
 | `MCP_ADDR` | backend | `127.0.0.1:8009` | Address for the MCP endpoint; refuses anything but loopback, and is never behind the proxy |
 | `AUTH` | backend | `off` | Require passkey sign-in for the whole app; accounts come from `overland user` |
 | `AUTH_ORIGIN` | backend | `http://localhost:<port>` | Public URL browsers use with `AUTH`; `https://host`, or `http://localhost:PORT` |
-| `AUTH_DB` | backend | `$XDG_CONFIG_HOME/overland/accounts.db` | Passkey account database shared by `serve --auth` and `user` |
+| `AUTH_DB` | backend | `$XDG_CONFIG_HOME/overland/accounts.db` | Passkey account database shared by `serve --auth` and `user`; `owner.key` is created beside it |
+| `AUTH_OPERATORS` | backend | *(empty)* | Comma-separated accounts allowed to change server-wide state with `AUTH`: offline mode, routing regions, the shared cache |
 | `BEHIND_PROXY` | backend | `off` | The server runs behind a reverse proxy; withdraws implicit loopback trust, so management needs `OFFLINE_ADMIN_TOKEN` and the relay needs `ALLOWED_ORIGINS` |
-| `GPX_DIR` | backend | `$XDG_DATA_HOME/overland/gpx` (`~/.local/share/overland/gpx`) | Track library directory |
+| `DATA_DIR` | backend | `$XDG_DATA_HOME/overland` (`~/.local/share/overland`) | Private data: each owner's tracks, trip packs and search cache under `owners/` |
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ALLOWED_ORIGINS` | backend | *(empty)* | Comma-separated exact browser origins allowed to call the API |
 | `OFFLINE_CACHE_DIR` | backend | `$XDG_CACHE_HOME/overland/responses` | Persistent provider cache; an explicitly empty value disables persistence |
@@ -522,11 +546,13 @@ and must publish the operator contact required by provider terms.
   not flagged.
 - **Desktop-shaped.** The creation screen assumes a wide window.
 - **Distance is 2D**, so steep tracks read very slightly short.
-- **Authentication is opt-in and all-or-nothing.** Without `--auth` the backend
-  reads, writes and deletes library files for anyone who can reach it; it
-  defaults to loopback and rejects untrusted browser-originated writes, but
-  that is not authentication. With `--auth` every signed-in account has full
-  access: there are no roles or per-account libraries.
+- **Authentication is opt-in.** Without `--auth` the backend reads, writes
+  and deletes library files for anyone who can reach it; it defaults to
+  loopback and rejects untrusted browser-originated writes, but that is not
+  authentication. With `--auth` each account has its own library and trip
+  packs, and only `--auth-operator` accounts change server-wide state.
+- **No track sharing between accounts.** A track belongs to one account; the
+  library is built so sharing can be added later, but nothing offers it yet.
 
 ---
 

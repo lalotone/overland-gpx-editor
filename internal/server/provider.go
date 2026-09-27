@@ -651,6 +651,10 @@ func cachePermitted(header http.Header, applicationData bool) bool {
 	for _, name := range strings.Split(vary, ",") {
 		switch strings.ToLower(strings.TrimSpace(name)) {
 		case "accept-language", "accept-encoding":
+		// A CORS-enabled mirror such as oms varies on Origin. Outbound
+		// requests never carry an Origin header, so the stored body is the
+		// origin-less variant and every later request asks for that same one.
+		case "origin":
 		default:
 			return false
 		}

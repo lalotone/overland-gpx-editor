@@ -462,6 +462,58 @@ test('region browser clearly lists downloads, browses countries and shows every 
   await expect(screen.getByRole('heading', { name: 'Spain', exact: true })).toBeVisible()
 })
 
+test('a country download reads region by region with plain routing progress', async ({ page }) => {
+  await setup(page)
+  const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }
+  const cataluna = { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }
+  await page.route('**/offline/routing', (route) =>
+    route.fulfill({
+      json: {
+        enabled: true,
+        ready: false,
+        cached: [],
+        job: { id: 'r', regionId: 'spain', state: 'running', phase: 'build', stage: 'partition', elapsedSeconds: 80 },
+      },
+    }),
+  )
+  await page.route('**/offline/routing/regions', (route) =>
+    route.fulfill({
+      json: {
+        regions: [
+          { id: 'spain', name: 'Spain', parent: 'europe', kind: 'country', installed: false, bbox: { south: 35.9, west: -9.4, north: 43.8, east: 4.4 } },
+          { id: 'spain/aragon', name: 'Aragón', parent: 'spain', kind: 'region', installed: false, bbox: aragon },
+          { id: 'spain/cataluna', name: 'Cataluña', parent: 'spain', kind: 'region', installed: false, bbox: cataluna },
+        ],
+      },
+    }),
+  )
+  const mapPack = (id: string, name: string, bbox: typeof aragon, state: string, done: number) => ({
+    id, name, state, bbox, done, total: 10,
+    resources: { 'vector-map': { done, total: 10, failed: 0, bytes: 0 } },
+  })
+  await page.route('**/offline/packs', (route) =>
+    route.fulfill({ json: [mapPack('a', 'Maps: Aragón', aragon, 'running', 3), mapPack('c', 'Maps: Cataluña', cataluna, 'queued', 0)] }),
+  )
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Offline', exact: true }).click()
+  await page.getByRole('button', { name: 'Download region', exact: true }).click()
+  const screen = page.getByRole('region', { name: 'Download regions', exact: true })
+  await screen.getByRole('button', { name: 'Country', exact: true }).click()
+  await screen.locator('.region-row-main').filter({ hasText: 'Spain' }).click()
+
+  // Routing: one country-wide download, current step and plain activity, no guessed bar.
+  await expect(screen.getByText('One download for all of Spain', { exact: false })).toBeVisible()
+  await expect(screen.getByRole('list', { name: 'Routing steps' }).locator('[aria-current="step"]')).toHaveText('Routing graph')
+  await expect(screen.getByText('Partitioning the graph · 1m 20s')).toBeVisible()
+  await expect(screen.getByRole('progressbar', { name: 'Current routing step progress' })).toHaveCount(0)
+
+  // Offline data: counted per region, and each region row shows its own progress.
+  await expect(screen.locator('.resource-group').filter({ hasText: 'Maps' })).toContainText('0 of 2 regions · 2 in progress')
+  await expect(screen.locator('.region-row').filter({ hasText: 'Aragón' })).toContainText('Maps 30%')
+  await expect(screen.locator('.region-row').filter({ hasText: 'Cataluña' })).toContainText('Maps queued')
+  await expect(screen.locator('.region-row').filter({ hasText: 'Aragón' })).toContainText('Terrain —')
+})
+
 test('saved map areas distinguish legacy extents from whole-region coverage', async ({ page }) => {
   await setup(page)
   await page.route('**/offline/routing/regions', route => route.fulfill({ json: { regions: [] } }))

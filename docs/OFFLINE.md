@@ -8,19 +8,31 @@ Broom graph prepared before going offline.
 ## Storage
 
 The generic response cache defaults to
-`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`), with a
-1 GiB and 100,000-entry ceiling. An explicitly empty `OFFLINE_CACHE_DIR`
+`$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`). Storage
+is split in two. Responses cached while browsing are bounded by
+`OFFLINE_CACHE_MAX_BYTES` (1 GiB) and a per-scope quarter of the entry limit,
+with least-recently-used eviction. Downloaded data — entries pinned by a pack,
+and pack manifests — is not charged to that quota and never evicts browsing
+data; it is bounded by free disk space less a 64 MiB margin, rechecked on
+every write, so a region download is limited by the disk rather than an
+arbitrary quota. Removing a download returns its entries to browsing, trimmed
+back under the quota. `available` lifts the browsing quota as well (the
+Android policy). Where free space cannot be measured (Windows), downloads
+count against the quota as before. The index holds up to 1,000,000 entries,
+about 0.9 KB of memory each in use. An explicitly empty `OFFLINE_CACHE_DIR`
 disables new persistent response storage while retaining bounded pass-through
 APIs. Terrarium elevation keeps its existing, separate
 `$XDG_CACHE_HOME/overland/tiles` tree so upgrades do not move or invalidate
-already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` bounds that
-separate tree to 1 GiB by default; oldest disk tiles are evicted first.
+already downloaded DEM tiles. `ELEVATION_TILE_CACHE_MAX_BYTES` splits that
+separate tree the same way: browsing tiles within the 1 GiB quota, oldest
+evicted first, and pack tiles bounded by the disk.
 
 Response filenames are hashes. Search text and POI bounds do
 not appear in paths or request logs. Cache directories use mode `0700` and files
-use `0600`; writes use temporary files followed by rename. Bodies, sidecars and
-pack manifests count towards the quota. Expired entries are removed first,
-then least-recently-used unpinned entries. A pack cannot extend a provider's
+use `0600`; writes use temporary files followed by rename. Bodies and sidecars
+of browsing entries count towards the quota; downloaded entries and pack
+manifests count towards free disk space instead. Expired entries are removed
+first, then least-recently-used unpinned entries. A pack cannot extend a provider's
 retention ceiling.
 
 Place and POI caches reveal location history. Set `OFFLINE_CACHE_DIR=`
@@ -92,23 +104,25 @@ permit access policies, before it becomes active,
 so interactive route requests never trigger graph building or profile
 customization.
 
-Planner and Explore use Broom's region suggestions, prioritizing local extracts
-containing the viewport centre and explicitly marking partial coverage.
-The region catalogue is cached through the backend;
-viewport suggestions fetch no PBFs or DEMs and start no preparation jobs. Open the
-compact **Offline routing** map pill to accept a download and reveal progress.
+Regions are picked explicitly in the **Offline regions** manager from the
+region catalogue, which is cached through the backend. City downloads use
+Broom's suggestion endpoint to find the covering extract; suggestions fetch no
+PBFs or DEMs and start no preparation jobs.
 The selected generation and explicit pins survive pruning. Protected pin and
 prune API operations expose Broom's application-level cache policy.
 The last active managed region is persisted and reopened on restart. Older
 caches without that selection reopen the newest installed region.
 
-Opening the download panel asks Broom for an acquisition plan without downloading
-PBFs or terrain. Exact terrain counts require a local PBF; unknown sizes remain
+Opening a region that is not yet installed asks Broom for an acquisition plan
+(`POST /offline/routing/plan`) without downloading PBFs or terrain, and shows
+the road-data size, the terrain tile count and the bytes still to fetch. Exact terrain counts require a local PBF; unknown sizes remain
 unknown until it is available. Plans report cached and missing tiles and remaining
 source transfer bytes when known, excluding graph and temporary build space.
 
 Progress reports road data, terrain selection, terrain tiles, graph building and
-profile preparation separately. Broom supplies aggregate tile totals, downloaded
+profile preparation separately. Broom's build diagnostics (turn restrictions it
+could not map) are shown as a note once the job completes; they are map-data
+remarks, not failures. Broom supplies aggregate tile totals, downloaded
 and reused counts, retries, elapsed stage time and activity updates. Transfer
 percentages are per file; diagnostics don't replace current work. Only an open
 graph is reported as ready.
@@ -140,8 +154,9 @@ with terminal states always flushed. One manifest owns all cache pins; terrain
 pins are restored before quota eviction at startup. Quota shortages fail admission
 rather than silently replacing previously downloaded packs.
 
-Regional elevation work allows up to 16,384 tiles / 2 GiB, still subject to the
-configured terrain quota and existing pack reservations. Broad POI searches keep
+Regional elevation work allows up to 16,384 tiles per pack, bounded in bytes
+by free disk space (or, where it cannot be measured, by the terrain quota and
+existing pack reservations). Broad POI searches keep
 their provider bounds: `unavailable` reports unsupported resources and a terminal
 `provider_limits` result distinguishes those from a network failure. There is no
 tiled Overpass sweep. Supported map/elevation work can finish independently.
@@ -204,13 +219,38 @@ per server. This does not change the built-in profiles or saved GPX contents.
 
 ## Trip Packs
 
-Opening or selecting a GPX makes its route the active automatic pack. The
-frontend estimates first, then starts preparation without a second user action.
-The readiness control reports each resource independently and replaces the
-active status when another route is loaded. Packs remain pinned until removed;
-there is no fixed retained-pack count. Their metadata is charged to storage:
-running jobs reserve room to grow, completed manifests occupy their actual size,
-and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
+The web and Android frontends create packs only from an explicit region
+download (`src/lib/offlineRegions.ts`): `regional` packs over the city, region
+or country bounds. Routing and three pack groups download independently —
+maps (the `openfreemap` layer, zooms 5–14), terrain (`elevation`) and points of
+interest (`pois`, `fuel`) — each group as its own packs named after it
+(`Maps: Aragón`); all three together keep the original `Map:` request.
+Partitioning does not depend on the groups chosen, so every group's packs
+cover the same parts, and an area's state is judged per group from the packs
+that report that resource. The region view is the progress view: routing shows
+its four steps (road data, terrain, routing graph, riding profiles) and the
+current activity, with a bar only while Broom measures it; each region or grid
+cell of a large area shows one status per resource. Broom capabilities that
+would improve this are listed in `broom-features.md`. The
+frontend estimates first and refuses areas whose map layers are blocked, then
+starts routing preparation and the pack together. An area beyond one pack's
+limits is reported with code `pack_too_large`; the frontend then plans one pack
+per catalogue sub-region or, for the many countries the catalogue does not
+divide, per cell of a deterministic grid sized from the arithmetic tile count
+(z5–14 maps, z13 terrain) to stay well under both pack limits. A part the
+server still finds too large is halved, at most twice. It still prepares the
+single covering routing extract, sharing a preparation already running for it, so routes cross those
+boundaries. Two pack jobs run at once. Further packs are persisted as `queued`
+and start in order as slots free, re-estimated at that moment because earlier
+packs change quota and reuse; one that no longer fits becomes `incomplete` with
+`start_failed` and the reason. Waiting packs are charged their manifest size,
+not the 8 MiB a running regional manifest reserves, and can be cancelled or
+deleted before they start. A restart reports queued packs as interrupted, like
+running ones. Packs remain pinned until removed;
+there is no fixed retained-pack count. Their metadata is written against free
+disk space, rechecked on every write; where free space cannot be measured it is
+charged to the quota instead: running jobs reserve room to grow, completed
+manifests occupy their actual size, and one atomic-write buffer is reserved. Retrying an incomplete pack reuses its
 identity and preserves its pins. Editing an already loaded track does not
 restart the job.
 
@@ -226,6 +266,15 @@ The two caches share that free space; their reported capacities are not additive
 The global entry/index bound, per-job enumeration limits, concurrent-job bound
 and provider-worker limits still protect memory and upstream services.
 
+Each resource in a pack records why its last fetch failed (`resources.<kind>.error`,
+a short reason with no URL or query text) and the server logs the same line, so
+"1 missing" can be explained. Stopping a pack is not a failure: resources in
+flight when it is cancelled are neither done nor failed, the pack is reported
+`cancelled` with its `done`/`total` counts, and the UI says "Stopped", not
+"Could not finish". The Spanish fuel snapshot is only included for areas that
+touch Spain's envelope (the same one `lib/fuel.ts` uses); elsewhere the `fuel`
+scope is dropped from the request and ignored by the estimate.
+
 A completed pack may contain Terrarium corridor tiles, one fuel snapshot,
 bounded trip POIs, selected exact cached data and bounded OpenFreeMap coverage.
 It never generates speculative routes, sweeps Nominatim or downloads public
@@ -233,13 +282,10 @@ raster basemaps. Cancellation or process restart leaves a pack incomplete;
 completed shared cache entries remain valid. A failed provider marks its own
 resource unavailable while preparation continues for unrelated resources.
 
-Explore creates the same kind of bounded pack from a drawn rectangle. Estimates
-run automatically after the bounds or options settle and remain traffic-free.
-Completed area summaries expose only their validated bbox, never the manifest's
-route, cache keys or request data. The frontend renders those bboxes as light
-coverage rectangles, restores them after reload, and shows them again whenever
-the download tool opens. The dedicated manager can hide coverage, inspect all
-area jobs, cancel active work and delete completed packs with confirmation.
+Pack summaries expose only their validated bbox, never the manifest's route,
+cache keys or request data. The Downloads view lists every pack, including
+route packs created by older versions, and can stop active work, resume partial
+map downloads and delete packs with confirmation.
 
 ## Operational Statistics
 

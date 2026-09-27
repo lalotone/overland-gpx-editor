@@ -63,8 +63,6 @@ const {
   waypointMarkerIdFromSymbol,
 } = await import('../src/lib/waypointMarkers')
 const {
-  buildAutomaticPackRequest,
-  buildPackEstimateRequest,
   bootstrapRuntimeConfig,
   decodePacks,
   decodePackEstimate,
@@ -76,15 +74,37 @@ const {
   loadRuntimeConfig,
   normalizePackBounds,
   OfflineCacheMissError,
-  packRequestSignature,
   parseCacheMetadata,
   resolveApiUrl,
   responseError,
   selectRuntimeTransport,
   setRuntimeOfflineMode,
-  syncPackLayers,
-  validPackArea,
 } = await import('../src/lib/offline')
+const {
+  areaForRegion,
+  areaDownloadState,
+  mapsComplete,
+  splitArea,
+  routingJobView,
+  groupStatus,
+  partsProgress,
+  packGroups,
+  gridLabel,
+  gridParts,
+  tileCount,
+  startRegionDownload,
+  coversBounds,
+  decodeRoutingRegions,
+  packAreaName,
+  packFailure,
+  packWasStopped,
+  regionIdName,
+  routingDiagnosticsText,
+  packIsActive,
+  regionalPackRequest,
+  routingJobActive,
+  savedMapAreas,
+} = await import('../src/lib/offlineRegions')
 
 let failures = 0
 let checks = 0
@@ -1239,75 +1259,369 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
   check('drawn map bounds are ordered and preserved in Web Mercator range',
     ordinaryBounds?.south === 41.8 && Math.abs((ordinaryBounds?.west ?? 0) + 0.7) < 1e-10 &&
       ordinaryBounds.north === 42.2 && Math.abs((ordinaryBounds?.east ?? 0) - 1.4) < 1e-10)
+  check('in-range region bounds survive normalisation exactly',
+    normalizePackBounds({ lat: 39.8, lon: -2.2 }, { lat: 42.9, lon: 0.8 })?.west === -2.2 &&
+      normalizePackBounds({ lat: 39.8, lon: -2.2 }, { lat: 42.9, lon: 0.8 })?.east === 0.8)
   check('drawn map bounds preserve a short antimeridian crossing',
     crossingBounds?.west === 170 && crossingBounds.east === -170)
   check('degenerate and world-spanning map selections are rejected',
     normalizePackBounds({ lat: 1, lon: 2 }, { lat: 1, lon: 3 }) === null &&
       normalizePackBounds({ lat: -10, lon: -180 }, { lat: 10, lon: 180 }) === null)
 
-  check('pack area follows delayed route availability until the user chooses',
-    validPackArea(null, false) === 'bbox' && validPackArea(null, true) === 'route')
-  check('pack area remains valid when a preferred route disappears',
-    validPackArea('route', false) === 'bbox' && validPackArea('route', true) === 'route')
-  check('an explicit map-area preference survives route availability',
-    validPackArea('bbox', true) === 'bbox')
-  check('unedited pack layers follow the active terrain layer',
-    syncPackLayers(['openfreemap'], 'topo', false)[0] === 'opentopo')
-  check('user-edited pack layers do not follow later terrain changes',
-    syncPackLayers(['osm', 'cyclosm'], 'topo', true).join(',') === 'osm,cyclosm')
+  const region = { id: 'spain/aragon', name: 'Aragón', kind: 'region' as const, bounds: { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }, regionId: 'spain/aragon' }
+  const regionalRequest = regionalPackRequest(region)
+  check('region packs cover the whole region with maps, elevation, POIs and fuel',
+    regionalRequest.regional === true && regionalRequest.coverageKind === 'region' &&
+      regionalRequest.name === 'Map: Aragón' && regionalRequest.bbox?.join(',') === '39.8,-2.2,42.9,0.8' &&
+      regionalRequest.paddingKm === 0 && regionalRequest.minZoom === 5 && regionalRequest.maxZoom === 14 &&
+      regionalRequest.scopes.join(',') === 'elevation,pois,fuel')
 
-  const routeRequest = buildPackEstimateRequest({
-    name: '  Pyrenees  ',
-    area: 'route',
-    route: [{ lat: 42.1, lon: -0.4 }, { lat: 42.2, lon: -0.5 }],
-    bbox: null,
-    paddingKm: 5,
-    minZoom: 14,
-    maxZoom: 8,
-    layers: ['opentopo'],
-    scopes: ['pois', 'elevation'],
+  const catalogue = decodeRoutingRegions({
+    cachedOnly: false,
+    regions: [
+      { id: 'spain', name: 'Spain', kind: 'country', bbox: { south: 35, west: -10, north: 44, east: 5 }, installed: false, active: false },
+      { id: 'spain/aragon', name: 'Aragón', parent: 'spain', kind: 'region', bbox: region.bounds, installed: true, active: true },
+      { id: 'broken', name: 42 },
+      { id: 'no-bounds', name: 'No bounds', kind: 'mystery', bbox: { south: 'x' } },
+    ],
   })
-  const bboxRequest = buildPackEstimateRequest({
-    name: 'Pyrenees',
-    area: 'bbox',
-    route: [],
-    bbox: { south: 41, west: -1, north: 42, east: 0 },
-    paddingKm: 5,
-    minZoom: 8,
-    maxZoom: 14,
-    layers: ['opentopo'],
-    scopes: ['pois', 'elevation'],
-  })
-  check('pack request building trims names and normalizes zoom order',
-    routeRequest?.name === 'Pyrenees' && routeRequest.minZoom === 8 && routeRequest.maxZoom === 14)
-  check('pack request building captures the selected area only',
-    routeRequest?.route?.length === 2 && routeRequest.bbox === undefined &&
-      bboxRequest?.bbox?.join(',') === '41,-1,42,0' && bboxRequest.route === undefined)
-  check('pack request building rejects invalid provider and coordinate inputs',
-    buildPackEstimateRequest({
-      name: 'Invalid layer', area: 'bbox', route: [], bbox: { south: 41, west: -1, north: 42, east: 0 },
-      paddingKm: 0, minZoom: 8, maxZoom: 14, layers: ['unknown'], scopes: [],
-    }) === null && buildPackEstimateRequest({
-      name: 'Invalid latitude', area: 'bbox', route: [], bbox: { south: -90, west: -1, north: 42, east: 0 },
-      paddingKm: 0, minZoom: 8, maxZoom: 14, layers: ['openfreemap'], scopes: ['places'],
-    }) === null)
-  check('pack signatures invalidate estimates when the full area changes',
-    packRequestSignature(routeRequest) !== packRequestSignature(bboxRequest))
-  check('pack signatures treat layer and scope order as equivalent',
-    packRequestSignature(routeRequest) === packRequestSignature(routeRequest ? {
-      ...routeRequest,
-      layers: [...routeRequest.layers].reverse(),
-      scopes: [...routeRequest.scopes].reverse(),
-    } : null))
+  check('region catalogue decoding drops malformed entries and unknown kinds',
+    catalogue.regions.length === 3 && catalogue.regions[2].kind === 'region' &&
+      catalogue.regions[2].bbox === undefined && catalogue.regions[1].parent === 'spain' &&
+      catalogue.regions[1].active && !catalogue.cachedOnly)
+  check('regions without bounds cannot become download areas',
+    areaForRegion(catalogue.regions[2]) === null &&
+      areaForRegion(catalogue.regions[0])?.kind === 'country' &&
+      areaForRegion(catalogue.regions[1])?.regionId === 'spain/aragon')
+  check('coverage requires the pack to contain the whole area',
+    coversBounds(catalogue.regions[0].bbox, region.bounds) &&
+      !coversBounds(region.bounds, catalogue.regions[0].bbox!) && !coversBounds(undefined, region.bounds))
 
-  const automaticRequest = buildAutomaticPackRequest(' Trans-Pyrenees ', Array.from(
-    { length: 6000 },
-    (_, index) => ({ lat: 42 + index / 1_000_000, lon: -1 + Math.sin(index / 20) / 100 }),
-  ))
-  check('automatic packs use bounded route-safe defaults',
-    automaticRequest?.name === 'Route: Trans-Pyrenees' && automaticRequest.route !== undefined &&
-      automaticRequest.automatic === true && automaticRequest.route.length <= 5000 && automaticRequest.layers[0] === 'openfreemap' &&
-      automaticRequest.scopes.join(',') === 'elevation,pois,fuel')
+  const mapProgress = (done: number, failed = 0) => ({ done, total: 10, failed, bytes: 0, items: 0 })
+  const regionPacks = decodePacks([
+    { id: 'a', name: 'Map: Aragón', state: 'complete', bbox: region.bounds, resources: { 'vector-map': mapProgress(10) } },
+    { id: 'b', name: 'Map: Aragón', state: 'incomplete', detail: 'interrupted', bbox: region.bounds, resources: { 'vector-map': mapProgress(4) } },
+    { id: 'c', name: 'Route: Old trip', state: 'complete', bbox: region.bounds, resources: {} },
+    { id: 'd', name: 'Map: Teruel', state: 'running', bbox: region.bounds, resources: { 'vector-map': mapProgress(2) } },
+  ])
+  check('a complete map pack is recognised for a covered region',
+    mapsComplete(regionPacks, region) && !mapsComplete(regionPacks.slice(1), region))
+  check('saved map areas keep one entry per name and extent and skip route packs',
+    savedMapAreas(regionPacks).map(pack => pack.id).join(',') === 'a')
+  check('pack activity and names are derived consistently',
+    packIsActive(regionPacks[3]) && !packIsActive(regionPacks[0]) && packAreaName(regionPacks[2]) === 'Old trip')
+  check('interrupted packs explain how to resume',
+    /Download again to resume/.test(packFailure(regionPacks[1])))
+  const country = areaForRegion(catalogue.regions[0], [
+    ...catalogue.regions,
+    { id: 'spain/cataluna', name: 'Cataluña', parent: 'spain', kind: 'region', bbox: { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, installed: false, active: false },
+  ])
+  check('a country lists its catalogue regions as download parts',
+    country?.parts?.map(part => part.id).join(',') === 'spain/aragon,spain/cataluna' && country.parts[0].kind === 'region')
+  const halves = splitArea({ id: 'wide', name: 'Wide', kind: 'region', bounds: { south: 40, west: -4, north: 41, east: 4 } })
+  check('areas without sub-regions split across their longer side',
+    halves.map(half => half.name).join(',') === 'Wide · west,Wide · east' &&
+      halves[0].bounds.east === 0 && halves[1].bounds.west === 0 && halves[1].bounds.east === 4)
+  const across = splitArea({ id: 'am', name: 'Across', kind: 'area', bounds: { south: 0, west: 170, north: 1, east: -170 } })
+  check('splitting keeps antimeridian halves in range',
+    across[0].bounds.east === 180 || across[0].bounds.east === -180 ? across[1].bounds.west === -180 || across[1].bounds.west === 180 : false)
+
+  const morocco = { id: 'morocco', name: 'Morocco', kind: 'country' as const, bounds: { south: 20.7, west: -17.1, north: 35.95, east: -1.0 }, regionId: 'morocco' }
+  const grid = gridParts(morocco)
+  check('an area without sub-regions becomes a grid of parts that each fit one pack',
+    grid.length > 1 && grid.every(part => tileCount(part.bounds) <= 75_000 && tileCount(part.bounds, 13, 13) <= 14_000),
+    `${grid.length} parts`)
+  check('grid parts keep the routing region and cover the whole area edge to edge',
+    grid.every(part => part.regionId === 'morocco') && grid[0].bounds.north === 35.95 && grid[0].bounds.west === -17.1 &&
+      grid[grid.length - 1].bounds.south === 20.7 && grid[grid.length - 1].bounds.east === -1)
+  check('grid parts are deterministic, so later visits recognise them',
+    JSON.stringify(gridParts(morocco)) === JSON.stringify(grid))
+  check('an area that fits one pack is not split', gridParts({ ...morocco, bounds: region.bounds }).length === 0)
+  const fiji = gridParts({ id: 'fiji', name: 'Fiji', kind: 'country', bounds: { south: -21, west: 176, north: -12, east: -178 } })
+  check('grid parts across the antimeridian stay in longitude range',
+    fiji.length > 1 && fiji.every(part => part.bounds.west >= -180 && part.bounds.west < 180 && part.bounds.east >= -180 && part.bounds.east <= 180))
+  check('grid parts have readable compass names when the grid is small',
+    gridParts({ ...morocco, bounds: { south: 30, west: -9, north: 34, east: -4 } }).every(part => !/row/.test(part.name)))
+
+  const partPack = (id: string, name: string, bbox: { south: number; west: number; north: number; east: number }, state: string, done: number) => ({
+    id, name, state, bbox, resources: { 'vector-map': mapProgress(done), elevation: mapProgress(done) },
+  })
+  const countryPacks = decodePacks([
+    partPack('p1', 'Map: Aragón', region.bounds, 'complete', 10),
+    partPack('p2', 'Map: Cataluña', { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, 'running', 4),
+  ])
+  const countryState = areaDownloadState(countryPacks, country!)
+  check('a country made of region packs aggregates their progress',
+    countryState.covers && countryState.active && !countryState.complete && countryState.packs.length === 2 &&
+      countryState.resources['vector-map'].done === 14 && countryState.resources['vector-map'].total === 20)
+  check('a country is complete only once every region pack is',
+    mapsComplete(decodePacks([
+      partPack('p1', 'Map: Aragón', region.bounds, 'complete', 10),
+      partPack('p2', 'Map: Cataluña', { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, 'complete', 10),
+    ]), country!) && !areaDownloadState(countryPacks.slice(0, 1), country!).covers)
+  const halvedState = areaDownloadState(decodePacks([
+    partPack('h1', 'Map: Wide · west', halves[0].bounds, 'complete', 10),
+    partPack('h2', 'Map: Wide · east', halves[1].bounds, 'complete', 10),
+  ]), { id: 'wide', name: 'Wide', kind: 'region', bounds: { south: 40, west: -4, north: 41, east: 4 } })
+  check('a region downloaded in halves is recognised as complete', halvedState.complete && halvedState.packs.length === 2)
+
+  {
+    // Whole country too large: expect one queued pack per region, one routing prepare.
+    const calls: string[] = []
+    const started: string[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; regionId?: string } : {}
+      calls.push(url.replace(/^.*\/offline/, ''))
+      const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/packs/estimate')) {
+        return body.name === 'Map: Spain'
+          ? reply({ detail: 'pack exceeds 100000 resources', code: 'pack_too_large' }, 400)
+          : reply({ resources: 10, counts: {}, blocked: [], scopes: {} })
+      }
+      if (url.endsWith('/routing/prepare')) return reply({ enabled: true, ready: false, cached: [], regionId: body.regionId }, 202)
+      if (url.endsWith('/packs')) {
+        started.push(String(body.name))
+        return reply({ id: `${started.length}`.padStart(32, '0'), name: body.name, state: 'queued', resources: {} }, 202)
+      }
+      return reply({}, 404)
+    }) as typeof fetch
+    try {
+      const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+      const result = await startRegionDownload(runtime, country!)
+      check('an oversized country queues one map pack per region',
+        started.join(',') === 'Map: Aragón,Map: Cataluña' && result.packs.length === 2 && result.skipped.length === 0, started.join(','))
+      check('an oversized country still prepares its single routing extract',
+        calls.filter(call => call.endsWith('/routing/prepare')).length === 1 && result.regionId === 'spain')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+  {
+    // Storage decisions happen before the routing build starts.
+    const run = async (bytesPerPart: number, available: number, refuse = '') => {
+      const prepared: string[] = []
+      const started: string[] = []
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; regionId?: string } : {}
+        const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+        if (url.endsWith('/packs/estimate')) {
+          return body.name === 'Map: Spain'
+            ? reply({ detail: 'pack exceeds 100000 resources', code: 'pack_too_large' }, 400)
+            : reply({ resources: 10, genericBytes: bytesPerPart, remainingQuota: available, counts: {}, blocked: [], scopes: {} })
+        }
+        if (url.endsWith('/routing/prepare')) {
+          prepared.push(String(body.regionId))
+          return reply({ enabled: true, ready: false, cached: [] }, 202)
+        }
+        if (url.endsWith('/packs')) {
+          if (body.name === refuse) return reply({ detail: 'download would leave less than 64 MiB of free disk space' }, 400)
+          started.push(String(body.name))
+          return reply({ id: `${started.length}`.padStart(32, '0'), name: body.name, state: 'queued', resources: {} }, 202)
+        }
+        return reply({}, 404)
+      }) as typeof fetch
+      try {
+        const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+        const result = await startRegionDownload(runtime, country!).catch((reason: Error) => reason)
+        return { result, prepared, started }
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    }
+    const tooBig = await run(5 * 2 ** 30, 4 * 2 ** 30)
+    check('a part that can never fit is refused before routing starts',
+      tooBig.result instanceof Error && /largest download/.test(tooBig.result.message) && tooBig.prepared.length === 0 && tooBig.started.length === 0)
+    const tight = await run(3 * 2 ** 30, 4 * 2 ** 30)
+    check('an overlapping total above free space warns but still downloads',
+      !(tight.result instanceof Error) && /may need up to/.test(tight.result.warning ?? '') && tight.started.length === 2)
+    const refused = await run(2 ** 20, 4 * 2 ** 30, 'Map: Aragón')
+    check('one part refused by the server does not strand the others',
+      !(refused.result instanceof Error) && refused.started.join(',') === 'Map: Cataluña' &&
+        refused.result.skipped.some(item => item.startsWith('Aragón:')))
+  }
+
+  {
+    // Morocco: no catalogue regions, so a grid; a second area joins the routing
+    // preparation the first one started.
+    const estimated: string[] = []
+    const started: string[] = []
+    let routingRunning = false
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; regionId?: string } : {}
+      const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/packs/estimate')) {
+        estimated.push(String(body.name))
+        return reply({ resources: 10, counts: {}, blocked: [], scopes: {} })
+      }
+      if (url.endsWith('/routing/prepare')) {
+        if (routingRunning) return reply({ detail: 'routing data preparation is already running' }, 409)
+        routingRunning = true
+        return reply({ enabled: true, ready: false, cached: [] }, 202)
+      }
+      if (url.endsWith('/offline/routing')) {
+        return reply({ enabled: true, ready: false, cached: [], ...(routingRunning ? { job: { id: 'r', regionId: 'morocco', state: 'running' } } : {}) })
+      }
+      if (url.endsWith('/packs')) {
+        started.push(String(body.name))
+        return reply({ id: `${started.length}`.padStart(32, '0'), name: body.name, state: 'queued', resources: {} }, 202)
+      }
+      return reply({}, 404)
+    }) as typeof fetch
+    try {
+      const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+      const whole = await startRegionDownload(runtime, morocco)
+      check('a country without regions downloads as its grid without trying the whole first',
+        !estimated.includes('Map: Morocco') && whole.packs.length === grid.length && started.length === grid.length)
+      const one = await startRegionDownload(runtime, grid[0]).catch((reason: Error) => reason)
+      check('one area can be downloaded while its region is still preparing routing',
+        !(one instanceof Error) && started[started.length - 1] === `Map: ${grid[0].name}`, one instanceof Error ? one.message : '')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  {
+    // Resources download separately; everything together keeps the old request.
+    const all = regionalPackRequest(region)
+    const mapsOnly = regionalPackRequest(region, ['maps'])
+    const terrainAndPlaces = regionalPackRequest(region, ['places', 'terrain'])
+    check('all resource groups together keep the original pack request',
+      all.name === 'Map: Aragón' && all.layers.join(',') === 'openfreemap' && all.scopes.join(',') === 'elevation,pois,fuel')
+    const utrecht = { id: 'utrecht', name: 'Utrecht', kind: 'region' as const, bounds: { south: 51.856, west: 4.791, north: 52.305, east: 5.628 } }
+    check('the Spanish fuel snapshot is only requested for areas touching Spain',
+      regionalPackRequest(utrecht, ['places']).scopes.join(',') === 'pois' && regionalPackRequest(region, ['places']).scopes.join(',') === 'pois,fuel')
+    check('a single resource group asks only for its own layers and scopes',
+      mapsOnly.name === 'Maps: Aragón' && mapsOnly.layers.join(',') === 'openfreemap' && mapsOnly.scopes.length === 0 &&
+        terrainAndPlaces.name === 'Terrain + Points of interest: Aragón' && terrainAndPlaces.layers.length === 0 &&
+        terrainAndPlaces.scopes.join(',') === 'elevation,pois,fuel')
+    const groupPacks = decodePacks([
+      { id: 'm', name: 'Maps: Aragón', state: 'complete', bbox: region.bounds, resources: { 'vector-map': mapProgress(10) } },
+      { id: 't', name: 'Terrain: Aragón', state: 'running', bbox: region.bounds, resources: { elevation: mapProgress(4) } },
+      { id: 'p', name: 'Points of interest: Aragón', state: 'complete', detail: 'provider_limits', bbox: region.bounds,
+        unavailable: [{ resource: 'water', reason: 'City-sized searches are required' }],
+        resources: { 'fuel-stations': { done: 1, total: 1, failed: 0, bytes: 0, items: 3 } } },
+    ])
+    check('a pack\'s resource groups are read from what it reports',
+      packGroups(groupPacks[0]).join(',') === 'maps' && packGroups(groupPacks[1]).join(',') === 'terrain' &&
+        packGroups(groupPacks[2]).join(',') === 'places' && packAreaName(groupPacks[2]) === 'Aragón')
+    check('each resource group is judged by its own packs',
+      areaDownloadState(groupPacks, region, 'maps').complete && !areaDownloadState(groupPacks, region, 'terrain').complete &&
+        areaDownloadState(groupPacks, region, 'terrain').active && areaDownloadState(groupPacks, region, 'places').complete &&
+        mapsComplete(groupPacks, region))
+    check('a terrain-only pack does not make an area\'s maps count as downloaded',
+      !mapsComplete(groupPacks.slice(1), region))
+    check('finished single-group downloads appear as saved areas, running ones do not',
+      savedMapAreas(groupPacks).map(pack => pack.id).join(',') === 'm,p')
+
+    const calls: string[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${url.replace(/^.*\/offline/, '')}`)
+      const body = init?.body ? JSON.parse(String(init.body)) as { name?: string } : {}
+      const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/packs/estimate')) return reply({ resources: 10, counts: {}, blocked: [], scopes: {} })
+      if (url.endsWith('/routing/prepare')) return reply({ enabled: true, ready: false, cached: [] }, 202)
+      if (url.endsWith('/packs')) return reply({ id: '0'.repeat(32), name: body.name, state: 'queued', resources: {} }, 202)
+      return reply({}, 404)
+    }) as typeof fetch
+    try {
+      const runtime = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing' } })
+      const city = { id: 'city:1', name: 'Zaragoza', kind: 'city' as const, bounds: { south: 41.6, west: -0.95, north: 41.7, east: -0.8 } }
+      const mapsResult = await startRegionDownload(runtime, city, {}, ['maps'])
+      check('maps alone need no routing region and prepare no routing',
+        !calls.some(call => call.includes('/routing/')) && mapsResult.packs.length === 1 && mapsResult.regionId === undefined, calls.join(' | '))
+      calls.length = 0
+      const routingResult = await startRegionDownload(runtime, region, {}, ['routing'])
+      check('routing alone prepares routing and starts no packs',
+        calls.join(' | ') === 'POST /routing/prepare' && routingResult.packs.length === 0, calls.join(' | '))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  {
+    const job = (phase: string, extra: Record<string, number>) => ({ id: 'j', regionId: 'morocco', state: 'running', phase, ...extra })
+    const view = (phase: string, extra: Record<string, unknown> = {}) => routingJobView(job(phase, extra as Record<string, number>))
+    check('every Broom phase maps to one of the four routing steps',
+      ['region', 'index', 'pbf'].every(phase => view(phase).step === 0) && ['planning', 'elevation'].every(phase => view(phase).step === 1) &&
+        view('build').step === 2 && view('warmup').step === 3 && routingJobView(undefined).step === -1)
+    check('road data shows bytes and is measured',
+      view('pbf', { done: 512 * 1024 * 1024, total: 1024 * 1024 * 1024 }).detail === 'Downloading road data · 512 MiB of 1.00 GiB' &&
+        view('pbf', { done: 1, total: 2 }).fraction === 0.5)
+    check('terrain counts tiles, not the current file',
+      view('elevation', { done: 999, total: 1000, completedItems: 20, itemsTotal: 40, itemsDownloaded: 15, itemsReused: 5 }).fraction === 0.5 &&
+        /20 of 40 tiles \(15 new, 5 reused\)/.test(view('elevation', { completedItems: 20, itemsTotal: 40, itemsDownloaded: 15, itemsReused: 5 }).detail))
+    check('unmeasured build stages show liveness in plain words, never a bar',
+      view('build', { stage: 'partition', elapsedSeconds: 80 }).fraction === null &&
+        view('build', { stage: 'partition', elapsedSeconds: 80 }).detail === 'Partitioning the graph · 1m 20s' &&
+        view('build', { stage: 'pbf-node-index', done: 3, total: 4 }).detail === 'Indexing road nodes · 75%' &&
+        view('build', { stage: 'something-new' }).detail === 'Building the routing graph')
+    check('retries are explained, not shown as progress',
+      view('pbf', { retrying: true, retrySeconds: 4.2, attempt: 2 } as never).detail === 'Connection problem · retrying in 5s (attempt 2)')
+  }
+  {
+    const parts = gridParts(morocco)
+    const pack = (id: string, name: string, bounds: typeof morocco.bounds, state: string, done: number, resources = ['vector-map']) => ({
+      id, name, state, bbox: bounds, resources: Object.fromEntries(resources.map(kind => [kind, { done, total: 10, failed: 0, bytes: 0, items: 0 }])),
+    })
+    const morePacks = decodePacks([
+      pack('a', `Maps: ${parts[0].name}`, parts[0].bounds, 'complete', 10),
+      pack('b', `Maps: ${parts[1].name}`, parts[1].bounds, 'running', 4),
+      pack('c', `Maps: ${parts[2].name}`, parts[2].bounds, 'queued', 0),
+      pack('d', `Terrain: ${parts[0].name}`, parts[0].bounds, 'complete', 10, ['elevation']),
+    ])
+    check('each part reports its own state per resource',
+      groupStatus(morePacks, parts[0], 'maps').state === 'done' && groupStatus(morePacks, parts[1], 'maps').state === 'running' &&
+        groupStatus(morePacks, parts[1], 'maps').fraction === 0.4 && groupStatus(morePacks, parts[2], 'maps').state === 'queued' &&
+        groupStatus(morePacks, parts[3], 'maps').state === 'none' && groupStatus(morePacks, parts[0], 'terrain').state === 'done' &&
+        groupStatus(morePacks, parts[1], 'terrain').state === 'none')
+    const running = groupStatus(morePacks, parts[1], 'maps')
+    check('a running group says what its percentage is made of',
+      running.done === 4 && running.total === 10 && running.bytes === 0)
+    const stoppedPacks = decodePacks([
+      { ...pack('s', `Maps: ${parts[0].name}`, parts[0].bounds, 'incomplete', 6), detail: 'cancelled', done: 6, total: 10 },
+      { ...pack('f', `Maps: ${parts[1].name}`, parts[1].bounds, 'incomplete', 10), detail: 'resource_failures',
+        resources: { 'vector-map': { done: 10, total: 10, failed: 2, bytes: 0, items: 0, error: 'upstream temporarily unavailable' } } },
+    ])
+    check('a stopped download is reported as stopped, not failed',
+      groupStatus(stoppedPacks, parts[0], 'maps').state === 'stopped' && packWasStopped(stoppedPacks[0]) &&
+        /^Stopped at 6 of 10 resources/.test(packFailure(stoppedPacks[0])) && !/Could not/.test(packFailure(stoppedPacks[0])))
+    check('a failed resource carries its reason',
+      groupStatus(stoppedPacks, parts[1], 'maps').state === 'failed' &&
+        packFailure(stoppedPacks[1]) === 'Could not finish vector maps (upstream temporarily unavailable). Download again to retry the missing resources.')
+    const retried = decodePacks([
+      { ...pack('old', `Map: ${parts[0].name}`, parts[0].bounds, 'incomplete', 10, ['vector-map', 'campsites']), detail: 'resource_failures',
+        resources: { 'vector-map': { done: 10, total: 10, failed: 0, bytes: 0, items: 0 }, campsites: { done: 1, total: 1, failed: 1, bytes: 0, items: 0 } } },
+      { ...pack('new', `Points of interest: ${parts[0].name}`, parts[0].bounds, 'complete', 1, ['campsites']),
+        resources: { campsites: { done: 1, total: 1, failed: 0, bytes: 869, items: 0 } } },
+    ])
+    check('a retried group is done, and the old pack no longer blames the groups that finished',
+      groupStatus(retried, parts[0], 'places').state === 'done' && groupStatus(retried, parts[0], 'maps').state === 'done' &&
+        areaDownloadState(retried, parts[0], 'maps').failed === undefined && areaDownloadState(retried, parts[0], 'places').failed === undefined)
+    check('grid parts get compass names up to five rows and columns',
+      gridLabel(0, 3, 0, 5) === 'north-far west' && gridLabel(1, 3, 2, 5) === 'centre' && gridLabel(1, 2, 1, 2) === 'south-east' &&
+        gridLabel(1, 3, 0, 1) === 'central' && gridLabel(0, 6, 0, 6) === 'row 1 of 6, column 1 of 6')
+    check('catalogue ids read as names when the catalogue has none',
+      regionIdName('us/district-of-columbia') === 'District of Columbia' && regionIdName('castilla-y-leon') === 'Castilla y Leon')
+    check('routing build notes are explained, not hidden',
+      /Skipped 11 restrictions/.test(routingDiagnosticsText({ id: 'j', regionId: 'r', state: 'complete', diagnostics: [{ Code: 'malformed-restrictions', Count: 9 }, { Code: 'unmapped-restrictions', Count: 2 }] }) ?? '') &&
+        routingDiagnosticsText({ id: 'j', regionId: 'r', state: 'complete' }) === null)
+    const mapsProgress = partsProgress(morePacks, parts, 'maps')
+    check('a country counts its parts per resource',
+      mapsProgress.done === 1 && mapsProgress.active === 2 && mapsProgress.total === parts.length &&
+        partsProgress(morePacks, parts, 'terrain').done === 1)
+  }
+
+  check('routing jobs count as active only while queued or running',
+    routingJobActive({ job: { id: 'j', regionId: 'r', state: 'running' } } as never) &&
+      !routingJobActive({ job: { id: 'j', regionId: 'r', state: 'failed' } } as never) && !routingJobActive(null))
 
   const estimate = decodePackEstimate({
     estimatedBytes: 2048,

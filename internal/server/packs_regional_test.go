@@ -123,6 +123,7 @@ func TestRegionalVectorPackCompletesAndRestoresAllBatchPins(t *testing.T) {
 }
 
 func TestTerrainPinsPreventEvictionAndSurviveRestart(t *testing.T) {
+	countDownloadsAgainstQuota(t)
 	ts := newTileServer(t)
 	raw := encodeTerrarium(t, func(_, _ int) float64 { return 500 })
 	cfg := Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: int64(len(raw) * 2), ElevationTileURL: ts.url(), HTTPClient: ts.Client()}

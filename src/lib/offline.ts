@@ -1,6 +1,3 @@
-import { simplifyCoordinates } from './edit'
-import type { Coordinate } from './types'
-
 export type OfflineMode = 'auto' | 'cache-only'
 
 export type RuntimeService =
@@ -107,6 +104,8 @@ export interface RoutingDataJob {
   retrySeconds?: number
   attempt?: number
   retrying?: boolean
+  /** Broom's build notes, such as turn restrictions it could not map. */
+  diagnostics?: { Code: string; Count: number }[]
 }
 
 export interface RoutingDataRegion {
@@ -149,6 +148,8 @@ export interface PackSummary extends OfflineJob {
   createdAt?: string
   updatedAt?: string
   incomplete?: boolean
+  /** Why a queued pack could not start, when it could not. */
+  reason?: string
   durableBytes?: number
   failed?: number
   resources: Record<string, PackResourceProgress>
@@ -163,14 +164,14 @@ export interface PackResourceProgress {
   failed: number
   bytes: number
   items: number
+  /** Why the last resource of this kind failed, when one did. */
+  error?: string
 }
 
 export interface PackEstimateRequest {
   coverageKind?: 'area' | 'city' | 'region' | 'country'
   regional?: boolean
   name: string
-  automatic?: boolean
-  route?: { lat: number; lon: number }[]
   bbox?: [number, number, number, number]
   paddingKm: number
   minZoom: number
@@ -179,8 +180,6 @@ export interface PackEstimateRequest {
   scopes: string[]
 }
 
-export type PackArea = 'route' | 'bbox'
-
 export interface PackBounds {
   south: number
   west: number
@@ -188,23 +187,13 @@ export interface PackBounds {
   east: number
 }
 
-export interface PackRequestDraft {
-  name: string
-  area: PackArea
-  route: { lat: number; lon: number }[]
-  bbox: PackBounds | null
-  paddingKm: number
-  minZoom: number
-  maxZoom: number
-  layers: string[]
-  scopes: string[]
-}
-
 export interface PackEstimate {
   resources?: number
   bytes?: number
   reusedBytes?: number
   quotaRemaining?: number
+  /** Bytes the response cache must admit; elevation tiles are stored separately. */
+  genericBytes?: number
   finalBytes?: number
   counts: Record<string, number>
   blocked: { provider?: string; layer?: string; resource?: string; reason: string }[]
@@ -212,62 +201,10 @@ export interface PackEstimate {
   detail?: string
 }
 
-export function limitPackRoute(route: Coordinate[], maxPoints = 5000): { lat: number; lon: number }[] {
-  if (route.length <= maxPoints) return route.map(({ lat, lon }) => ({ lat, lon }))
-  let lower = 0
-  let upper = 10
-  let best = simplifyCoordinates(route, upper)
-  while (best.length > maxPoints && upper < 20_000_000) {
-    lower = upper
-    upper *= 2
-    best = simplifyCoordinates(route, upper)
-  }
-  for (let iteration = 0; iteration < 24 && upper - lower > 0.5; iteration++) {
-    const tolerance = (lower + upper) / 2
-    const candidate = simplifyCoordinates(route, tolerance)
-    if (candidate.length > maxPoints) lower = tolerance
-    else { upper = tolerance; best = candidate }
-  }
-  return best.map(({ lat, lon }) => ({ lat, lon }))
-}
-
-export function buildAutomaticPackRequest(name: string, route: Coordinate[]): PackEstimateRequest | null {
-  if (route.length < 2) return null
-  const routeName = name.trim() || 'Loaded route'
-  return {
-    name: `Route: ${routeName}`.slice(0, 100),
-    automatic: true,
-    route: limitPackRoute(route),
-    paddingKm: 5,
-    minZoom: 5,
-    maxZoom: 14,
-    layers: ['openfreemap'],
-    scopes: ['elevation', 'pois', 'fuel'],
-  }
-}
-
-export function packLayerId(layerId: string): string {
-  return layerId === 'topo' ? 'opentopo' : layerId
-}
-
-export function validPackArea(preference: PackArea | null, routeAvailable: boolean): PackArea {
-  if (!routeAvailable) return 'bbox'
-  return preference === 'bbox' ? 'bbox' : 'route'
-}
-
-export function syncPackLayers(
-  selected: string[],
-  activeLayerId: string,
-  userEdited: boolean,
-): string[] {
-  return userEdited ? selected : [packLayerId(activeLayerId)]
-}
-
 const WEB_MERCATOR_LATITUDE = 85.05112878
-const PACK_LAYERS = new Set(['openfreemap', 'osm', 'opentopo', 'cyclosm', 'satellite', 'relief', 'hillshade'])
-const PACK_SCOPES = new Set(['elevation', 'pois', 'fuel', 'places'])
-
 function normalizedLongitude(value: number): number {
+  // In-range values pass through: the modulo round trip adds float noise.
+  if (value >= -180 && value < 180) return value
   const normalized = ((value + 180) % 360 + 360) % 360 - 180
   return Object.is(normalized, -0) ? 0 : normalized
 }
@@ -292,40 +229,6 @@ function validPackBounds(bounds: PackBounds): boolean {
     bounds.south >= -WEB_MERCATOR_LATITUDE && bounds.north <= WEB_MERCATOR_LATITUDE &&
     bounds.south < bounds.north && bounds.west >= -180 && bounds.west <= 180 &&
     bounds.east >= -180 && bounds.east <= 180 && bounds.west !== bounds.east
-}
-
-export function buildPackEstimateRequest(draft: PackRequestDraft): PackEstimateRequest | null {
-  const name = draft.name.trim()
-  if (!name || name.length > 100 || !Number.isFinite(draft.paddingKm) || draft.paddingKm < 0 || draft.paddingKm > 100) return null
-  if (!Number.isInteger(draft.minZoom) || !Number.isInteger(draft.maxZoom) ||
-      draft.minZoom < 0 || draft.minZoom > 19 || draft.maxZoom < 0 || draft.maxZoom > 19) return null
-  if (draft.layers.some(layer => !PACK_LAYERS.has(layer)) || draft.scopes.some(scope => !PACK_SCOPES.has(scope))) return null
-  const request: PackEstimateRequest = {
-    name,
-    paddingKm: draft.paddingKm,
-    minZoom: Math.min(draft.minZoom, draft.maxZoom),
-    maxZoom: Math.max(draft.minZoom, draft.maxZoom),
-    layers: [...new Set(draft.layers)].sort(),
-    scopes: [...new Set(draft.scopes)].sort(),
-  }
-  if (draft.area === 'route') {
-    if (draft.route.length < 2) return null
-    if (draft.route.some(({ lat, lon }) => !Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)) return null
-    request.route = limitPackRoute(draft.route)
-  } else {
-    if (!draft.bbox || !validPackBounds(draft.bbox)) return null
-    request.bbox = [draft.bbox.south, draft.bbox.west, draft.bbox.north, draft.bbox.east]
-  }
-  return request
-}
-
-export function packRequestSignature(request: PackEstimateRequest | null): string | null {
-  if (!request) return null
-  return JSON.stringify({
-    ...request,
-    layers: [...request.layers].sort(),
-    scopes: [...request.scopes].sort(),
-  })
 }
 
 type UnknownRecord = Record<string, unknown>
@@ -517,6 +420,7 @@ export async function responseError(response: Response, fallback: string): Promi
   const code = text(record(body)?.code)
   const scope = text(record(body)?.scope)
   if (code === 'offline_cache_miss') return new OfflineCacheMissError(detail, scope)
+  if (code === 'pack_too_large') return new PackTooLargeError(detail)
   return new Error(detail ?? fallback)
 }
 
@@ -594,6 +498,39 @@ export async function fetchRoutingSummary(runtime: RuntimeConfig, signal?: Abort
   const response = await fetch(`${endpoint}${endpoint.includes('?') ? '&' : '?'}summary=1`, { signal })
   if (!response.ok) throw await responseError(response, 'Could not inspect routing storage')
   return decodeRoutingDataStatus(await response.json())
+}
+
+/** Broom's acquisition estimate for a region: no PBF or terrain is fetched. */
+export interface RoutingPlan {
+  pbfBytes: number | null
+  estimatedBytes: number | null
+  tilesKnown: boolean
+  tilesTotal: number
+  tilesCached: number
+  tilesMissing: number
+  installed?: boolean
+}
+
+export async function fetchRoutingPlan(runtime: RuntimeConfig, regionId: string, signal?: AbortSignal): Promise<RoutingPlan> {
+  if (!runtime.offline?.routing) throw new Error('Local routing is unavailable')
+  const response = await fetch(`${runtime.offline.routing}/plan`, {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' },
+    body: JSON.stringify({ regionId }),
+  })
+  if (!response.ok) throw await responseError(response, 'Could not estimate the routing download')
+  const body = await response.json() as Partial<RoutingPlan>
+  const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+  return {
+    pbfBytes: num(body.pbfBytes),
+    estimatedBytes: num(body.estimatedBytes),
+    tilesKnown: body.tilesKnown === true,
+    tilesTotal: num(body.tilesTotal) ?? 0,
+    tilesCached: num(body.tilesCached) ?? 0,
+    tilesMissing: num(body.tilesMissing) ?? 0,
+    installed: body.installed === true,
+  }
 }
 
 export async function prepareRoutingData(runtime: RuntimeConfig, regionId: string, update = false): Promise<RoutingDataStatus> {
@@ -712,6 +649,7 @@ function decodePackResources(value: unknown): Record<string, PackResourceProgres
       failed: number(progress.failed) ?? number(progress.failures) ?? 0,
       bytes: number(progress.bytes) ?? 0,
       items: number(progress.items) ?? 0,
+      ...(typeof progress.error === 'string' && progress.error ? { error: progress.error } : {}),
     }
   }
   return resources
@@ -798,6 +736,7 @@ export function decodePacks(value: unknown): PackSummary[] {
       createdAt: text(item.createdAt),
       updatedAt: text(item.updatedAt),
       incomplete: boolean(item.incomplete) ?? job.status === 'incomplete',
+      reason: text(item.errorDetail),
       durableBytes: number(item.durableBytes),
       failed: number(item.failed),
       resources: decodePackResources(item.resources),
@@ -821,6 +760,7 @@ export function decodePackEstimate(value: unknown): PackEstimate {
     reusedBytes: number(root?.reusedBytes) ?? number(root?.reuseBytes),
     quotaRemaining: number(root?.quotaRemaining) ?? number(root?.remainingQuota) ?? number(quota?.remaining),
     finalBytes: number(root?.finalBytes) ?? number(root?.expectedFinalBytes),
+    genericBytes: number(root?.genericBytes),
     counts,
     blocked: blockedRaw.flatMap(value => {
       const item = record(value)
@@ -874,6 +814,14 @@ export function formatCacheContext(metadata: CacheMetadata, compact = false): st
 }
 
 const managementHeaders = { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' }
+
+/** The area is beyond one pack's limits; split it into smaller packs. */
+export class PackTooLargeError extends Error {
+  constructor(message = 'This area is too large for one download') {
+    super(message)
+    this.name = 'PackTooLargeError'
+  }
+}
 
 async function managementResponse(response: Response, action: string): Promise<Response> {
   if (!response.ok) throw await responseError(response, `${action} failed (${response.status})`)

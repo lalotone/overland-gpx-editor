@@ -95,7 +95,6 @@ async function fulfillCommandStream(route: Route, command?: Record<string, unkno
 async function mockRuntime(page: Page, options: {
   style?: object
   styleFailure?: { status: number; body: Record<string, unknown> }
-  elevationUnavailable?: boolean
   webGL2Unavailable?: boolean
   startupCacheOnly?: boolean
   vectorMissDuringOfflineTransition?: boolean
@@ -107,21 +106,13 @@ async function mockRuntime(page: Page, options: {
   let placeRequests = 0
   let packRequest: Record<string, unknown> | undefined
   const pendingVectorRoutes: Route[] = []
-  const activeResources = options.elevationUnavailable
-    ? Object.fromEntries(Object.entries(resourceProgress).filter(([key]) => key !== 'elevation'))
-    : resourceProgress
-  const mapResources = {
-    'vector-map': resourceProgress['vector-map'],
-    places: { done: 1, total: 1, failed: 0, bytes: 900, items: 1 },
-  }
-  const isMapPack = () => String(packRequest?.name ?? '').startsWith('Map: ')
   const pack = (state: 'queued' | 'complete') => {
-    const resources = isMapPack() ? mapResources : activeResources
+    const resources = resourceProgress
     const total = Object.values(resources).reduce((sum, progress) => sum + progress.total, 0)
     const requestedBounds = Array.isArray(packRequest?.bbox) ? packRequest.bbox as number[] : null
     return {
       id: '0123456789abcdef0123456789abcdef',
-      name: String(packRequest?.name ?? 'Route: Browser trip'),
+      name: String(packRequest?.name ?? 'Map: Browser area'),
       state,
       done: state === 'complete' ? total : 0,
       total,
@@ -161,6 +152,7 @@ async function mockRuntime(page: Page, options: {
     maps: { raster: { osm: '/e2e/osm/{z}/{x}/{y}.png' }, openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
   }))
   await page.route(/\/files$/, route => json(route, { files: [] }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, { regions: [], cachedOnly: false }))
   await page.route(/\/upload$/, route => json(route, { filename: 'browser-trip.gpx' }, 201))
   await page.route(/\/elevation\/prefetch$/, route => json(route, { done: 0, total: 0, state: 'complete' }))
   await page.route(/\/map\/openfreemap\/style\.json$/, route => options.styleFailure
@@ -215,32 +207,20 @@ async function mockRuntime(page: Page, options: {
   })
   await page.route(/\/offline\/packs\/estimate$/, async route => {
     packRequest = route.request().postDataJSON() as Record<string, unknown>
-    if (options.elevationUnavailable && (packRequest.scopes as string[]).includes('elevation')) {
-      await json(route, { detail: 'elevation packs require Terrarium tile mode with a persistent tile cache' }, 400)
-      return
-    }
-    const estimatedResources = isMapPack() ? mapResources : activeResources
-    const total = Object.values(estimatedResources).reduce((sum, progress) => sum + progress.total, 0)
+    const total = Object.values(resourceProgress).reduce((sum, progress) => sum + progress.total, 0)
     await json(route, {
       resources: total,
       estimatedBytes: 24000,
       remainingQuota: 1000000,
-      counts: isMapPack()
-        ? {
-            'openfreemap-core': 1,
-            openfreemap: 2,
-            ...((packRequest.scopes as string[]).includes('places') ? { places: 1 } : {}),
-            ...((packRequest.scopes as string[]).includes('elevation') ? { elevation: 2 } : {}),
-          }
-        : {
-            'openfreemap-core': 1,
-            openfreemap: 2,
-            ...(options.elevationUnavailable ? {} : { elevation: 2 }),
-            'pois-fuel': 1,
-            'pois-water': 1,
-            'pois-camp': 1,
-            fuel: 1,
-          },
+      counts: {
+        'openfreemap-core': 1,
+        openfreemap: 2,
+        elevation: 2,
+        'pois-fuel': 1,
+        'pois-water': 1,
+        'pois-camp': 1,
+        fuel: 1,
+      },
       blocked: [],
       scopes: {},
     })
@@ -294,15 +274,6 @@ async function mockRuntime(page: Page, options: {
 async function expectVectorMap(page: Page) {
   await expect(page.locator('.maplibregl-canvas')).toBeVisible()
   await expect(page.getByText(/vector map style is unavailable/i)).toHaveCount(0)
-}
-
-async function expectStackedBelow(upper: ReturnType<Page['locator']>, lower: ReturnType<Page['locator']>) {
-  const upperBox = await upper.boundingBox()
-  const lowerBox = await lower.boundingBox()
-  expect(upperBox).not.toBeNull()
-  expect(lowerBox).not.toBeNull()
-  expect(lowerBox!.y).toBeGreaterThanOrEqual(upperBox!.y + upperBox!.height + 4)
-  expect(Math.abs((upperBox!.x + upperBox!.width) - (lowerBox!.x + lowerBox!.width))).toBeLessThan(4)
 }
 
 async function expectFloatingAbove(upper: ReturnType<Page['locator']>, lower: ReturnType<Page['locator']>) {
@@ -394,13 +365,16 @@ test('permit access reroutes and routing upgrades keep the planner usable', asyn
   await page.getByRole('button', { name: 'Plan a route' }).click()
   const permit = page.getByRole('checkbox', { name: 'Restricted access' })
   await expect(permit).not.toBeChecked()
-  const pill = page.locator('.routing-download-pill')
-  await expect(pill).toContainText('Updating routing')
-  await pill.click()
-  await expect(page.getByText('Your downloaded region remains available', { exact: false })).toBeVisible()
-  await page.getByRole('button', { name: 'Pause routing update' }).click()
-  await page.getByRole('button', { name: 'Resume routing update' }).click()
-  await pill.click()
+  const regions = page.getByTestId('offline-regions-button')
+  await expect(regions).toContainText('Routing · Routing graph')
+  await regions.click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await expect(manager.getByText('Your downloaded region stays available while it rebuilds.')).toBeVisible()
+  await manager.getByRole('button', { name: 'Pause update' }).click()
+  await manager.getByRole('button', { name: 'Resume routing update' }).click()
+  await expect(manager.getByRole('button', { name: 'Pause update' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(manager).toHaveCount(0)
   await page.locator('.leaflet-container').click({ position: { x: 170, y: 150 } })
   await page.locator('.leaflet-container').click({ position: { x: 240, y: 210 } })
   await expect.poll(() => requests.at(-1)).toMatchObject({ profile: 'mixed', accessPermit: false })
@@ -412,22 +386,24 @@ test('permit access reroutes and routing upgrades keep the planner usable', asyn
   await expect.poll(() => requests.at(-1)).toMatchObject({ profile: 'enduro', accessPermit: false })
   const beforeUpgrade = requests.length
   upgrading = false
-  await expect(pill).toHaveText('Routing ready')
+  await expect(regions).toHaveAttribute('title', /Routing ready/)
   await expect.poll(() => requests.length).toBeGreaterThan(beforeUpgrade)
   await permit.check()
   await page.getByRole('button', { name: 'Clear', exact: true }).click()
   await expect(permit).not.toBeChecked()
 })
 
-test('planner suggests viewport routing downloads and reveals progress', async ({ page }, testInfo) => {
-  await mockRuntime(page)
+test('offline regions manager downloads a region and reports its progress', async ({ page }, testInfo) => {
+  // Walks the whole download lifecycle across two screens and a route query.
+  test.slow()
+  const runtime = await mockRuntime(page)
   let ready = false
   let running = false
   let complete = false
-  let suggestedBounds: unknown
   let requestedRegion: string | undefined
   let routeCalls = 0
   let summaryRequests = 0
+  let suggestRequests = 0
   const status = () => ({
     enabled: true,
     ready,
@@ -455,17 +431,22 @@ test('planner suggests viewport routing downloads and reveals progress', async (
     services: { places: '/places/search', broomRoute: '/routing/broom/route' },
     maps: { raster: { osm: '/e2e/osm/{z}/{x}/{y}.png' }, openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
   }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [
+      { id: 'spain', name: 'Spain', kind: 'country', bbox: { south: 35.9, west: -9.4, north: 43.8, east: 4.4 }, installed: false, active: false },
+      { id: 'spain/aragon', name: 'Aragon', parent: 'spain', kind: 'region', bbox: { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }, installed: ready, active: ready },
+      { id: 'spain/cataluna', name: 'Cataluña', parent: 'spain', kind: 'region', bbox: { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }, installed: false, active: false },
+    ],
+  }))
+  await page.route(/\/offline\/routing\/suggest$/, route => {
+    suggestRequests++
+    return json(route, { region: null })
+  })
   await page.route(/\/offline\/routing\/prepare$/, async route => {
     requestedRegion = (route.request().postDataJSON() as { regionId: string }).regionId
     running = true
     await json(route, status(), 202)
-  })
-  await page.route(/\/offline\/routing\/plan$/, route => json(route, {
-    pbfBytes: 1000, estimatedBytes: null, tilesKnown: true, tilesTotal: 55, tilesCached: 4, tilesMissing: 51,
-  }))
-  await page.route(/\/offline\/routing\/suggest$/, async route => {
-    suggestedBounds = (route.request().postDataJSON() as { bbox: unknown }).bbox
-    await json(route, { region: { regionId: 'spain/aragon', name: 'Aragon', installed: ready, active: ready } })
   })
   await page.route(/\/offline\/routing(?:\?summary=1)?$/, async route => {
     if (route.request().url().endsWith('?summary=1')) summaryRequests++
@@ -487,42 +468,311 @@ test('planner suggests viewport routing downloads and reveals progress', async (
 
   await page.goto('/')
   await page.getByRole('button', { name: 'Plan a route' }).click()
-  await expect(page.getByRole('combobox', { name: 'Broom routing region' })).toHaveCount(0)
-  const pill = page.locator('.routing-download-pill')
-  await page.locator('.leaflet-container').scrollIntoViewIfNeeded()
-  await expect(pill).toContainText('Aragon')
-  await expectFloatingAbove(page.locator('.leaflet-control-zoom'), page.locator('.creation-poi-strip'))
-  await page.locator('.leaflet-container').hover({ position: { x: 100, y: 100 } })
-  const readout = page.locator('.map-cursor-readout')
-  if (await readout.isVisible()) await expectFloatingAbove(pill, readout)
-  const mapBounds = await page.locator('.leaflet-container').boundingBox()
-  const fullMap = await page.getByRole('button', { name: 'Full map — hide the panels' }).boundingBox()
-  expect(fullMap!.y - mapBounds!.y).toBeLessThanOrEqual(12)
-  expect(fullMap!.x - mapBounds!.x).toBeLessThanOrEqual(12)
-  expect(suggestedBounds).toMatchObject({ south: expect.any(Number), west: expect.any(Number), north: expect.any(Number), east: expect.any(Number) })
+  await expect(page.locator('.routing-download-pill')).toHaveCount(0)
+  const regions = page.getByTestId('offline-regions-button')
+  await expect(regions).toHaveText('Offline regions')
   expect(requestedRegion).toBeUndefined()
-  await expect(page.getByRole('region', { name: 'Offline routing download' })).toHaveCount(0)
-  await pill.click()
-  await expect(page.locator('.routing-download-estimate')).toContainText('55 terrain tiles · 4 cached · 51 to fetch')
-  await expect.poll(() => summaryRequests).toBe(1)
-  await expect(page.getByText('4.00 KiB cached for routing (last measured)')).toBeVisible()
-  await page.getByRole('button', { name: 'Download Aragon' }).click()
-  expect(requestedRegion).toBe('spain/aragon')
-  await expect(page.getByRole('progressbar', { name: 'Routing download progress' })).toHaveAttribute('value', '50')
-  await pill.click()
-  await expect(page.getByRole('progressbar')).toHaveCount(0)
-  await expect(pill).toContainText('12/55 tiles')
-  await pill.click()
-  await expect(page.getByRole('button', { name: 'Cancel download' })).toBeVisible()
-  await expect(page.locator('.routing-download-transfer')).toContainText('8 downloaded · 4 reused')
-  await page.screenshot({ path: testInfo.outputPath('routing-progress.png') })
-  await pill.click()
+
+  await regions.click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await expect(manager.getByRole('tab', { name: 'Add region' })).toHaveAttribute('aria-selected', 'true')
+  await expect(manager.getByRole('button', { name: 'Download Cataluña' })).toBeVisible()
+  await manager.getByRole('textbox', { name: 'Filter regions' }).fill('arag')
+  await expect(manager.getByRole('button', { name: 'Download Cataluña' })).toHaveCount(0)
+  await manager.getByRole('button', { name: 'Download Aragon' }).click()
+
+  await expect.poll(() => requestedRegion).toBe('spain/aragon')
+  expect(suggestRequests).toBe(0)
+  expect(runtime.getPackRequest()).toMatchObject({
+    regional: true,
+    coverageKind: 'region',
+    name: 'Map: Aragon',
+    bbox: [39.8, -2.2, 42.9, 0.8],
+    layers: ['openfreemap'],
+    scopes: ['elevation', 'pois', 'fuel'],
+  })
+  await expect(manager.getByRole('heading', { name: 'Aragon' })).toBeVisible()
+  await expect(manager.getByRole('button', { name: 'Stop downloads' })).toBeVisible()
+  await expect(regions).toContainText('Routing · Terrain')
+
+  await manager.getByRole('button', { name: 'Back' }).click()
+  await manager.getByRole('tab', { name: 'Downloads' }).click()
+  const routingCard = manager.getByRole('article', { name: 'Routing download Aragon' })
+  // The terrain step is current; its bar measures tiles (12 of 55), not files.
+  await expect(routingCard.getByRole('list', { name: 'Routing steps' }).locator('[aria-current="step"]')).toHaveText('Terrain')
+  await expect(routingCard).toContainText('Downloading terrain · 12 of 55 tiles (8 new, 4 reused)')
+  await expect(routingCard.getByRole('progressbar', { name: 'Current routing step progress' })).toHaveAttribute('value', '22')
+  await expect(manager.getByText('4.00 KiB of routing data (last measured)')).toBeVisible()
+  // Storage inspection is explicit (once per opening), never part of polling.
+  const summaryAfterOpen = summaryRequests
+  expect(summaryAfterOpen).toBeGreaterThan(0)
+  await page.screenshot({ path: testInfo.outputPath('offline-regions-progress.png') })
+
+  await page.keyboard.press('Escape')
+  await expect(manager).toHaveCount(0)
   await page.locator('.leaflet-container').click({ position: { x: 170, y: 150 } })
   await page.locator('.leaflet-container').click({ position: { x: 240, y: 210 } })
   expect(routeCalls).toBe(0)
   complete = true
-  await expect(pill).toHaveText('Routing ready')
+  await expect(regions).toHaveAttribute('title', /Routing ready · Aragon/)
   await expect.poll(() => routeCalls).toBe(1)
+  expect(summaryRequests).toBe(summaryAfterOpen)
+
+  await regions.click()
+  const downloaded = manager.getByRole('region', { name: 'Downloaded regions' })
+  await expect(downloaded).toContainText('Aragon')
+  await expect(downloaded).toContainText('In use')
+  await expect(manager.getByRole('region', { name: 'Map downloads' })).toContainText('Downloaded')
+})
+
+test('a country too large for one pack downloads region by region', async ({ page }) => {
+  await mockRuntime(page)
+  const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }
+  const cataluna = { south: 40.5, west: 0.1, north: 42.9, east: 3.4 }
+  const prepared: string[] = []
+  const estimated: string[] = []
+  const packs: Record<string, unknown>[] = []
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: false, cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [
+      { id: 'spain', name: 'Spain', kind: 'country', bbox: { south: 35.9, west: -9.4, north: 43.8, east: 4.4 }, installed: false, active: false },
+      { id: 'spain/aragon', name: 'Aragon', parent: 'spain', kind: 'region', bbox: aragon, installed: false, active: false },
+      { id: 'spain/cataluna', name: 'Cataluña', parent: 'spain', kind: 'region', bbox: cataluna, installed: false, active: false },
+    ],
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    prepared.push((route.request().postDataJSON() as { regionId: string }).regionId)
+    return json(route, { enabled: true, ready: false, cached: [] }, 202)
+  })
+  await page.route(/\/offline\/packs\/estimate$/, route => {
+    const { name } = route.request().postDataJSON() as { name: string }
+    estimated.push(name)
+    return name === 'Map: Spain'
+      ? json(route, { detail: 'pack exceeds 100000 resources', code: 'pack_too_large' }, 400)
+      : json(route, { resources: 9, counts: {}, blocked: [], scopes: {} })
+  })
+  await page.route(/\/offline\/packs$/, route => {
+    if (route.request().method() !== 'POST') return json(route, packs)
+    const { name, bbox } = route.request().postDataJSON() as { name: string; bbox: number[] }
+    const pack = {
+      id: String(packs.length + 1).padStart(32, 'a'), name, state: packs.length === 0 ? 'running' : 'queued', coverageKind: 'region',
+      done: packs.length === 0 ? 3 : 0, total: 9, resources: { 'vector-map': { done: packs.length === 0 ? 3 : 0, total: 9, failed: 0, bytes: 0, items: 0 } },
+      bbox: { south: bbox[0], west: bbox[1], north: bbox[2], east: bbox[3] },
+    }
+    packs.push(pack)
+    return json(route, pack, 202)
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await manager.getByRole('button', { name: 'Country', exact: true }).click()
+  await manager.getByRole('button', { name: 'Download Spain' }).click()
+
+  await expect.poll(() => packs.length).toBe(2)
+  // Too large by arithmetic, so the whole country is never estimated.
+  expect(estimated).toEqual(['Map: Aragon', 'Map: Cataluña'])
+  expect(prepared).toEqual(['spain'])
+  // Progress is read region by region: counts per resource and a chip per region.
+  await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('0 of 2 regions · 2 in progress')
+  const regionList = manager.getByRole('list', { name: 'Regions' })
+  await expect(regionList.getByRole('listitem').filter({ hasText: 'Aragon' })).toContainText('Maps 33%')
+  await expect(regionList.getByRole('listitem').filter({ hasText: 'Cataluña' })).toContainText('Maps queued')
+
+  await manager.getByRole('button', { name: 'Back' }).click()
+  await manager.getByRole('tab', { name: 'Downloads' }).click()
+  await expect(manager.getByRole('article', { name: 'Map download Aragon' })).toBeVisible()
+  const queue = manager.getByRole('article', { name: 'Queued map downloads' })
+  await expect(queue).toContainText('Cataluña')
+  await expect(queue.getByRole('button', { name: 'Stop Cataluña' })).toBeVisible()
+})
+
+test('a country without catalogue regions offers grid areas to download one by one', async ({ page }) => {
+  await mockRuntime(page)
+  const prepared: string[] = []
+  const started: string[] = []
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: false, cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [{ id: 'morocco', name: 'Morocco', kind: 'country', bbox: { south: 20.7, west: -17.1, north: 35.95, east: -1 }, installed: false, active: false }],
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    prepared.push((route.request().postDataJSON() as { regionId: string }).regionId)
+    return json(route, { enabled: true, ready: false, cached: [] }, 202)
+  })
+  await page.route(/\/offline\/packs\/estimate$/, route => json(route, { resources: 9, counts: {}, blocked: [], scopes: {} }))
+  await page.route(/\/offline\/packs$/, route => {
+    if (route.request().method() !== 'POST') return json(route, [])
+    const { name } = route.request().postDataJSON() as { name: string }
+    started.push(name)
+    return json(route, { id: String(started.length).padStart(32, 'b'), name, state: 'queued', resources: {} }, 202)
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  // Filtering regions by a country the catalogue does not divide offers the
+  // country and its areas rather than an empty list.
+  await manager.getByRole('combobox', { name: 'Country filter' }).selectOption('morocco')
+  await expect(manager.getByText('does not divide Morocco into regions', { exact: false })).toBeVisible()
+  await expect(manager.getByRole('button', { name: 'Download Morocco', exact: true })).toBeVisible()
+  await expect(manager.getByRole('list', { name: 'Areas' }).getByRole('listitem')).toHaveCount(12)
+  await expect(manager.getByText('No matching regions.')).toHaveCount(0)
+
+  await manager.getByRole('button', { name: 'Country', exact: true }).click()
+  await manager.getByRole('button', { name: 'Morocco', exact: false }).first().click()
+  await expect(manager.getByText('Whole country · 12 areas', { exact: true })).toBeVisible()
+  await expect(manager.getByRole('region', { name: 'Routing' })).toContainText('One download for all of Morocco')
+  const areas = manager.getByRole('list', { name: 'Areas' })
+  await expect(areas.getByRole('listitem')).toHaveCount(12)
+  await areas.getByRole('button', { name: /Morocco · row 2, column 1/ }).click()
+  await manager.getByRole('button', { name: 'Download everything' }).click()
+  await expect.poll(() => started).toEqual(['Map: Morocco · row 2, column 1'])
+  expect(prepared).toEqual(['morocco'])
+  await expect(manager.getByRole('heading', { name: 'Morocco · row 2, column 1' })).toBeVisible()
+})
+
+test('routing and each offline resource download separately', async ({ page }) => {
+  await mockRuntime(page)
+  const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }
+  const prepared: string[] = []
+  const requests: { name: string; layers: string[]; scopes: string[] }[] = []
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, { enabled: true, ready: false, cached: [], cacheBytes: 0 }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [{ id: 'spain/aragon', name: 'Aragon', kind: 'region', bbox: aragon, installed: false, active: false }],
+  }))
+  await page.route(/\/offline\/routing\/prepare$/, route => {
+    prepared.push((route.request().postDataJSON() as { regionId: string }).regionId)
+    return json(route, { enabled: true, ready: false, cached: [] }, 202)
+  })
+  await page.route(/\/offline\/packs\/estimate$/, route => json(route, { resources: 9, counts: {}, blocked: [], scopes: {} }))
+  const packs: Record<string, unknown>[] = []
+  await page.route(/\/offline\/packs$/, route => {
+    if (route.request().method() !== 'POST') return json(route, packs)
+    const request = route.request().postDataJSON() as { name: string; layers: string[]; scopes: string[]; bbox: number[] }
+    requests.push({ name: request.name, layers: request.layers, scopes: request.scopes })
+    const pack = {
+      id: String(packs.length + 1).padStart(32, 'c'), name: request.name, state: 'complete', done: 3, total: 3,
+      bbox: { south: request.bbox[0], west: request.bbox[1], north: request.bbox[2], east: request.bbox[3] },
+      resources: { 'vector-map': { done: 3, total: 3, failed: 0, bytes: 10, items: 0 } },
+    }
+    packs.push(pack)
+    return json(route, pack, 202)
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await manager.getByRole('button', { name: 'Aragon', exact: false }).first().click()
+  const resources = manager.getByRole('list', { name: 'Resources' })
+  await expect(resources.getByRole('listitem')).toHaveCount(3)
+  await expect(manager.getByRole('button', { name: 'Download everything' })).toBeEnabled()
+
+  // Maps alone: no routing, and only the map layer.
+  await resources.getByRole('button', { name: 'Download maps' }).click()
+  await expect.poll(() => requests).toEqual([{ name: 'Maps: Aragon', layers: ['openfreemap'], scopes: [] }])
+  expect(prepared).toEqual([])
+  await expect(resources.getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('Downloaded')
+  await expect(resources.getByRole('button', { name: 'Download maps' })).toHaveCount(0)
+
+  // Routing alone: no packs.
+  await manager.getByRole('region', { name: 'Routing' }).getByRole('button', { name: 'Download routing' }).click()
+  await expect.poll(() => prepared).toEqual(['spain/aragon'])
+  expect(requests).toHaveLength(1)
+
+  // The rest: terrain and points of interest together, no routing again.
+  await expect(manager.getByRole('button', { name: 'Download the rest' })).toBeEnabled()
+  await manager.getByRole('button', { name: 'Download the rest' }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  expect(requests[1]).toEqual({ name: 'Terrain + Points of interest: Aragon', layers: [], scopes: ['elevation', 'pois', 'fuel'] })
+})
+
+test('offline regions manager lists, inspects and removes stored downloads', async ({ page }) => {
+  await mockRuntime(page)
+  const aragon = { south: 39.8, west: -2.2, north: 42.9, east: 0.8 }
+  const deleted: string[] = []
+  const complete = (id: string, name: string, bbox?: typeof aragon, extra: Record<string, unknown> = {}) => ({
+    id, name, state: 'complete', done: 9, total: 9, failed: 0, bytes: 2048, createdAt: '2026-08-31T12:00:00Z',
+    resources: resourceProgress, ...(bbox ? { bbox, coverageKind: 'region' } : {}), ...extra,
+  })
+  let packs = [
+    complete('a'.repeat(32), 'Map: Aragon', aragon),
+    complete('b'.repeat(32), 'Map: Teruel', { south: 39.8, west: -1.8, north: 41.2, east: -0.1 }, {
+      state: 'incomplete', detail: 'interrupted', resources: { ...resourceProgress, 'vector-map': { done: 1, total: 3, failed: 0, bytes: 10, items: 0 } },
+    }),
+    complete('c'.repeat(32), 'Route: Old trip'),
+  ]
+  await page.route(/\/config$/, route => json(route, {
+    offline: { enabled: true, mode: 'auto', status: '/offline/status', packs: '/offline/packs', modeControl: '/offline/mode', routing: '/offline/routing' },
+    services: {},
+    maps: { openfreemap: { style: '/map/openfreemap/style.json', allowBulk: true } },
+  }))
+  await page.route(/\/offline\/routing(?:\?summary=1)?$/, route => json(route, {
+    enabled: true, ready: true, regionId: 'spain/aragon', generationId: 'g1', name: 'Aragon',
+    cached: [{ regionId: 'spain/aragon', generationId: 'g1', name: 'Aragon', selected: true, pinned: false }],
+    cacheBytes: 4096,
+  }))
+  await page.route(/\/offline\/routing\/regions$/, route => json(route, {
+    cachedOnly: false,
+    regions: [{ id: 'spain/aragon', name: 'Aragon', kind: 'region', bbox: aragon, installed: true, active: true }],
+  }))
+  await page.route(/\/offline\/packs$/, route => json(route, packs))
+  await page.route(/\/offline\/packs\/[a-f0-9]{32}$/, route => {
+    const id = route.request().url().split('/').pop()!
+    deleted.push(id)
+    packs = packs.filter(pack => pack.id !== id)
+    return route.fulfill({ status: 204 })
+  })
+
+  await page.goto('/')
+  await page.locator('.corner-actions').getByTestId('offline-regions-button').click()
+  const manager = page.getByRole('dialog', { name: 'Offline regions' })
+  await expect(manager.getByRole('tab', { name: 'Downloads' })).toHaveAttribute('aria-selected', 'true')
+  const regions = manager.getByRole('region', { name: 'Downloaded regions' })
+  await expect(regions).toContainText('Routing and maps downloaded')
+  await expect(regions).toContainText('In use')
+
+  const maps = manager.getByRole('region', { name: 'Map downloads' })
+  await expect(maps.getByRole('listitem')).toHaveCount(3)
+  await expect(maps.getByRole('button', { name: 'Resume Teruel' })).toBeEnabled()
+  await expect(maps.getByRole('button', { name: 'Resume Aragon' })).toHaveCount(0)
+  await expect(maps.getByRole('button', { name: 'Resume Old trip' })).toHaveCount(0)
+
+  await maps.getByRole('button', { name: 'Remove Old trip' }).click()
+  await expect(maps.getByRole('button', { name: 'Remove', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(manager).toBeVisible()
+  await expect(maps.getByRole('button', { name: 'Remove', exact: true })).toHaveCount(0)
+  await maps.getByRole('button', { name: 'Remove Old trip' }).click()
+  await maps.getByRole('button', { name: 'Remove', exact: true }).click()
+  await expect.poll(() => deleted).toEqual(['c'.repeat(32)])
+  await expect(maps.getByRole('listitem')).toHaveCount(2)
+
+  await regions.getByRole('button', { name: /Aragon/ }).first().click()
+  await expect(manager.getByRole('heading', { name: 'Aragon' })).toBeVisible()
+  await expect(manager.getByRole('region', { name: 'Routing' })).toContainText('Downloaded · in use')
+  await expect(manager.getByRole('list', { name: 'Resources' }).getByRole('listitem').filter({ hasText: /^Maps/ })).toContainText('Downloaded')
+  await page.keyboard.press('Escape')
+  await expect(manager.getByRole('heading', { name: 'Offline regions' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(manager).toHaveCount(0)
 })
 
 test('MCP bridge draws planner routes and reports the active view', async ({ page }) => {
@@ -956,25 +1206,6 @@ test('missing WebGL2 leaves OFM selected and never starts raster tiles', async (
   expect(runtime.getOsmRequests()).toBe(0)
 })
 
-test('unavailable elevation leaves other route resources prepared', async ({ page }) => {
-  const runtime = await mockRuntime(page, { elevationUnavailable: true })
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Open a GPX file' }).click()
-  await page.locator('input[type="file"]').setInputFiles({
-    name: 'browser-trip.gpx',
-    mimeType: 'application/gpx+xml',
-    buffer: Buffer.from(GPX),
-  })
-
-  const offlineButton = page.getByTestId('offline-route-button')
-  await expect(offlineButton).toContainText('Offline partial')
-  await offlineButton.click()
-  const panel = page.getByTestId('offline-route-panel')
-  await expect(panel.locator('.offline-resource[data-state="ready"]')).toHaveCount(5)
-  await expect(panel.locator('[data-resource="elevation"]')).toContainText('Persistent terrain tiles are not configured')
-  expect(runtime.getPackRequest()?.scopes).toEqual(['pois', 'fuel'])
-})
-
 test('GPX waypoint marker types render and remain editable', async ({ page }) => {
   await mockRuntime(page)
   await page.goto('/')
@@ -995,7 +1226,7 @@ test('GPX waypoint marker types render and remain editable', async ({ page }) =>
   await expect(page.locator('.waypoint-marker-fuel')).toHaveCount(0)
 })
 
-test('loading a GPX automatically prepares and reports route resources', async ({ page }) => {
+test('loading a GPX keeps map controls usable without starting downloads', async ({ page }) => {
   const runtime = await mockRuntime(page)
   await page.goto('/')
   await page.getByRole('button', { name: 'Open a GPX file' }).click()
@@ -1026,34 +1257,12 @@ test('loading a GPX automatically prepares and reports route resources', async (
   await expect(profile).toHaveClass(/collapsed/)
   await expectFloatingAbove(zoomControl, profile)
 
+  // Offline data is downloaded only from Offline regions, never implicitly.
+  await expect(page.getByTestId('offline-route-button')).toHaveCount(0)
+  expect(runtime.getPackRequest()).toBeUndefined()
+
   const terrainButton = page.locator('.terrain-fab')
-  const offlineButton = page.getByTestId('offline-route-button')
-  await expect(offlineButton).toContainText('Offline ready')
-  await expectStackedBelow(terrainButton, offlineButton)
-
-  expect(runtime.getPackRequest()).toMatchObject({
-    name: 'Route: Browser trip',
-    automatic: true,
-    layers: ['openfreemap'],
-    scopes: ['elevation', 'pois', 'fuel'],
-  })
-  expect(runtime.getPackRequest()?.route).toHaveLength(3)
-
   await terrainButton.click()
-  await expectStackedBelow(page.locator('.terrain-controls'), offlineButton)
-  await offlineButton.click()
-  const panel = page.getByTestId('offline-route-panel')
-  await expect(panel).toBeVisible()
-  await expectStackedBelow(offlineButton, panel)
-  await expect(panel.locator('.offline-resource[data-state="ready"]')).toHaveCount(6)
-  await expect(panel.locator('[data-resource="water"]')).toContainText('7 local records')
-
-  const readyRing = panel.locator('.offline-progress-ring.is-ready')
-  await expect(readyRing).toHaveCSS('border-radius', '50%')
-  await expect(readyRing.locator('.offline-progress-ring-value')).toHaveCSS('filter', 'none')
-
-  await page.keyboard.press('Escape')
-  await expect(panel).toHaveCount(0)
   await expect(page.locator('.terrain-controls')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.locator('.terrain-controls')).toHaveCount(0)
@@ -1080,7 +1289,7 @@ test('loading a GPX automatically prepares and reports route resources', async (
   await expect(waypoint).toBeVisible()
 })
 
-test('explore caches deliberate place searches and downloads a drawn map area', async ({ page }) => {
+test('explore caches deliberate place searches and offers no map-area downloads', async ({ page }) => {
   const runtime = await mockRuntime(page)
   await page.goto('/')
   await page.getByRole('button', { name: 'Explore map' }).click()
@@ -1092,9 +1301,7 @@ test('explore caches deliberate place searches and downloads a drawn map area', 
   const actions = page.locator('.explore-actions')
   const topButtons = [
     page.locator('.explore-home'),
-    actions.getByTestId('offline-area-button'),
-    actions.getByTestId('offline-areas-button'),
-    actions.locator('.offline-coverage-toggle'),
+    actions.getByTestId('offline-regions-button'),
     actions.getByTestId('offline-mode-toggle'),
     actions.locator('.theme-toggle'),
   ]
@@ -1110,10 +1317,12 @@ test('explore caches deliberate place searches and downloads a drawn map area', 
   await page.keyboard.press('Escape')
   await expect(page.locator('.terrain-controls')).toHaveCount(0)
 
-  await page.getByTestId('offline-area-button').click()
-  await expect(page.getByTestId('offline-area-panel')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Draw area' })).toHaveCount(0)
+  await expect(page.locator('.routing-download-pill')).toHaveCount(0)
+  await actions.getByTestId('offline-regions-button').click()
+  await expect(page.getByRole('dialog', { name: 'Offline regions' })).toBeVisible()
   await page.keyboard.press('Escape')
-  await expect(page.getByTestId('offline-area-panel')).toHaveCount(0)
+  await expect(page.getByRole('dialog', { name: 'Offline regions' })).toHaveCount(0)
 
   const search = page.getByRole('searchbox', { name: 'Search OpenStreetMap places' })
   await search.fill('Vitoria-Gasteiz')
@@ -1138,99 +1347,12 @@ test('explore caches deliberate place searches and downloads a drawn map area', 
 
   await page.locator('.leaflet-marker-icon').click()
   await expect(page.locator('.leaflet-popup')).toBeVisible()
-  await page.getByTestId('offline-area-button').click()
-  await expect(page.getByTestId('offline-area-panel')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.locator('.leaflet-popup')).toHaveCount(0)
-  await expect(page.getByTestId('offline-area-panel')).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('offline-area-panel')).toHaveCount(0)
-
-  await page.getByTestId('offline-area-button').click()
-  const panel = page.getByTestId('offline-area-panel')
-  await expect(panel).toBeVisible()
-  await panel.getByRole('button', { name: 'Draw area' }).click()
-  await expect(panel).toHaveCount(0)
-
-  await expect(page.locator('.explore-selection-hint')).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(page.locator('.explore-selection-hint')).toHaveCount(0)
-  await page.getByTestId('offline-area-button').click()
-  await page.getByTestId('offline-area-panel').getByRole('button', { name: 'Draw area' }).click()
-
-  const mapBox = await page.getByTestId('explore-map').boundingBox()
-  expect(mapBox).not.toBeNull()
-  await page.mouse.move(mapBox!.x + mapBox!.width * 0.18, mapBox!.y + mapBox!.height * 0.28)
-  await page.mouse.down()
-  await page.mouse.move(mapBox!.x + mapBox!.width * 0.54, mapBox!.y + mapBox!.height * 0.55, { steps: 8 })
-  await page.mouse.up()
-
-  const selectedPanel = page.getByTestId('offline-area-panel')
-  await expect(selectedPanel).toContainText('Area selected')
-  await expect(page.getByTestId('offline-area-estimate')).toBeVisible()
-  await expect(selectedPanel.getByRole('button', { name: /estimate/i })).toHaveCount(0)
-
-  const estimatedRequest = runtime.getPackRequest()
-  const bbox = estimatedRequest?.bbox as number[]
-  expect(bbox).toHaveLength(4)
-  expect(bbox.every(Number.isFinite)).toBe(true)
-  expect(bbox[0]).toBeLessThan(bbox[2])
-
-  await selectedPanel.getByRole('button', { name: 'Download area' }).click()
-  expect(runtime.getPackRequest()).toMatchObject({
-    name: 'Map: Vitoria-Gasteiz',
-    paddingKm: 0,
-    layers: ['openfreemap'],
-    scopes: ['places'],
-  })
-  await expect(page.getByTestId('offline-area-progress')).toContainText('Available offline')
-  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(1)
-  await expect(selectedPanel).toContainText('Exact place searches')
-  expect(runtime.getPlaceRequests()).toBe(1)
-
-  await page.keyboard.press('Escape')
-  await expect(selectedPanel).toHaveCount(0)
   await expect(page.locator('.explore-place-card')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.locator('.explore-place-card')).toHaveCount(0)
-
-  await page.getByRole('button', { name: 'Hide downloaded areas' }).click()
-  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(0)
-  await page.getByTestId('offline-area-button').click()
-  await page.getByTestId('offline-area-button').click()
-  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(1)
-
-  await page.evaluate(() => localStorage.setItem('gpx-explore-view', JSON.stringify({ lat: 0, lon: 0, zoom: 3 })))
-  await page.reload()
-  await page.getByRole('button', { name: 'Explore map' }).click()
-  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(1)
-
-  const currentView = () => page.evaluate(() => JSON.parse(localStorage.getItem('gpx-explore-view') ?? '{}') as { lat?: number; lon?: number })
-  await expect.poll(async () => (await currentView()).lat).toBeCloseTo(0, 1)
-
-  await page.getByRole('button', { name: /Downloaded areas/ }).click()
-  const manager = page.getByRole('region', { name: 'Downloaded areas' })
-  await expect(manager).toContainText('Vitoria-Gasteiz')
-  await manager.getByRole('button', { name: 'View Vitoria-Gasteiz on map' }).click()
-  await expect(manager).toHaveCount(0)
-  await expect.poll(async () => (await currentView()).lat).toBeCloseTo((bbox[0] + bbox[2]) / 2, 1)
-  await expect.poll(async () => (await currentView()).lon).toBeCloseTo((bbox[1] + bbox[3]) / 2, 1)
-
-  await page.getByRole('button', { name: /Downloaded areas/ }).click()
-  await page.keyboard.press('Escape')
-  await expect(manager).toHaveCount(0)
-  await page.getByRole('button', { name: /Downloaded areas/ }).click()
-  const removeArea = manager.getByRole('button', { name: 'Remove Vitoria-Gasteiz' })
-  await expect(removeArea.locator('svg')).toBeVisible()
-  await expect(removeArea).toHaveText('')
-  await removeArea.click()
-  await expect(manager.getByRole('button', { name: 'Confirm removal' })).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(manager).toBeVisible()
-  await expect(manager.getByRole('button', { name: 'Confirm removal' })).toHaveCount(0)
-  await removeArea.click()
-  await manager.getByRole('button', { name: 'Confirm removal' }).click()
-  await expect(page.locator('.leaflet-offline-coverage-pane path')).toHaveCount(0)
+  expect(runtime.getPackRequest()).toBeUndefined()
 })
 
 test('MCP agents can see errors caused by their own commands', async ({ page }) => {

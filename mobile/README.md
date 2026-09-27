@@ -25,6 +25,7 @@ continues to use its existing entry point.
 - **Offline:** a split map overlay downloads the visible area or opens a region
   browser. The browser has City, Region/comunidad and Country views, a prominent
   Downloaded section, in-use badges, saved map areas and explicit partial states.
+  Routing, maps, terrain and points of interest can each be downloaded alone.
   Selecting a region shows separate progress for routing, vector maps, elevation,
   fuel prices, fuel stations, water and campsites. City search uses the shared
   Nominatim client; cities use their own map bounds plus a covering routing extract.
@@ -38,7 +39,10 @@ continues to use its existing entry point.
 
 Regional downloads process up to 100,000 resources in bounded batches of 128,
 with four vector-tile workers under the shared four-request provider limit. One durable pack owns every batch, so later batches
-cannot evict earlier downloaded tiles. Ordinary desktop trip packs keep their
+cannot evict earlier downloaded tiles. Areas beyond that limit, such as most
+countries, are downloaded as one pack per region, or per grid area where the
+catalogue has no regions, behind the country's single routing extract; packs beyond the two
+running jobs wait in the backend queue. Ordinary trip packs keep their
 10,000-resource limit. Region manifests checkpoint batches and always flush their
 terminal state; interrupted downloads can reuse existing cached resources.
 

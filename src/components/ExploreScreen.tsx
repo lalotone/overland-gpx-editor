@@ -1,22 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import { MapContainer, Marker, Pane, Popup, Rectangle, ZoomControl, useMap } from 'react-leaflet'
+import { MapContainer, Marker, Popup, ZoomControl, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import { MapTiles, VectorMapDiagnostic } from './MapLayers'
-import RoutingDownloadControl from './RoutingDownloadControl'
 import MapControlLayout from './MapControlLayout'
 import type { VectorMapIssue } from './MapLayers'
-import { OfflineAreaPanel } from './OfflineAreaPanel'
-import { OfflineAreasPanel } from './OfflineAreasPanel'
 import { ESCAPE_PRIORITY, useEscapeDismiss } from './useEscapeDismiss'
 import { searchPlaces } from '../lib/geocoding'
 import type { PlaceResult } from '../lib/geocoding'
-import { fetchOfflineStatus, fetchPacks, formatCacheContext, normalizePackBounds } from '../lib/offline'
-import type { CacheMetadata, OfflineStatus, PackBounds, PackSummary, RuntimeConfig } from '../lib/offline'
+import { formatCacheContext } from '../lib/offline'
+import type { CacheMetadata, RuntimeConfig } from '../lib/offline'
 import type { BaseLayerDefinition, ThumbnailLayerDefinition } from '../lib/terrain'
 
 const DEFAULT_VIEW = { center: [41.65, -0.88] as [number, number], zoom: 7 }
-const ACTIVE_PACK_STATES = new Set(['queued', 'running', 'cancelling'])
 
 function initialExploreView(): typeof DEFAULT_VIEW {
   try {
@@ -36,19 +32,15 @@ function initialExploreView(): typeof DEFAULT_VIEW {
 }
 
 function MapStateReporter({
-  onZoom,
   onCursor,
 }: {
-  onZoom: (zoom: number) => void
   onCursor: (position: { lat: number; lon: number } | null) => void
 }) {
   const map = useMap()
   useEffect(() => {
     const persist = () => {
       const center = map.getCenter()
-      const zoom = map.getZoom()
-      onZoom(zoom)
-      localStorage.setItem('gpx-explore-view', JSON.stringify({ lat: center.lat, lon: center.lng, zoom }))
+      localStorage.setItem('gpx-explore-view', JSON.stringify({ lat: center.lat, lon: center.lng, zoom: map.getZoom() }))
     }
     const move = (event: L.LeafletMouseEvent) => onCursor({ lat: event.latlng.lat, lon: event.latlng.lng })
     const leave = () => onCursor(null)
@@ -61,109 +53,7 @@ function MapStateReporter({
       map.off('mousemove', move)
       map.getContainer().removeEventListener('mouseleave', leave)
     }
-  }, [map, onCursor, onZoom])
-  return null
-}
-
-function AreaSelector({
-  active,
-  onSelected,
-  onCancel,
-  onInvalid,
-}: {
-  active: boolean
-  onSelected: (bounds: PackBounds) => void
-  onCancel: () => void
-  onInvalid: () => void
-}) {
-  const map = useMap()
-  useEscapeDismiss(active, onCancel, ESCAPE_PRIORITY.nested)
-  useEffect(() => {
-    if (!active) return
-    const container = map.getContainer()
-    const previousTouchAction = container.style.touchAction
-    const draggingEnabled = map.dragging.enabled()
-    const boxZoomEnabled = map.boxZoom.enabled()
-    let pointerID: number | null = null
-    let startPoint: L.Point | null = null
-    let startLatLng: L.LatLng | null = null
-    let draft: L.Rectangle | null = null
-
-    const mapPoint = (event: PointerEvent) => {
-      const rect = container.getBoundingClientRect()
-      return L.point(event.clientX - rect.left, event.clientY - rect.top)
-    }
-    const finish = (event: PointerEvent) => {
-      if (pointerID !== event.pointerId || !startPoint || !startLatLng) return
-      event.preventDefault()
-      const endPoint = mapPoint(event)
-      const endLatLng = map.containerPointToLatLng(endPoint)
-      try { container.releasePointerCapture(event.pointerId) } catch { /* already released */ }
-      pointerID = null
-      draft?.remove()
-      draft = null
-      if (startPoint.distanceTo(endPoint) < 12) {
-        onInvalid()
-        return
-      }
-      const selected = normalizePackBounds(
-        { lat: startLatLng.lat, lon: startLatLng.lng },
-        { lat: endLatLng.lat, lon: endLatLng.lng },
-      )
-      if (selected) onSelected(selected)
-      else onInvalid()
-    }
-    const pointerCancel = (event: PointerEvent) => {
-      if (pointerID !== event.pointerId) return
-      try { container.releasePointerCapture(event.pointerId) } catch { /* already released */ }
-      pointerID = null
-      startPoint = null
-      startLatLng = null
-      draft?.remove()
-      draft = null
-      onCancel()
-    }
-    const pointerDown = (event: PointerEvent) => {
-      if (!event.isPrimary || event.button !== 0) return
-      event.preventDefault()
-      pointerID = event.pointerId
-      startPoint = mapPoint(event)
-      startLatLng = map.containerPointToLatLng(startPoint)
-      container.setPointerCapture(event.pointerId)
-      draft = L.rectangle(L.latLngBounds(startLatLng, startLatLng), {
-        color: '#38bdf8',
-        weight: 2,
-        dashArray: '8 6',
-        fillColor: '#0ea5e9',
-        fillOpacity: 0.16,
-        interactive: false,
-      }).addTo(map)
-    }
-    const pointerMove = (event: PointerEvent) => {
-      if (pointerID !== event.pointerId || !startLatLng || !draft) return
-      event.preventDefault()
-      draft.setBounds(L.latLngBounds(startLatLng, map.containerPointToLatLng(mapPoint(event))))
-    }
-    container.classList.add('selecting-offline-area')
-    container.style.touchAction = 'none'
-    map.dragging.disable()
-    map.boxZoom.disable()
-    container.addEventListener('pointerdown', pointerDown)
-    container.addEventListener('pointermove', pointerMove)
-    container.addEventListener('pointerup', finish)
-    container.addEventListener('pointercancel', pointerCancel)
-    return () => {
-      draft?.remove()
-      container.classList.remove('selecting-offline-area')
-      container.style.touchAction = previousTouchAction
-      if (draggingEnabled) map.dragging.enable()
-      if (boxZoomEnabled) map.boxZoom.enable()
-      container.removeEventListener('pointerdown', pointerDown)
-      container.removeEventListener('pointermove', pointerMove)
-      container.removeEventListener('pointerup', finish)
-      container.removeEventListener('pointercancel', pointerCancel)
-    }
-  }, [active, map, onCancel, onInvalid, onSelected])
+  }, [map, onCursor])
   return null
 }
 
@@ -308,20 +198,6 @@ function PlaceSearch({
   )
 }
 
-function selectionRectangles(bounds: PackBounds | null): L.LatLngBoundsExpression[] {
-  if (!bounds) return []
-  if (bounds.west < bounds.east) {
-    return [[
-      [bounds.south, bounds.west],
-      [bounds.north, bounds.east],
-    ]]
-  }
-  return [
-    [[bounds.south, bounds.west], [bounds.north, 180]],
-    [[bounds.south, -180], [bounds.north, bounds.east]],
-  ]
-}
-
 export function ExploreScreen({
   runtime,
   nominatimApi,
@@ -338,8 +214,6 @@ export function ExploreScreen({
   onDismissVectorIssue,
   onHome,
   onCacheMetadata,
-  onNotify,
-  onRoutingStatus,
   onMapInstance,
   mapOverlays,
 }: {
@@ -358,105 +232,18 @@ export function ExploreScreen({
   onDismissVectorIssue: () => void
   onHome: () => void
   onCacheMetadata: (metadata: CacheMetadata) => void
-  onNotify: (message: string, type?: 'info' | 'success' | 'error') => void
-  onRoutingStatus: (status: import('../lib/offline').RoutingDataStatus) => void
   onMapInstance: (map: L.Map | null) => void
   mapOverlays: ReactNode
 }) {
   const initial = useRef(initialExploreView()).current
   const [map, setMap] = useState<L.Map | null>(null)
-  const [zoom, setZoom] = useState(initial.zoom)
   const [cursor, setCursor] = useState<{ lat: number; lon: number } | null>(null)
   const [selectedPlace, setSelectedPlace] = useState<PlaceResult | null>(null)
-  const [area, setArea] = useState<PackBounds | null>(null)
-  const [selectingArea, setSelectingArea] = useState(false)
-  const [offlineStatus, setOfflineStatus] = useState<OfflineStatus | null>(null)
-  const [packs, setPacks] = useState<PackSummary[]>([])
-  const [offlineError, setOfflineError] = useState('')
-  const [coverageVisible, setCoverageVisible] = useState(true)
   const captureMap = useCallback((instance: L.Map | null) => {
     if (instance) setMap(instance)
     onMapInstance(instance)
   }, [onMapInstance])
   useEscapeDismiss(selectedPlace !== null, () => setSelectedPlace(null), ESCAPE_PRIORITY.passive)
-
-  const downloadedAreas = useMemo(
-    () => packs.filter(pack => pack.bbox),
-    [packs],
-  )
-  const completedAreas = useMemo(
-    () => downloadedAreas.filter(pack => pack.status === 'complete' && pack.bbox),
-    [downloadedAreas],
-  )
-
-  const refreshOffline = useCallback(async (signal?: AbortSignal) => {
-    if (!runtime.offline) {
-      setOfflineStatus(null)
-      setPacks([])
-      return
-    }
-    const [nextStatus, nextPacks] = await Promise.all([
-      fetchOfflineStatus(runtime, signal),
-      fetchPacks(runtime, signal),
-    ])
-    setOfflineStatus(nextStatus)
-    setPacks(nextPacks)
-    setOfflineError('')
-  }, [runtime])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void refreshOffline(controller.signal).catch(reason => {
-      if ((reason as Error).name !== 'AbortError') setOfflineError((reason as Error).message)
-    })
-    return () => controller.abort()
-  }, [refreshOffline])
-
-  const hasActiveAreaPack = downloadedAreas.some(pack => ACTIVE_PACK_STATES.has(pack.status))
-  useEffect(() => {
-    if (!hasActiveAreaPack) return
-    const controller = new AbortController()
-    let timer = 0
-    const poll = async () => {
-      try {
-        await refreshOffline(controller.signal)
-      } catch (reason) {
-        if ((reason as Error).name !== 'AbortError') setOfflineError((reason as Error).message)
-      } finally {
-        if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(), 750)
-      }
-    }
-    timer = window.setTimeout(() => void poll(), 750)
-    return () => {
-      controller.abort()
-      window.clearTimeout(timer)
-    }
-  }, [hasActiveAreaPack, refreshOffline])
-
-  const handlePacksChanged = useCallback(async (pack?: PackSummary) => {
-    if (pack) setPacks(current => [pack, ...current.filter(candidate => candidate.id !== pack.id)])
-    try {
-      await refreshOffline()
-    } catch (reason) {
-      setOfflineError((reason as Error).message)
-    }
-  }, [refreshOffline])
-
-  const showDownloadedAreas = useCallback(() => setCoverageVisible(true), [])
-
-  const viewDownloadedArea = useCallback((pack: PackSummary) => {
-    if (!map || !pack.bbox) return
-    const { south, west, north, east } = pack.bbox
-    const continuousEast = east < west ? east + 360 : east
-    setCoverageVisible(true)
-    setSelectingArea(false)
-    setArea(null)
-    setSelectedPlace(null)
-    map.flyToBounds(
-      [[south, west], [north, continuousEast]],
-      { padding: [54, 54], maxZoom: 15, duration: 1.2 },
-    )
-  }, [map])
 
   const selectPlace = useCallback((place: PlaceResult) => {
     setSelectedPlace(place)
@@ -471,15 +258,6 @@ export function ExploreScreen({
     }
   }, [map])
 
-  const completeArea = useCallback((bounds: PackBounds) => {
-    setArea(bounds)
-    setSelectingArea(false)
-  }, [])
-  const cancelArea = useCallback(() => setSelectingArea(false), [])
-  const invalidArea = useCallback(() => {
-    onNotify('Drag a larger rectangle to select an offline area', 'info')
-  }, [onNotify])
-
   return (
     <div className="explore-screen" data-testid="explore-screen">
       <div className="explore-map" data-testid="explore-map">
@@ -493,7 +271,6 @@ export function ExploreScreen({
           style={{ width: '100%', height: '100%' }}
           ref={captureMap}
         >
-          <RoutingDownloadControl runtime={runtime} onStatus={onRoutingStatus} />
           <MapControlLayout />
           <MapTiles
             baseLayerId={baseLayerId}
@@ -503,29 +280,8 @@ export function ExploreScreen({
             layers={layers}
             hillshadeLayer={hillshadeLayer}
           />
-          <MapStateReporter onZoom={setZoom} onCursor={setCursor} />
+          <MapStateReporter onCursor={setCursor} />
           <ZoomControl position="bottomright" />
-          <AreaSelector active={selectingArea} onSelected={completeArea} onCancel={cancelArea} onInvalid={invalidArea} />
-          {coverageVisible && completedAreas.length > 0 && (
-            <Pane name="offline-coverage" style={{ zIndex: 245 }}>
-              {completedAreas.flatMap(pack => selectionRectangles(pack.bbox ?? null).map((bounds, index) => (
-                <Rectangle
-                  key={`${pack.id}:${index}`}
-                  bounds={bounds}
-                  pathOptions={{ color: '#047857', weight: 1.5, fillColor: '#10b981', fillOpacity: 0.12 }}
-                  interactive={false}
-                />
-              )))}
-            </Pane>
-          )}
-          {selectionRectangles(area).map((bounds, index) => (
-            <Rectangle
-              key={`${area?.west}:${area?.east}:${index}`}
-              bounds={bounds}
-              pathOptions={{ color: '#0284c7', weight: 2, dashArray: '8 5', fillColor: '#38bdf8', fillOpacity: 0.13 }}
-              interactive={false}
-            />
-          ))}
           {selectedPlace && (
             <Marker position={[selectedPlace.lat, selectedPlace.lon]}>
               <Popup>
@@ -544,28 +300,6 @@ export function ExploreScreen({
           <div className="explore-title"><strong>Explore</strong><span>OpenStreetMap</span></div>
           <PlaceSearch runtime={runtime} api={nominatimApi} selected={selectedPlace} onSelect={selectPlace} onCacheMetadata={onCacheMetadata} />
           <div className="explore-theme explore-actions">
-            <OfflineAreaPanel
-              runtime={runtime}
-              bounds={area}
-              selecting={selectingArea}
-              currentZoom={zoom}
-              suggestedName={selectedPlace?.display_name}
-              status={offlineStatus}
-              packs={packs}
-              onToggleSelection={() => { setCoverageVisible(true); setSelectingArea(value => !value) }}
-              onClearSelection={() => { setArea(null); setSelectingArea(false) }}
-              onOpen={showDownloadedAreas}
-              onPacksChanged={handlePacksChanged}
-            />
-            <OfflineAreasPanel
-              runtime={runtime}
-              packs={packs}
-              coverageVisible={coverageVisible}
-              onCoverageVisible={setCoverageVisible}
-              onViewArea={viewDownloadedArea}
-              onPacksChanged={handlePacksChanged}
-              loadError={offlineError}
-            />
             {modeAction}
             {themeAction}
           </div>
@@ -575,7 +309,6 @@ export function ExploreScreen({
           {terrainControls}
         </div>
 
-        {selectingArea && <div className="explore-selection-hint">Drag to frame the area you want offline <span>Esc to cancel</span></div>}
         {cursor && <div className="map-cursor-readout">{cursor.lat.toFixed(5)}, {cursor.lon.toFixed(5)}</div>}
         <VectorMapDiagnostic
           issue={baseLayerId === 'openfreemap' ? vectorIssue : null}

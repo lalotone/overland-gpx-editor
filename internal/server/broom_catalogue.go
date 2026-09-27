@@ -58,7 +58,7 @@ func (s *Server) handleBroomRegions(w http.ResponseWriter, r *http.Request) {
 		} else if catalogErr == nil && (routingContinent(region.Parent) || region.Parent == "") {
 			kind = "country"
 		}
-		entries = append(entries, routingRegionEntry{ID: region.ID, Name: region.Name, Parent: region.Parent, Kind: kind, BBox: routingRegionBounds(region.Coverage), Installed: downloaded, Active: region.ID == active})
+		entries = append(entries, routingRegionEntry{ID: region.ID, Name: routingRegionDisplayName(region.ID, region.Name), Parent: region.Parent, Kind: kind, BBox: routingRegionBounds(region.Coverage), Installed: downloaded, Active: region.ID == active})
 	}
 	slices.SortFunc(entries, func(a, b routingRegionEntry) int { return strings.Compare(a.Name, b.Name) })
 	noStoreJSON(w, http.StatusOK, map[string]any{"regions": entries, "cachedOnly": catalogErr != nil})
@@ -82,4 +82,27 @@ func routingRegionBounds(coverage orb.MultiPolygon) *bbox {
 		return nil
 	}
 	return &bbox{South: b.Min[1], West: b.Min[0], North: b.Max[1], East: b.Max[0]}
+}
+
+// routingRegionDisplayName hides catalogue ids that double as names, such as
+// "us/district-of-columbia", behind a readable title.
+func routingRegionDisplayName(id, name string) string {
+	if name != "" && name != id && !strings.Contains(name, "/") {
+		return name
+	}
+	last := id
+	if i := strings.LastIndex(last, "/"); i >= 0 {
+		last = last[i+1:]
+	}
+	words := strings.Split(last, "-")
+	for i, word := range words {
+		if word == "" {
+			continue
+		}
+		if word == "of" || word == "and" || word == "the" || word == "de" || word == "del" || word == "la" || word == "y" {
+			continue
+		}
+		words[i] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	return strings.Join(words, " ")
 }

@@ -209,17 +209,30 @@ correctly with no elevation service reachable at all.
 
 The Go server keeps policy-permitted provider responses in
 `$XDG_CACHE_HOME/overland/responses` (normally
-`~/.cache/overland/responses`). Opening a GPX automatically prepares a bounded
-pack for that route. The **Offline** pill appears directly below Terrain and
-shows live readiness for the vector map, elevation, fuel, water and campsites;
-open it for per-resource progress and item counts. Recent prepared routes remain
-pinned until removed. Pack metadata counts against storage rather than a fixed
-number of saved packs, and interrupted downloads reuse their existing manifest.
-
-Explore can also download a rectangular area without a GPX. Draw the bounds and
-the estimate updates automatically before download. Completed bounds are shown
-as light coverage rectangles and restored after reload; the downloaded-area
-manager can hide them, inspect progress, cancel work or delete a saved area.
+`~/.cache/overland/responses`). Offline data is downloaded by region, the same
+way as on Android: open **Offline regions** (next to Work offline on every
+screen) and pick a city, region or country under **Add region**. A region has
+four resources that download separately, as in OsmAnd: **Routing** (the Broom
+extract, needed to plan routes even online), **Maps** (vector tiles, zooms
+5–14), **Terrain** (elevation) and **Points of interest** (fuel stations and
+prices, water, campsites). Maps, terrain and POIs are fetched as you view them
+while online, so download them only for areas you will ride offline. Each has
+its own button in the region view; **Download everything** or **Download the
+rest** takes whatever is missing. For a country, routing is one country-wide
+download (so routes cross its regions), shown as four steps with the current
+activity in plain words; maps, terrain and POIs download region by region, and
+the country's region list shows each region's progress per resource.
+One map pack holds at most 100,000 resources, so a large country downloads its
+maps region by region while routing uses the single country extract. Most
+countries are one extract with no catalogue regions (Geofabrik divides only
+about 18, Spain and France among them); those are split into a grid of map
+areas instead, each of which can also be downloaded on its own. Two packs run at a time; the rest wait in the
+server's queue, so closing the browser does not stop them.
+The **Downloads** tab shows routing stages and per-resource progress, lets you
+stop downloads, switch routing to another downloaded region, resume partial
+map downloads and remove stored ones. The button itself doubles as a status
+indicator. Nothing downloads implicitly: opening a GPX or panning the map
+starts no offline work. Interrupted downloads reuse their existing manifest.
 
 In the default `auto` mode, **Work offline** switches the running server and UI
 to deterministic no-network operation immediately; **Go online** re-enables
@@ -232,12 +245,9 @@ cannot reach the Go server itself.
 Routing is separate from response-cache trip packs. Broom stores OSM extracts,
 elevation sources, prepared graphs and profile metrics in
 `$XDG_CACHE_HOME/overland/routing` (normally `~/.cache/overland/routing`).
-Planner and Explore use Broom's region suggestions to find local routing data
-for the visible map, explicitly labelling partial coverage. Open the
-**Offline routing** map pill to see available acquisition estimates and download the
-suggested region or use an installed copy. The same pill reveals preparation
-progress and cancellation; it keeps showing tile totals and progress when collapsed. Preparation
-runs in the background, and completed route queries are entirely local. Updates,
+Regions are chosen in **Offline regions**, which also shows preparation
+progress and cancellation. Preparation runs in the background, and completed
+route queries are entirely local. Updates,
 pinning and pruning remain available through the management API. A strict
 cache-only server can open installed regions but never downloads missing data.
 
@@ -269,8 +279,8 @@ for them.
 
 After a Broom upgrade, the active managed region updates automatically when
 online. Its previous graph remains usable while it rebuilds, and **Offline
-routing** shows progress. In cache-only mode the update waits until you return
-online. Failed or paused updates can be resumed from the same panel.
+regions** shows progress. In cache-only mode the update waits until you return
+online. Failed or paused updates can be resumed from the same view.
 
 Broom 0.13 moves to build pipeline 4, which enforces more via-way turn
 restrictions, so regions built by earlier releases go through that update once.
@@ -370,8 +380,8 @@ bundle at build time.
 | `NOMINATIM_URL` | backend | `https://nominatim.openstreetmap.org` | Nominatim-compatible place-search service exposed through runtime config |
 | `ALLOWED_ORIGINS` | backend | *(empty)* | Comma-separated exact browser origins allowed to call the API |
 | `OFFLINE_CACHE_DIR` | backend | `$XDG_CACHE_HOME/overland/responses` | Persistent provider cache; an explicitly empty value disables persistence |
-| `OFFLINE_CACHE_MAX_BYTES` | backend | `1GiB` | Generic cache quota, including metadata |
-| `OFFLINE_CACHE_MAX_ENTRIES` | backend | `100000` | Generic cache entry/inode guard |
+| `OFFLINE_CACHE_MAX_BYTES` | backend | `1GiB` | Quota for responses cached while browsing; least-recently-used entries are evicted past it. Downloaded regions are not counted: they are limited only by free disk space, less a 64 MiB margin. `available` lets browsing use free space too |
+| `OFFLINE_CACHE_MAX_ENTRIES` | backend | `1000000` | Generic cache entry/inode guard; the index costs about 0.9 KB of memory per entry in use, and a large country needs several hundred thousand |
 | `OFFLINE_MODE` | backend | `auto` | `auto` or strict no-outbound `cache-only` |
 | `STATS_LOG_INTERVAL` | backend | `1m` | Privacy-safe aggregate cache/outbound log interval; `0` disables it |
 | `UPSTREAM_CONTACT` | backend | project URL | Contact included in the outbound User-Agent |
@@ -390,7 +400,7 @@ bundle at build time.
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
 | `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland/tiles` (`~/.cache/overland/tiles`) | Where tiles are kept, so elevation works offline |
-| `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `1GiB` | Separate legacy Terrarium cache quota |
+| `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `1GiB` | The same browsing quota for Terrarium terrain tiles; downloaded tiles are bounded by the disk |
 | `ELEVATION_HOST` | backend | *(empty)* | Self-hosted opentopodata-style DEM. Takes precedence over tiles |
 | `ELEVATION_DATASET` | backend | `srtm30m` | Dataset for `ELEVATION_HOST` |
 | `VITE_API_BASE` | frontend | *(empty — same origin)* | Points the app at an authoritative remote backend; direct fallbacks stay closed until its config loads |

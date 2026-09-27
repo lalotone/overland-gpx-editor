@@ -8,7 +8,8 @@ import type { ProfileBar, TrimSelection } from './components/ElevationProfile'
 import { ExploreScreen } from './components/ExploreScreen'
 import { MapTiles, TerrainControls, VectorMapDiagnostic } from './components/MapLayers'
 import type { VectorMapIssue } from './components/MapLayers'
-import { OfflineStoragePanel } from './components/OfflineStoragePanel'
+import { OfflineRegionsButton, OfflineRegionsDialog } from './components/OfflineRegions'
+import { useRegionDownloads } from './components/useRegionDownloads'
 import { SplashScreen } from './components/SplashScreen'
 import { TrackCard } from './components/TrackCard'
 import type { TrackPreview } from './components/TrackCard'
@@ -82,7 +83,6 @@ import {
 import type { CacheMetadata, OfflineMode, RoutingDataStatus } from './lib/offline'
 
 import './App.css'
-import RoutingDownloadControl from './components/RoutingDownloadControl'
 import MapControlLayout from './components/MapControlLayout'
 import { signOut, usePasskeySession } from './usePasskeySession'
 
@@ -596,11 +596,6 @@ function App() {
   const [selectedTrackIndex, setSelectedTrackIndex] = useState(0)
   const [editHistory, setEditHistory] = useState<Track[][]>([])
   const [dirty, setDirty] = useState(false)
-  const [offlineRoute, setOfflineRoute] = useState<{
-    key: number
-    name: string
-    coordinates: Coordinate[]
-  } | null>(null)
 
   /* -- Terrain / map presentation ----------------------------------- */
 
@@ -745,7 +740,6 @@ function App() {
   const routePointIDRef = useRef(Date.now())
   const placeSearchSeqRef = useRef(0)
   const placeSearchAbortRef = useRef<AbortController | null>(null)
-  const offlineRouteKeyRef = useRef(0)
 
   const clearRouteDerived = useCallback(() => {
     const cleared = clearedRouteDerivedState()
@@ -817,24 +811,42 @@ function App() {
     return () => controller.abort()
   }, [])
 
+  const [routingRevision, setRoutingRevision] = useState(0)
+  const refreshRouting = useCallback(() => setRoutingRevision(value => value + 1), [])
+  const [offlineRegionsOpen, setOfflineRegionsOpen] = useState(false)
+  const routingJobRunning = routingData?.job?.state === 'queued' || routingData?.job?.state === 'running'
   useEffect(() => {
     if (!runtime.offline?.routing) {
       setRoutingData(null)
       return
     }
+    // Poll quickly while routing data is being prepared or the manager is open;
+    // otherwise just keep readiness current for the planner.
+    const interval = routingJobRunning || offlineRegionsOpen ? 1000 : 15000
     const controller = new AbortController()
-    const load = async () => {
+    let timer = 0
+    const poll = async () => {
       try {
         const status = await fetchRoutingDataStatus(runtime, controller.signal)
-        if (!status || controller.signal.aborted) return
-        setRoutingData(status)
-      } catch (error) {
-        if ((error as Error).name !== 'AbortError') setRoutingData(null)
+        if (status && !controller.signal.aborted) setRoutingData(status)
+      } catch {
+        /* Keep the last known status through a connection interruption. */
       }
+      if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(), interval)
     }
-    void load()
-    return () => controller.abort()
-  }, [runtime])
+    void poll()
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [runtime, routingRevision, routingJobRunning, offlineRegionsOpen])
+  const regionDownloads = useRegionDownloads({
+    runtime,
+    routing: routingData,
+    refreshRouting,
+    watching: offlineRegionsOpen,
+    notify,
+  })
 
   const handleCacheMetadata = useCallback((metadata: CacheMetadata) => {
     if (!metadata.stale || staleNotifiedRef.current) return
@@ -946,20 +958,6 @@ function App() {
 
   /* -- Loading tracks ----------------------------------------------- */
 
-  const activateOfflineRoute = useCallback((track: Track | undefined) => {
-    if (!track) {
-      setOfflineRoute(null)
-      return
-    }
-    setOfflineRoute({
-      key: ++offlineRouteKeyRef.current,
-      name: fromGpxFilename(track.filename) || track.name,
-      // This snapshot deliberately does not follow edits. Caching is tied to
-      // opening/selecting a track, not every immutable edit-state replacement.
-      coordinates: track.coordinates,
-    })
-  }, [])
-
   const openTracks = useCallback((parsed: Track[], filename: string) => {
     const loaded = parsed.map(t => ({ ...t, filename }))
     setTracks(loaded)
@@ -971,14 +969,12 @@ function App() {
     setSelectionMode(false)
     setActivePois({ fuel: [], water: [], camp: [] })
     setActivePoiCache({})
-    activateOfflineRoute(loaded[0])
     setViewMode('view')
-  }, [activateOfflineRoute])
+  }, [])
 
   const selectTrack = useCallback((index: number) => {
     setSelectedTrackIndex(index)
-    activateOfflineRoute(tracks[index])
-  }, [activateOfflineRoute, tracks])
+  }, [])
 
   const processGPXFile = useCallback(
     async (gpxFile: File) => {
@@ -1368,7 +1364,6 @@ function App() {
   const clearTrack = useCallback(() => {
     if (dirty && !confirm('This track has unsaved edits. Clear it anyway?')) return
     setTracks([])
-    setOfflineRoute(null)
     setSelectedTrackIndex(0)
     setEditHistory([])
     setDirty(false)
@@ -1798,7 +1793,7 @@ function App() {
     if (runtime.services.broomRoute && !routingData?.ready) {
       routeSeqRef.current++
       clearRouteDerived()
-      setRouteError(routingData?.error || 'Routing data is not ready yet. Open Offline routing on the map to follow preparation or download this area.')
+      setRouteError(routingData?.error || 'Routing data is not ready yet. Open Offline regions to follow its download or add the region you want to ride.')
       return
     }
 
@@ -2330,18 +2325,36 @@ function App() {
     </div>
   )
   const offlineModeAction = runtime.offline && (
-    <OfflineModeToggle
-      mode={runtime.offline.mode}
-      available={Boolean(runtime.offline.modeControl)}
-      busy={offlineModeBusy}
-      onToggle={() => void toggleOfflineMode()}
-    />
+    <>
+      <OfflineRegionsButton
+        routing={routingData}
+        downloads={regionDownloads}
+        open={offlineRegionsOpen}
+        onOpen={() => setOfflineRegionsOpen(true)}
+      />
+      <OfflineModeToggle
+        mode={runtime.offline.mode}
+        available={Boolean(runtime.offline.modeControl)}
+        busy={offlineModeBusy}
+        onToggle={() => void toggleOfflineMode()}
+      />
+    </>
   )
 
   return (
     <div className="app">
       {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
       <NotificationBar notifications={notifications} onDismiss={dismissNotification} />
+      {offlineRegionsOpen && runtime.offline && (
+        <OfflineRegionsDialog
+          runtime={runtime}
+          routing={routingData}
+          downloads={regionDownloads}
+          nominatimApi={nominatimApi}
+          onClose={() => setOfflineRegionsOpen(false)}
+          onNotify={notify}
+        />
+      )}
 
       {(viewMode === 'welcome' || viewMode === 'upload') && (
         <div className="corner-actions">
@@ -2504,8 +2517,6 @@ function App() {
           onDismissVectorIssue={() => setVectorMapIssue(null)}
           onHome={() => setViewMode('welcome')}
           onCacheMetadata={handleCacheMetadata}
-          onNotify={notify}
-          onRoutingStatus={setRoutingData}
           onMapInstance={registerActiveMap}
           mapOverlays={<SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />}
         />
@@ -2866,7 +2877,6 @@ function App() {
                 zoomControl={false}
                 ref={registerActiveMap}
               >
-                <RoutingDownloadControl runtime={runtime} status={routingData} onStatus={setRoutingData} />
                 <MapControlLayout />
                 <MapTiles
                   baseLayerId={activeBaseLayer}
@@ -3437,14 +3447,6 @@ function App() {
 
             <div className="map-control-stack" data-testid="map-control-stack">
               {renderTerrainControls(viewColorMode, false)}
-              {offlineRoute && (
-                <OfflineStoragePanel
-                  runtime={runtime}
-                  routeKey={offlineRoute.key}
-                  routeName={offlineRoute.name}
-                  route={offlineRoute.coordinates}
-                />
-              )}
             </div>
             <VectorMapDiagnostic
               issue={activeBaseLayer === 'openfreemap' ? vectorMapIssue : null}

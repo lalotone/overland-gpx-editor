@@ -17,7 +17,7 @@ func BenchmarkRegionalCacheAdmission(b *testing.B) {
 	}
 	b.ResetTimer()
 	for b.Loop() {
-		if err := s.admitLocked("maps-openfreemap", "", 10000); err != nil {
+		if err := s.admitLocked("maps-openfreemap", "", 10000, false); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -323,3 +323,28 @@ func TestOwnersHaveABoundedShareOfThePackQueue(t *testing.T) {
 		t.Fatalf("next queued pack belongs to %v, want B", next)
 	}
 }
+
+func TestRemoveOwnerCreatesNothing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "never-created")
+	if err := RemoveOwner(missing, ownerA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("RemoveOwner created the data directory: %v", err)
+	}
+	if err := RemoveOwner(missing, Owner("../etc")); err == nil {
+		t.Fatal("an invalid owner was accepted")
+	}
+	dataDir := t.TempDir()
+	root, err := OpenOwnerTracks(dataDir, ownerA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.Close()
+	if err := RemoveOwner(dataDir, ownerA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, ownersDir, string(ownerA))); !os.IsNotExist(err) {
+		t.Fatalf("owner directory remains: %v", err)
+	}
+}

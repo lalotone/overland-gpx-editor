@@ -13,6 +13,9 @@ const work = (process.env.APP_WORK ??= mkdtempSync(join(tmpdir(), 'overland-auth
 process.env.APP_BIN ??= join(work, 'overland')
 process.env.APP_DB ??= join(work, 'accounts.db')
 process.env.APP_DATA ??= join(work, 'data')
+// `user delete` removes the account's directory, so the CLI must look where
+// the server writes.
+process.env.DATA_DIR ??= process.env.APP_DATA
 
 export default defineConfig({
   testDir: './e2e/auth',

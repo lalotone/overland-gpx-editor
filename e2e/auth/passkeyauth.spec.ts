@@ -147,6 +147,7 @@ test('accounts see only their own tracks, and only operators manage the server',
   // Same name, different library: no conflict with alice's file.
   expect(await page.evaluate(body => fetch('/gpx/private.gpx', { method: 'PUT', body, headers: { 'Content-Type': 'application/xml' } }).then(r => r.status), gpx)).toBe(200)
   await page.getByRole('button', { name: 'Sign out' }).click()
+  await expectSignedOut(page)
 
   // The operator named on the command line may change the offline mode.
   await enroll(page, 'operator')
@@ -157,9 +158,12 @@ test('accounts see only their own tracks, and only operators manage the server',
   expect(operatorConfig.offline.modeControl).toBe('/offline/mode')
   expect(await page.evaluate(() => fetch('/files').then(r => r.json()))).toEqual({ files: [] })
 
-  // Deleting an account removes its library; nobody else's is touched.
+  // Deleting an account removes its directory and nobody else's. Other
+  // tests' accounts share this server, so count rather than enumerate.
+  const before = readdirSync(join(process.env.APP_DATA!, 'owners'))
   execFileSync(bin, ['user', 'delete', alice, '--yes', '--db', db, '--data-dir', process.env.APP_DATA!])
-  const owners = readdirSync(join(process.env.APP_DATA!, 'owners'))
-  expect(owners.length).toBe(2)
-  for (const owner of owners) expect(owner).toMatch(/^[a-z2-7]{52}$/)
+  const after = readdirSync(join(process.env.APP_DATA!, 'owners'))
+  expect(after.length).toBe(before.length - 1)
+  for (const owner of after) expect(owner).toMatch(/^[a-z2-7]{52}$/)
+  expect(before.filter(owner => !after.includes(owner)).length).toBe(1)
 })

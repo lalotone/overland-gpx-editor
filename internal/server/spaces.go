@@ -153,12 +153,24 @@ func OpenOwnerTracks(dataDir string, owner Owner) (*os.Root, error) {
 // RemoveOwner deletes everything an owner has under dataDir: tracks, pack
 // manifests and owner-scoped cache entries. Shared cache objects their packs
 // pinned stay pinned until the server next starts and finds no manifest
-// referring to them; stop the server first, or restart it afterwards.
+// referring to them; stop the server first, or restart it afterwards. It
+// creates nothing: a data directory that does not exist has nothing to
+// remove.
 func RemoveOwner(dataDir string, owner Owner) error {
-	spaces, err := openOwnerSpaces(dataDir)
+	if !owner.Valid() {
+		return errNoOwner
+	}
+	root, err := os.OpenRoot(dataDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	defer spaces.close()
-	return spaces.remove(owner)
+	defer root.Close()
+	err = root.RemoveAll(ownerPath(owner))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }

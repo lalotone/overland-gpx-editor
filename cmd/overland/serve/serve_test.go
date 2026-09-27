@@ -159,6 +159,9 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			if got := cmd.Int("elevation-tile-zoom"); got != 0 {
 				t.Errorf("elevation-tile-zoom = %d, want 0", got)
 			}
+			if got := cmd.String("elevation-tile-url"); got != server.DefaultElevationTileURL {
+				t.Errorf("elevation-tile-url = %q, want %q", got, server.DefaultElevationTileURL)
+			}
 			if got := cmd.String("elevation-tile-cache"); got != util.DefaultTileCacheDir() {
 				t.Errorf("elevation-tile-cache = %q, want %q", got, util.DefaultTileCacheDir())
 			}

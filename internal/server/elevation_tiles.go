@@ -40,7 +40,9 @@ import (
  * needs roughly 77 of them at zoom 13.
  */
 
-// Terrarium tiles from the AWS Open Data terrain set: public, keyless.
+// Terrarium tiles from the AWS Open Data terrain set: public, keyless. This is
+// the fallback when Config.ElevationTileURL is empty; the CLI and the mobile
+// host pass DefaultElevationTileURL, the project mirror of the same set.
 const defaultTileURL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 
 const (

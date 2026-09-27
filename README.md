@@ -423,6 +423,7 @@ bundle at build time.
 | `OPENFREEMAP_URL` | backend | `https://oms.rbel.co/maps/styles/liberty` | OpenFreeMap-compatible style source eligible for persistent proxying; the oms mirror of Liberty by default, `https://tiles.openfreemap.org/styles/liberty` for the public service |
 | `OPENFREEMAP_ALLOW_BULK` | backend | `on` | Permit bounded trip-pack fetching from the configured source |
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
+| `ELEVATION_TILE_URL` | backend | `https://oms.rbel.co/elevation/terrarium/{z}/{x}/{y}.png` | Terrain-RGB tile template; the oms mirror of the AWS Terrarium set by default, `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` for the public bucket |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
 | `ELEVATION_TILE_CACHE` | backend | `$XDG_CACHE_HOME/overland/tiles` (`~/.cache/overland/tiles`) | Where tiles are kept, so elevation works offline |
 | `ELEVATION_TILE_CACHE_MAX_BYTES` | backend | `1GiB` | The same browsing quota for Terrarium terrain tiles; downloaded tiles are bounded by the disk |
@@ -508,13 +509,14 @@ All are public and keyless. Attribution for map, OSM-derived and elevation data
 is rendered on the map by Leaflet. The vector map and routing data default to
 the project's own [oms](https://code.rbel.co/rubiojr/oms) mirror at
 `oms.rbel.co`, which fetches each object once from the upstream service and
-keeps it, so a fleet of overland installs does not hit OpenFreeMap or
-Geofabrik once per user. `OPENFREEMAP_URL` and the `ROUTING_*_URL` variables
-point at another mirror or straight at the public services.
+keeps it, so a fleet of overland installs does not hit OpenFreeMap, Geofabrik
+or the AWS terrain bucket once per user. `OPENFREEMAP_URL`, the
+`ROUTING_*_URL` variables and `ELEVATION_TILE_URL` point at another mirror or
+straight at the public services.
 
 | Service | Used for |
 | --- | --- |
-| [oms](https://code.rbel.co/rubiojr/oms) at `oms.rbel.co` | Default source of the OpenFreeMap Liberty map and of Geofabrik extracts and Skadi elevation for routing |
+| [oms](https://code.rbel.co/rubiojr/oms) at `oms.rbel.co` | Default source of the OpenFreeMap Liberty map, of Geofabrik extracts and Skadi elevation for routing, and of Terrarium terrain tiles for elevation |
 | [OpenFreeMap](https://openfreemap.org) | Vector base map (OpenStreetMap data), through the oms mirror by default |
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | Raster library thumbnails and non-WebGL fallback — see the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) |
 | [OpenTopoMap](https://opentopomap.org) | Contour base map (CC-BY-SA, low volume only) |

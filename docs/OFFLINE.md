@@ -82,7 +82,7 @@ before changing an adapter or release default.
 | Esri live imagery/relief/hillshade | Disabled; remains browser-direct | Prohibited |
 | Project oms mirror of OpenFreeMap Liberty (default) | Enabled by default; honor mirror cache headers and OpenFreeMap attribution | Bounded trip-pack prefetch enabled by default |
 | Public OpenFreeMap live service or another compatible source | Set with `OPENFREEMAP_URL` | Controlled by `OPENFREEMAP_ALLOW_BULK`, which defaults to `true` |
-| Terrarium elevation | Existing immutable tile cache | Bounded viewport/corridor prefetch |
+| Terrarium elevation, from the oms mirror by default (`ELEVATION_TILE_URL`) | Existing immutable tile cache | Bounded viewport/corridor prefetch |
 | Fuel snapshot | Explicit open-data snapshot, dated by source and cache | One bounded snapshot |
 | Nominatim | Exact user searches, one server-wide request/second | No autocomplete, grid or area sweep |
 | Overpass | Exact bounded user POI query | No tiled sweeps or harvesting |

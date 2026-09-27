@@ -92,7 +92,7 @@ func start(data, address string, assets fs.FS, native Native, openBackend func(s
 	config := server.Config{
 		DataDir: filepath.Join(data, "gpx"), Assets: assets,
 		OfflineCacheDir: filepath.Join(data, "responses"), UseAvailableStorage: true, OfflineCacheMaxEntries: 200000,
-		ElevationTiles: true, ElevationTileCache: filepath.Join(data, "terrain"),
+		ElevationTiles: true, ElevationTileURL: server.DefaultElevationTileURL, ElevationTileCache: filepath.Join(data, "terrain"),
 		RoutingCacheDir: filepath.Join(data, "routing"), RoutingJobs: 1, RoutingConcurrency: 1,
 		RoutingIndexURL: server.DefaultRoutingIndexURL, RoutingMetadataIndexURL: server.DefaultRoutingMetadataIndexURL,
 		RoutingPBFBaseURL: server.DefaultRoutingPBFBaseURL, RoutingDEMBaseURL: server.DefaultRoutingDEMBaseURL,

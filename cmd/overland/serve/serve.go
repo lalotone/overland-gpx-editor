@@ -89,6 +89,12 @@ func Flags() []cli.Flag {
 			Value:   true,
 			Sources: util.BoolEnv("ELEVATION_TILES"),
 		},
+		&cli.StringFlag{
+			Name:    "elevation-tile-url",
+			Usage:   "terrain-RGB tile template with {z}/{x}/{y}; the project mirror by default, or the public AWS Terrarium set",
+			Value:   server.DefaultElevationTileURL,
+			Sources: util.NonEmptyEnv("ELEVATION_TILE_URL"),
+		},
 		&cli.IntFlag{
 			Name:    "elevation-tile-zoom",
 			Usage:   "tile zoom: higher is finer and heavier (0 uses 13, ~14 m/px)",
@@ -218,6 +224,7 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		ElevationHost:              elevationHost,
 		ElevationDataset:           cmd.String("elevation-dataset"),
 		ElevationTiles:             elevationTiles,
+		ElevationTileURL:           cmd.String("elevation-tile-url"),
 		ElevationTileZoom:          tileZoom,
 		ElevationTileCache:         tileCache,
 		ElevationTileCacheMaxBytes: tileCacheBytes,

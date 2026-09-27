@@ -30,7 +30,7 @@ func TestVectorPackUsesNativeZoomWhenOverzoomed(t *testing.T) {
 		_, _ = w.Write([]byte("pbf"))
 	}))
 	defer upstream.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	input := packInput{Name: "overzoom", BBox: &bbox{South: 1, West: 1, North: 2, East: 2}, ZoomMin: 3, ZoomMax: 4, Layers: []string{"openfreemap"}}
@@ -42,7 +42,7 @@ func TestVectorPackUsesNativeZoomWhenOverzoomed(t *testing.T) {
 			assert.Equal(t, 2, tile.z)
 		}
 	}
-	pack, _, err := s.packs.startContext(t.Context(), input)
+	pack, _, err := s.packs.startContext(t.Context(), LocalOwner, input)
 	require.NoError(t, err)
 	summary := waitForPackState(t, s.packs, pack.ID, "complete")
 	assert.Zero(t, summary.Failures)

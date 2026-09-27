@@ -216,7 +216,7 @@ func TestBroomResponseKeepsAlignedDetails(t *testing.T) {
 }
 
 func TestBroomEndpointsReportUnpreparedData(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir()})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestBroomEndpointRoutesOnBuiltGraph(t *testing.T) {
 	if err := broom.Build(t.Context(), pbf, graph, broom.BuildOptions{Jobs: 1}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestEnduroAccessAndPreference(t *testing.T) {
 
 func TestBroomManagementRequiresPrivilege(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(),
 		TrustedUIOrigin: "https://planner.example.test", OfflineAdminToken: "secret",
 	})
 	if err != nil {

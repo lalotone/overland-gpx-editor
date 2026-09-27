@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -14,7 +15,7 @@ import (
 
 func TestCatalunaRegionalPackExceedsOrdinaryLimitSafely(t *testing.T) {
 	upstream, _ := newFakeMapSource(t)
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OfflineCacheMaxEntries: 200000, ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: 2 << 30, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OfflineCacheMaxEntries: 200000, ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: 2 << 30, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	input := packInput{Name: "Cataluña", BBox: &bbox{South: 40.52, West: 0.15, North: 42.87, East: 3.33}, ZoomMin: 5, ZoomMax: 14, Layers: []string{"openfreemap"}, Scopes: []string{"elevation", "fuel", "pois"}}
@@ -57,19 +58,19 @@ func TestRegionalTileBatchesBoundConcurrency(t *testing.T) {
 }
 
 func TestRegionalManifestCheckpointsAndFinalFlush(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	id, err := newPackID()
 	require.NoError(t, err)
-	p := &packManifest{ID: id, Name: "Region", State: "running", Total: 50, Input: packInput{Regional: true}, Resources: map[string]packResourceProgress{}}
+	p := &packManifest{ID: id, owner: LocalOwner, Name: "Region", State: "running", Total: 50, Input: packInput{Regional: true}, Resources: map[string]packResourceProgress{}}
 	require.NoError(t, s.packs.persistLocked(p))
 	p.lastCheckpoint = time.Now().Add(time.Hour)
 	for range 50 {
 		require.True(t, s.packs.update(p, func(p *packManifest) { p.Done++ }))
 	}
 	read := func() packManifest {
-		data, err := s.cache.root.ReadFile(filepath.Join(s.cache.packsRel, id+".json"))
+		data, err := os.ReadFile(filepath.Join(s.packsDir(LocalOwner), id+".json"))
 		require.NoError(t, err)
 		var saved packManifest
 		require.NoError(t, json.Unmarshal(data, &saved))
@@ -83,7 +84,7 @@ func TestRegionalManifestCheckpointsAndFinalFlush(t *testing.T) {
 
 func TestRegionalVectorPackCompletesAndRestoresAllBatchPins(t *testing.T) {
 	upstream, calls := newFakeMapSource(t)
-	cfg := Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true}
+	cfg := Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true}
 	s, err := New(cfg)
 	require.NoError(t, err)
 	closed := false
@@ -93,11 +94,11 @@ func TestRegionalVectorPackCompletesAndRestoresAllBatchPins(t *testing.T) {
 		}
 	})
 	input := packInput{Regional: true, Name: "Batched region", BBox: &bbox{South: -20, West: -80, North: 60, East: 80}, ZoomMin: 5, ZoomMax: 5, Layers: []string{"openfreemap"}}
-	pack, _, err := s.packs.startContext(t.Context(), input)
+	pack, _, err := s.packs.startContext(t.Context(), LocalOwner, input)
 	require.NoError(t, err)
 	var summary packSummary
 	require.Eventually(t, func() bool {
-		summary, _ = s.packs.publicManifest(pack.ID)
+		summary, _ = s.packs.publicManifest(LocalOwner, pack.ID)
 		return summary.State == "complete"
 	}, 30*time.Second, 10*time.Millisecond)
 	assert.Greater(t, summary.BatchesTotal, 1)
@@ -126,7 +127,7 @@ func TestTerrainPinsPreventEvictionAndSurviveRestart(t *testing.T) {
 	countDownloadsAgainstQuota(t)
 	ts := newTileServer(t)
 	raw := encodeTerrarium(t, func(_, _ int) float64 { return 500 })
-	cfg := Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: int64(len(raw) * 2), ElevationTileURL: ts.url(), HTTPClient: ts.Client()}
+	cfg := Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: int64(len(raw) * 2), ElevationTileURL: ts.url(), HTTPClient: ts.Client()}
 	s, err := New(cfg)
 	require.NoError(t, err)
 	keys := []tileKey{{z: defaultTileZoom, x: 1, y: 1}, {z: defaultTileZoom, x: 1, y: 2}}
@@ -136,7 +137,7 @@ func TestTerrainPinsPreventEvictionAndSurviveRestart(t *testing.T) {
 	}
 	id, err := newPackID()
 	require.NoError(t, err)
-	p := &packManifest{ID: id, Name: "Pinned terrain", State: "complete", Resources: map[string]packResourceProgress{packResourceElevation: {Done: 2, Total: 2}}, ElevationKeys: []string{keys[0].path(), keys[1].path()}}
+	p := &packManifest{ID: id, owner: LocalOwner, Name: "Pinned terrain", State: "complete", Resources: map[string]packResourceProgress{packResourceElevation: {Done: 2, Total: 2}}, ElevationKeys: []string{keys[0].path(), keys[1].path()}}
 	s.elevation.tiles.setPackPins(id, p.ElevationKeys)
 	require.NoError(t, s.packs.persistLocked(p))
 	_, err = s.elevation.tiles.grid(t.Context(), tileKey{z: defaultTileZoom, x: 1, y: 3})

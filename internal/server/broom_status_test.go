@@ -18,7 +18,7 @@ import (
 
 func TestRoutingSummaryIsExplicitAndAdvisory(t *testing.T) {
 	dir := t.TempDir()
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: dir})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: dir})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	before := s.broom.status(t.Context())
@@ -40,7 +40,7 @@ func TestRoutingSummaryIsExplicitAndAdvisory(t *testing.T) {
 }
 
 func TestRoutingProgressNeverInspectsArtifactContents(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir()})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir()})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	var calls atomic.Int32

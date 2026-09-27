@@ -126,7 +126,7 @@ func TestPermitRoutesAcrossRestrictedPass(t *testing.T) {
 	graph := filepath.Join(dir, "pass.broom")
 	_, err := broom.BuildUnion(t.Context(), inputs, graph, broom.UnionOptions{})
 	require.NoError(t, err)
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	for _, profile := range []string{"road", "mixed", "trail", "enduro"} {

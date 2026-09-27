@@ -128,7 +128,7 @@ func TestDownloadsIgnoreBrowsingQuotaEndToEnd(t *testing.T) {
 		t.Skip("free disk space is not measurable on this platform")
 	}
 	// The manifest reservation alone exceeds 1 MiB; downloads must not care.
-	pack, _, err := s.packs.start(packInput{Name: "fuel", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
+	pack, _, err := s.packs.start(LocalOwner, packInput{Name: "fuel", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestDownloadsIgnoreBrowsingQuotaEndToEnd(t *testing.T) {
 func TestPackTilesIgnoreBrowsingTileQuota(t *testing.T) {
 	ts := newTileServer(t)
 	raw := encodeTerrarium(t, func(_, _ int) float64 { return 500 })
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: int64(len(raw) * 2), ElevationTileURL: ts.url(), HTTPClient: ts.Client()})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: int64(len(raw) * 2), ElevationTileURL: ts.url(), HTTPClient: ts.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}

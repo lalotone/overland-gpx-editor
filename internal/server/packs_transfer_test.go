@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -34,14 +35,14 @@ func TestPackDistinguishesCachedDownloadedAndRevalidatedMaps(t *testing.T) {
 		_, _ = w.Write([]byte("pbf"))
 	}))
 	t.Cleanup(upstream.Close)
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	var input packInput
 	require.NoError(t, json.Unmarshal([]byte(`{"name":"First","coverageKind":"region","bbox":[40,-1,41,0],"zoomMin":0,"zoomMax":0,"layers":["openfreemap"]}`), &input))
 	run := func(name string) packSummary {
 		input.Name = name
-		pack, _, err := s.packs.start(input)
+		pack, _, err := s.packs.start(LocalOwner, input)
 		require.NoError(t, err)
 		return waitForPackState(t, s.packs, pack.ID, "complete")
 	}
@@ -56,7 +57,7 @@ func TestPackDistinguishesCachedDownloadedAndRevalidatedMaps(t *testing.T) {
 	assert.Zero(t, progress.Revalidated)
 	assert.EqualValues(t, 1, requests.Load(), "cached tiles must not cause network requests on retry")
 	// Persisted progress must retain provenance across a process restart.
-	raw, err := s.cache.root.ReadFile(filepath.Join(s.cache.packsRel, second.ID+".json"))
+	raw, err := os.ReadFile(filepath.Join(s.packsDir(LocalOwner), second.ID+".json"))
 	require.NoError(t, err)
 	var saved packManifest
 	require.NoError(t, json.Unmarshal(raw, &saved))

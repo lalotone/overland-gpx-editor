@@ -1,23 +1,119 @@
 package serve
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
+	"github.com/lalotone/overland-gpx-editor/cmd/overland/identity"
+	"github.com/lalotone/overland-gpx-editor/cmd/overland/util"
 	"github.com/lalotone/overland-gpx-editor/internal/passkeyauth"
+	"github.com/lalotone/overland-gpx-editor/internal/server"
 )
 
 // authAppName is shown on the enrollment page and stored in passkey managers
 // as the relying party name. Signed-out pages never show it.
 const authAppName = "Overland"
 
+// ownerResolver is the only place account details and owner keys meet. It
+// runs inside the guard, after Protect has accepted the session, and hands
+// the backend an opaque owner and an operator mark: never the account.
+type ownerResolver struct {
+	secret    identity.Secret
+	operators map[string]struct{} // lower-cased usernames from --auth-operator
+
+	// A session token always belongs to the same account, so its owner can
+	// be remembered without a second database lookup per tile request. The
+	// guard has already refused a revoked or expired token before this runs.
+	mu    sync.Mutex
+	cache map[[sha256.Size]byte]ownerEntry
+}
+
+type ownerEntry struct {
+	owner    server.Owner
+	operator bool
+}
+
+const maxCachedSessions = 4096
+
+func newOwnerResolver(secret identity.Secret, operators []string) *ownerResolver {
+	r := &ownerResolver{secret: secret, operators: make(map[string]struct{}, len(operators)), cache: make(map[[sha256.Size]byte]ownerEntry)}
+	for _, name := range operators {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			r.operators[name] = struct{}{}
+		}
+	}
+	return r
+}
+
+// isOperator matches a username the way the account database does: case
+// insensitively.
+func (r *ownerResolver) isOperator(username string) bool {
+	_, ok := r.operators[strings.ToLower(username)]
+	return ok
+}
+
+func (r *ownerResolver) resolve(auth *passkeyauth.Authenticator, req *http.Request) (ownerEntry, bool) {
+	cookie, err := req.Cookie("__Host-session")
+	if err != nil || cookie.Value == "" {
+		return ownerEntry{}, false
+	}
+	key := sha256.Sum256([]byte(cookie.Value))
+	r.mu.Lock()
+	entry, cached := r.cache[key]
+	r.mu.Unlock()
+	if cached {
+		return entry, true
+	}
+	acct, ok := auth.Account(req)
+	if !ok {
+		return ownerEntry{}, false
+	}
+	owner, err := r.secret.Owner(acct)
+	if err != nil {
+		return ownerEntry{}, false
+	}
+	entry = ownerEntry{owner: owner, operator: r.isOperator(acct.Username)}
+	r.mu.Lock()
+	if len(r.cache) >= maxCachedSessions {
+		r.cache = make(map[[sha256.Size]byte]ownerEntry)
+	}
+	r.cache[key] = entry
+	r.mu.Unlock()
+	return entry, true
+}
+
+// attach marks the request with its owner, and operator status, before the
+// app sees it. Protect has already verified the session; a miss here means
+// it was revoked in between, which gets the same 401 the guard would give.
+func (r *ownerResolver) attach(auth *passkeyauth.Authenticator, app http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		entry, ok := r.resolve(auth, req)
+		if !ok {
+			w.Header().Set("X-Passkey-Auth", "sign-in")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"sign-in required"}`))
+			return
+		}
+		ctx := server.WithOwner(req.Context(), entry.owner)
+		if entry.operator {
+			ctx = server.WithOperator(ctx)
+		}
+		app.ServeHTTP(w, req.WithContext(ctx))
+	})
+}
+
 // protectWithPasskeys puts passkey sign-in in front of the whole app. It
 // wraps the finished handler rather than living in internal/server, so the
 // mobile host, which embeds that package behind its own capability cookie,
 // neither changes behaviour nor links the WebAuthn and SQLite dependencies.
-func protectWithPasskeys(app http.Handler, store *passkeyauth.Store, origin string) (http.Handler, *passkeyauth.Authenticator, error) {
+// The app is built with RequireOwner, so it refuses owner-scoped requests
+// that somehow reach it without passing through attach.
+func protectWithPasskeys(app http.Handler, store *passkeyauth.Store, origin string, owners *ownerResolver) (http.Handler, *passkeyauth.Authenticator, error) {
 	auth, err := passkeyauth.New(store, passkeyauth.Config{
 		AppName: authAppName,
 		Origin:  origin,
@@ -27,7 +123,7 @@ func protectWithPasskeys(app http.Handler, store *passkeyauth.Store, origin stri
 		return nil, nil, err
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", app)
+	mux.Handle("/", owners.attach(auth, app))
 	auth.Register(mux)
 	protected := auth.Protect(mux)
 	return authSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +168,26 @@ func authWarnings(origin, addr string, allowedOrigins []string, trustedUIOrigin 
 	if host, _, err := net.SplitHostPort(addr); err == nil && strings.HasPrefix(origin, "http://localhost:") {
 		if ip := net.ParseIP(host); host == "" || (ip != nil && !ip.IsLoopback()) {
 			warnings = append(warnings, "--addr "+addr+" listens beyond loopback, but passkeys are bound to "+origin+"; remote browsers cannot sign in without --auth-origin https://…")
+		}
+	}
+	return warnings
+}
+
+// operatorWarnings names configured operators that cannot sign in. Without an
+// operator nobody can change the offline mode or prepare a routing region
+// from the browser; the admin token still can.
+func operatorWarnings(store *passkeyauth.Store, operators []string) []string {
+	var warnings []string
+	if len(operators) == 0 {
+		warnings = append(warnings, "no --auth-operator: offline mode, routing regions and the shared cache can only be managed with --offline-admin-token")
+	}
+	for _, name := range operators {
+		acct, err := store.UserByName(strings.TrimSpace(name))
+		switch {
+		case err != nil:
+			warnings = append(warnings, "--auth-operator "+name+" is not an account; create it with `"+util.AppName+" user add`")
+		case acct.Disabled:
+			warnings = append(warnings, "--auth-operator "+name+" is disabled")
 		}
 	}
 	return warnings

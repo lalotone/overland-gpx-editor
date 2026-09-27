@@ -80,7 +80,7 @@ func newFakeDEM(t *testing.T, openMeteo bool) *fakeDEM {
 func newElevationServer(t *testing.T, dem *fakeDEM) *Server {
 	t.Helper()
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationHost:    dem.URL,
 		ElevationDataset: "srtm30m",
 	})
@@ -99,7 +99,7 @@ func newOpenMeteoServer(t *testing.T, dem *fakeDEM) *Server {
 	openMeteoURL = dem.URL
 	t.Cleanup(func() { openMeteoURL = previous })
 
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationDataset: "srtm30m"})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationDataset: "srtm30m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestOpenMeteoErrorBodyIsReported(t *testing.T) {
 	openMeteoURL = stub.URL
 	t.Cleanup(func() { openMeteoURL = previous })
 
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationDataset: "srtm30m"})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationDataset: "srtm30m"})
 	if err != nil {
 		t.Fatal(err)
 	}

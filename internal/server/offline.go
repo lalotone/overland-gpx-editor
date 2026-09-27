@@ -104,6 +104,20 @@ func (s *Server) requireOfflineControl(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireOperator guards server-wide changes. With sign-in on, an ordinary
+// user is refused even though they are trusted for their own data: the mark
+// comes from the wrapper, the admin token from the operator's own hand.
+// Without sign-in there is one owner, who is the operator.
+func (s *Server) requireOperator(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.requireOwner && !IsOperator(r.Context()) && !s.validAdminToken(r) {
+			writeError(w, http.StatusForbidden, "Operator access required")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) requireOfflineRead(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorizedOfflineControl(r, false) {
@@ -129,7 +143,8 @@ func noStoreJSON(w http.ResponseWriter, status int, payload any) {
 	writeJSON(w, status, payload)
 }
 
-func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleOfflineStatus(w http.ResponseWriter, r *http.Request) {
+	owner, _ := ownerOf(r)
 	legacyBytes, legacyMaxBytes, legacyEntries := int64(0), int64(0), 0
 	if s.elevation.tiles != nil {
 		legacyBytes, legacyEntries = s.elevation.tiles.diskStats()
@@ -146,7 +161,7 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	active := jobAggregate{ID: "active", State: "queued"}
 	if s.packs != nil {
-		for _, job := range s.packs.summaries() {
+		for _, job := range s.packs.summaries(owner) {
 			if job.State == "queued" || job.State == "running" {
 				active.Active++
 				active.Done += job.Done

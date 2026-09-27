@@ -9,17 +9,24 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/lalotone/overland-gpx-editor/cmd/overland/identity"
 	"github.com/lalotone/overland-gpx-editor/cmd/overland/util"
+	"github.com/lalotone/overland-gpx-editor/internal/passkeyauth"
 	"github.com/lalotone/overland-gpx-editor/internal/server"
 	"github.com/urfave/cli/v3"
 )
 
 var Command = &cli.Command{
 	Name:      "import",
-	Usage:     "Import GPX files into the track library",
+	Usage:     "Import GPX files into a track library",
 	ArgsUsage: "FILE...",
 	Flags: []cli.Flag{
-		util.GPXDirFlag(),
+		util.DataDirFlag(),
+		&cli.StringFlag{
+			Name:  "user",
+			Usage: "import into this account's library (serve --auth); the default is the library serve uses without --auth",
+		},
+		util.AuthDBFlag(),
 	},
 	Action: run,
 }
@@ -29,12 +36,11 @@ func run(_ context.Context, cmd *cli.Command) error {
 	if len(paths) == 0 {
 		return errors.New("at least one GPX file is required")
 	}
-
-	dir := cmd.String("gpx-dir")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create track library: %w", err)
+	owner, err := resolveOwner(cmd.String("user"), cmd.String("auth-db"))
+	if err != nil {
+		return err
 	}
-	root, err := os.OpenRoot(dir)
+	root, err := server.OpenOwnerTracks(cmd.String("data-dir"), owner)
 	if err != nil {
 		return fmt.Errorf("open track library: %w", err)
 	}
@@ -47,6 +53,34 @@ func run(_ context.Context, cmd *cli.Command) error {
 		fmt.Fprintf(cmd.Writer, "Imported %s\n", filename)
 	}
 	return nil
+}
+
+// resolveOwner maps --user to the owner key the server stores that account's
+// library under. The lookup stays here, in the CLI: the account database and
+// owner key are opened together, and only the derived key goes any further.
+// An unknown or disabled user is an error, never a fallback to the local
+// library, which would quietly hand their files to a different owner.
+func resolveOwner(username, authDB string) (server.Owner, error) {
+	if username == "" {
+		return server.LocalOwner, nil
+	}
+	store, err := passkeyauth.OpenStore(authDB)
+	if err != nil {
+		return "", fmt.Errorf("open account database: %w", err)
+	}
+	defer store.Close()
+	account, err := store.UserByName(username)
+	if err != nil {
+		return "", fmt.Errorf("user %q: %w", username, err)
+	}
+	if account.Disabled {
+		return "", fmt.Errorf("user %q is disabled", username)
+	}
+	secret, err := identity.Load(identity.KeyPath(authDB))
+	if err != nil {
+		return "", fmt.Errorf("owner key: %w (it is created by `%s serve --auth`)", err, util.AppName)
+	}
+	return secret.Owner(account)
 }
 
 func importFile(root *os.Root, sourcePath string) (string, error) {
@@ -77,9 +111,6 @@ func importFile(root *os.Root, sourcePath string) (string, error) {
 	defer root.Remove(tmpName)
 
 	if _, err := io.Copy(tmp, source); err != nil {
-		return "", err
-	}
-	if err := tmp.Chmod(0o644); err != nil {
 		return "", err
 	}
 	if err := tmp.Sync(); err != nil {

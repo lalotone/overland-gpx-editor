@@ -11,8 +11,8 @@ func TestDefaultDirsUseXDG(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
-	if got, want := DefaultGPXDir(), filepath.Join(dataHome, "overland", "gpx"); got != want {
-		t.Errorf("DefaultGPXDir() = %q, want %q", got, want)
+	if got, want := DefaultDataDir(), filepath.Join(dataHome, "overland"); got != want {
+		t.Errorf("DefaultDataDir() = %q, want %q", got, want)
 	}
 	if got, want := DefaultTileCacheDir(), filepath.Join(cacheHome, "overland", "tiles"); got != want {
 		t.Errorf("DefaultTileCacheDir() = %q, want %q", got, want)
@@ -28,8 +28,8 @@ func TestDefaultDirsFallBackToHome(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
 
-	if got, want := DefaultGPXDir(), filepath.Join(home, ".local", "share", "overland", "gpx"); got != want {
-		t.Errorf("DefaultGPXDir() = %q, want %q", got, want)
+	if got, want := DefaultDataDir(), filepath.Join(home, ".local", "share", "overland"); got != want {
+		t.Errorf("DefaultDataDir() = %q, want %q", got, want)
 	}
 	if got, want := DefaultTileCacheDir(), filepath.Join(home, ".cache", "overland", "tiles"); got != want {
 		t.Errorf("DefaultTileCacheDir() = %q, want %q", got, want)
@@ -45,8 +45,8 @@ func TestDefaultDirsIgnoreRelativeXDGPaths(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "relative-data")
 	t.Setenv("XDG_CACHE_HOME", "relative-cache")
 
-	if got, want := DefaultGPXDir(), filepath.Join(home, ".local", "share", "overland", "gpx"); got != want {
-		t.Errorf("DefaultGPXDir() = %q, want %q", got, want)
+	if got, want := DefaultDataDir(), filepath.Join(home, ".local", "share", "overland"); got != want {
+		t.Errorf("DefaultDataDir() = %q, want %q", got, want)
 	}
 	if got, want := DefaultTileCacheDir(), filepath.Join(home, ".cache", "overland", "tiles"); got != want {
 		t.Errorf("DefaultTileCacheDir() = %q, want %q", got, want)

@@ -39,7 +39,7 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 
 	var logs lockedLogBuffer
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		OfflineCacheDir:  t.TempDir(),
 		NominatimURL:     upstream.URL,
 		StatsLogInterval: 5 * time.Millisecond,
@@ -63,7 +63,7 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 		t.Fatalf("cached request = state %q, err %v", response.State, err)
 	}
 	s.packs.mu.Lock()
-	s.packs.packs["private-pack-id"] = &packManifest{Name: "private Pyrenees trip", State: "complete"}
+	s.packs.packs["private-pack-id"] = &packManifest{owner: LocalOwner, Name: "private Pyrenees trip", State: "complete"}
 	s.packs.mu.Unlock()
 
 	deadline := time.Now().Add(time.Second)
@@ -142,7 +142,7 @@ func TestOperationalStatsFormatting(t *testing.T) {
 }
 
 func TestNegativeStatsLogIntervalIsRejected(t *testing.T) {
-	if _, err := New(Config{GPXDir: t.TempDir(), StatsLogInterval: -time.Second}); err == nil {
+	if _, err := New(Config{DataDir: t.TempDir(), StatsLogInterval: -time.Second}); err == nil {
 		t.Fatal("New accepted a negative stats log interval")
 	}
 }

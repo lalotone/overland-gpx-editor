@@ -12,12 +12,14 @@ import (
 
 const AppName = "overland"
 
-func GPXDirFlag() cli.Flag {
+// DataDirFlag is the private data directory shared by serve, import and
+// user: track libraries and trip packs, by owner, under owners/.
+func DataDirFlag() cli.Flag {
 	return &cli.StringFlag{
-		Name:    "gpx-dir",
-		Usage:   "directory holding the track library",
-		Value:   DefaultGPXDir(),
-		Sources: NonEmptyEnv("GPX_DIR"),
+		Name:    "data-dir",
+		Usage:   "directory holding private data: track libraries and trip packs, by owner",
+		Value:   DefaultDataDir(),
+		Sources: NonEmptyEnv("DATA_DIR"),
 	}
 }
 
@@ -90,15 +92,15 @@ func (s *environmentSource) GoString() string {
 	return fmt.Sprintf("&environmentSource{key:%q}", s.key)
 }
 
-func DefaultGPXDir() string {
+func DefaultDataDir() string {
 	if base := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "overland", "gpx")
+		return filepath.Join(base, "overland")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "gpx"
+		return "data"
 	}
-	return filepath.Join(home, ".local", "share", "overland", "gpx")
+	return filepath.Join(home, ".local", "share", "overland")
 }
 
 func DefaultTileCacheDir() string {

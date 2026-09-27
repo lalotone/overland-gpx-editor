@@ -26,7 +26,7 @@ func TestDataServicesWarmRestartCacheOnlyScenario(t *testing.T) {
 	}))
 	cacheDir := t.TempDir()
 	config := Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
 		FuelURL: upstream.URL + "/fuel", NominatimURL: upstream.URL,
 	}
 	online, err := New(config)
@@ -87,7 +87,7 @@ func TestRuntimeOfflineModeToggleGatesOutboundRequests(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		NominatimURL: upstream.URL,
 	})
 	if err != nil {
@@ -132,7 +132,7 @@ func TestRuntimeOfflineModeToggleGatesOutboundRequests(t *testing.T) {
 }
 
 func TestStartupCacheOnlyModeCannotBeOverriddenOnline(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineMode: "cache-only"})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineMode: "cache-only"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestPlaceCacheKeyPreservesTheForwardedQueryCase(t *testing.T) {
 	}))
 	defer upstream.Close()
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		NominatimURL: upstream.URL,
 	})
 	if err != nil {
@@ -175,7 +175,7 @@ func TestPlaceCacheKeyPreservesTheForwardedQueryCase(t *testing.T) {
 func TestTerrariumWarmRestartCacheOnlyScenario(t *testing.T) {
 	tiles := newTileServer(t)
 	cacheDir := t.TempDir()
-	online, err := New(Config{GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: tiles.url(), ElevationTileCache: cacheDir})
+	online, err := New(Config{DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: tiles.url(), ElevationTileCache: cacheDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestTerrariumWarmRestartCacheOnlyScenario(t *testing.T) {
 
 	transportCalls := atomic.Int64{}
 	offline, err := New(Config{
-		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: tiles.url(), ElevationTileCache: cacheDir,
+		DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: tiles.url(), ElevationTileCache: cacheDir,
 		OfflineMode: "cache-only", HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			transportCalls.Add(1)
 			return nil, errorsNew("must remain offline")
@@ -218,7 +218,7 @@ func TestTerrariumWarmRestartCacheOnlyScenario(t *testing.T) {
 func TestNarrowEndpointValidationStopsHostileInput(t *testing.T) {
 	var calls atomic.Int64
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { calls.Add(1); return nil, errorsNew("unexpected") })}
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestProviderResponseLimitAndContentTypeAreEnforced(t *testing.T) {
 		w.Write([]byte(`"` + strings.Repeat("x", (2<<20)+1) + `"`))
 	}))
 	defer large.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", NominatimURL: large.URL})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", NominatimURL: large.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestProviderResponseLimitAndContentTypeAreEnforced(t *testing.T) {
 		fmt.Fprint(w, `<html>error</html>`)
 	}))
 	defer html.Close()
-	s2, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OverpassURL: html.URL})
+	s2, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OverpassURL: html.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestProviderResponseLimitAndContentTypeAreEnforced(t *testing.T) {
 func TestConfigAndStatusExposeCapabilitiesWithoutSecrets(t *testing.T) {
 	cacheDir := t.TempDir()
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
 		OfflineMode: "cache-only", OfflineAdminToken: "do-not-expose", UpstreamContact: "private@example.test",
 	})
 	if err != nil {

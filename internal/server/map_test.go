@@ -21,7 +21,7 @@ func TestRasterMapRejectsHostilePathsBeforeTransport(t *testing.T) {
 		calls.Add(1)
 		return nil, errorsNew("unexpected transport")
 	})}
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,10 +126,10 @@ func TestServerStartupDoesNotWaitForOpenFreeMapActivation(t *testing.T) {
 		err    error
 	}
 	results := make(chan result, 1)
-	gpxDir, cacheDir := t.TempDir(), t.TempDir()
+	dataDir, cacheDir := t.TempDir(), t.TempDir()
 	go func() {
 		s, err := New(Config{
-			GPXDir: gpxDir, ElevationHost: "http://elevation.invalid", HTTPClient: client,
+			DataDir: dataDir, ElevationHost: "http://elevation.invalid", HTTPClient: client,
 			OfflineCacheDir: cacheDir, OpenFreeMapURL: "https://maps.invalid", OpenFreeMapAllowBulk: true,
 		})
 		results <- result{server: s, err: err}
@@ -203,7 +203,7 @@ func TestConfiguredOpenFreeMapStyleGraphIsStructuredAndOfflineCapable(t *testing
 	cacheDir := t.TempDir()
 	newServer := func(mode string) *Server {
 		s, err := New(Config{
-			GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+			DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
 			OfflineCacheDir: cacheDir, OfflineMode: mode, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true,
 		})
 		if err != nil {
@@ -258,13 +258,13 @@ func TestConfiguredOpenFreeMapStyleGraphIsStructuredAndOfflineCapable(t *testing
 	if estimate.Counts["openfreemap-raster"] != 1 {
 		t.Fatalf("raster estimate = %+v", estimate.Counts)
 	}
-	manifest, _, err := online.packs.start(packInput)
+	manifest, _, err := online.packs.start(LocalOwner, packInput)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		summary, _ := online.packs.publicManifest(manifest.ID)
+		summary, _ := online.packs.publicManifest(LocalOwner, manifest.ID)
 		if summary.State == "complete" {
 			break
 		}
@@ -286,7 +286,7 @@ func TestConfiguredOpenFreeMapStyleGraphIsStructuredAndOfflineCapable(t *testing
 	}
 	offlinePackInput := packInput
 	offlinePackInput.Name = "map copy"
-	offlineManifest, _, err := offline.packs.start(offlinePackInput)
+	offlineManifest, _, err := offline.packs.start(LocalOwner, offlinePackInput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestInterruptedMapRefreshPreservesLastCompleteGenerationAcrossRestart(t *te
 	defer upstream.Close()
 	cacheDir := t.TempDir()
 	newServer := func(mode string) *Server {
-		s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir, OfflineMode: mode, OpenFreeMapURL: upstream.URL})
+		s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir, OfflineMode: mode, OpenFreeMapURL: upstream.URL})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -385,7 +385,7 @@ func TestStartupLimitsRetainPersistedOpenFreeMapCore(t *testing.T) {
 	upstream, calls := newFakeMapSource(t)
 	cacheDir := t.TempDir()
 	config := Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
 		OfflineCacheMaxBytes: 32 << 20, OfflineCacheMaxEntries: 100,
 		OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true,
 	}
@@ -479,7 +479,7 @@ func TestConfiguredOpenFreeMapFailureIsDiagnosable(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OpenFreeMapURL: upstream.URL,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OpenFreeMapURL: upstream.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -553,7 +553,7 @@ func TestOpenFreeMapTileFailureIsDiagnosableWithoutLeakingTemplateQuery(t *testi
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OpenFreeMapURL: upstream.URL,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OpenFreeMapURL: upstream.URL,
 	})
 	if err != nil {
 		t.Fatal(err)

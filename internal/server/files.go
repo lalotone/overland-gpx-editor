@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -46,22 +47,31 @@ func ValidateGPXFilename(filename string) error {
 	return err
 }
 
-// resolveFile pulls {filename} off the request and validates it, writing the
-// error response itself when the name is unusable.
-func (s *Server) resolveFile(w http.ResponseWriter, r *http.Request) (string, bool) {
-	filename, err := safeGPXFilename(chi.URLParam(r, "filename"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return "", false
-	}
-	return filename, true
+// library is the track store. A track is identified by (owner, filename):
+// every operation takes both, and handlers never build a path themselves, so
+// sharing a track between owners can later be added here without touching
+// them or the layout on disk. Each owner's tracks live under their own
+// os.Root, so a filename can only ever name that owner's file.
+type library struct {
+	spaces *ownerSpaces
+	mu     sync.RWMutex
 }
 
-func (s *Server) gpxFiles() ([]string, error) {
-	s.gpxMu.RLock()
-	defer s.gpxMu.RUnlock()
+// tracks opens the owner's track directory. Callers close it.
+func (l *library) tracks(owner Owner) (*os.Root, error) {
+	return l.spaces.openSub(owner, ownerTracksDir)
+}
 
-	dir, err := s.gpxRoot.Open(".")
+func (l *library) list(owner Owner) ([]string, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	root, err := l.tracks(owner)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	dir, err := root.Open(".")
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +88,7 @@ func (s *Server) gpxFiles() ([]string, error) {
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		info, err := s.gpxRoot.Lstat(e.Name())
+		info, err := root.Lstat(e.Name())
 		if err == nil && info.Mode().IsRegular() && strings.EqualFold(filepath.Ext(e.Name()), ".gpx") {
 			names = append(names, e.Name())
 		}
@@ -87,8 +97,98 @@ func (s *Server) gpxFiles() ([]string, error) {
 	return names, nil
 }
 
+// read returns a track's content. A missing file, an inaccessible one and a
+// symlink that tried to escape all come back as os.ErrNotExist: the API does
+// not reveal which.
+func (l *library) read(owner Owner, filename string) ([]byte, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	root, err := l.tracks(owner)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(filename)
+	if err != nil {
+		return nil, os.ErrNotExist
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, os.ErrNotExist
+	}
+	return io.ReadAll(file)
+}
+
+// save replaces a track, creating it if needed.
+func (l *library) save(owner Owner, filename string, content []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	root, err := l.tracks(owner)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return writeFileAtomic(root, filename, content)
+}
+
+// create publishes a new track and returns os.ErrExist when the owner
+// already has one by that name.
+func (l *library) create(owner Owner, filename string, content []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	root, err := l.tracks(owner)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return createFile(root, filename, content)
+}
+
+// exists reports whether the owner has a track by that name.
+func (l *library) exists(owner Owner, filename string) (bool, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	root, err := l.tracks(owner)
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	_, err = root.Lstat(filename)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (l *library) remove(owner Owner, filename string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	root, err := l.tracks(owner)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.Remove(filename)
+}
+
+// resolveFile pulls {filename} off the request and validates it, writing the
+// error response itself when the name is unusable.
+func (s *Server) resolveFile(w http.ResponseWriter, r *http.Request) (string, bool) {
+	filename, err := safeGPXFilename(chi.URLParam(r, "filename"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return "", false
+	}
+	return filename, true
+}
+
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	names, err := s.gpxFiles()
+	owner, _ := ownerOf(r)
+	names, err := s.library.list(owner)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -101,25 +201,12 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.gpxMu.RLock()
-	file, err := s.gpxRoot.Open(filename)
-	if err != nil {
-		s.gpxMu.RUnlock()
-		// Do not reveal whether a rooted open failed because the file is absent,
-		// inaccessible, or a symlink tried to escape the library.
+	owner, _ := ownerOf(r)
+	content, err := s.library.read(owner, filename)
+	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, "File not found")
 		return
 	}
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		file.Close()
-		s.gpxMu.RUnlock()
-		writeError(w, http.StatusNotFound, "File not found")
-		return
-	}
-	content, err := io.ReadAll(file)
-	file.Close()
-	s.gpxMu.RUnlock()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -143,10 +230,8 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Empty request body")
 		return
 	}
-	s.gpxMu.Lock()
-	err = writeFileAtomic(s.gpxRoot, filename, body)
-	s.gpxMu.Unlock()
-	if err != nil {
+	owner, _ := ownerOf(r)
+	if err := s.library.save(owner, filename, body); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -180,14 +265,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.gpxMu.RLock()
-	_, statErr := s.gpxRoot.Lstat(filename)
-	s.gpxMu.RUnlock()
-	if statErr == nil {
-		writeError(w, http.StatusConflict, "File already exists")
+	owner, _ := ownerOf(r)
+	// The 409 only ever reflects the caller's own library: another owner's
+	// files are under a different root and cannot collide.
+	exists, err := s.library.exists(owner, filename)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		writeError(w, http.StatusInternalServerError, statErr.Error())
+	}
+	if exists {
+		writeError(w, http.StatusConflict, "File already exists")
 		return
 	}
 
@@ -198,10 +285,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	// The early check avoids loading a duplicate into application memory. The
 	// atomic publish below closes the race between same-name requests.
-	s.gpxMu.Lock()
-	err = createFile(s.gpxRoot, filename, content)
-	s.gpxMu.Unlock()
-	if err != nil {
+	if err := s.library.create(owner, filename, content); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			writeError(w, http.StatusConflict, "File already exists")
 			return
@@ -220,10 +304,8 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.gpxMu.Lock()
-	err := s.gpxRoot.Remove(filename)
-	s.gpxMu.Unlock()
-	if err != nil {
+	owner, _ := ownerOf(r)
+	if err := s.library.remove(owner, filename); err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, "File not found")
 			return
@@ -265,9 +347,12 @@ func createFile(root *os.Root, filename string, content []byte) error {
 	return createFileExclusive(root, filename, content)
 }
 
+// Tracks are private data: readable by the server's user only.
+const trackFileMode = 0o600
+
 func stageFile(root *os.Root, content []byte) (string, error) {
 	tmpName := ".tmp-" + rand.Text() + ".gpx"
-	tmp, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, trackFileMode)
 	if err != nil {
 		return "", err
 	}
@@ -282,9 +367,6 @@ func stageFile(root *os.Root, content []byte) (string, error) {
 	if _, err := tmp.Write(content); err != nil {
 		return "", err
 	}
-	if err := tmp.Chmod(0o644); err != nil {
-		return "", err
-	}
 	if err := tmp.Sync(); err != nil {
 		return "", err
 	}
@@ -296,7 +378,7 @@ func stageFile(root *os.Root, content []byte) (string, error) {
 }
 
 func createFileExclusive(root *os.Root, filename string, content []byte) error {
-	file, err := root.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	file, err := root.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_EXCL, trackFileMode)
 	if err != nil {
 		return err
 	}
@@ -308,9 +390,6 @@ func createFileExclusive(root *os.Root, filename string, content []byte) error {
 		}
 	}()
 	if _, err := file.Write(content); err != nil {
-		return err
-	}
-	if err := file.Chmod(0o644); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {

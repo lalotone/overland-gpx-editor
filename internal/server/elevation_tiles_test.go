@@ -365,7 +365,7 @@ func TestTerrariumDiskQuotaRefusesOversizedTileAndDoesNotDoubleCount(t *testing.
 
 func TestOfflineStatusReportsTerrariumQuota(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(),
+		DataDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(),
 		ElevationTileCacheMaxBytes: 123456,
 	})
 	if err != nil {
@@ -422,7 +422,7 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 	ts.ele = func(x, y int) float64 { return 1234 }
 
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationTiles:   true,
 		ElevationTileURL: ts.url(),
 		ElevationDataset: "srtm30m",
@@ -526,7 +526,7 @@ func TestConfiguredHostWinsOverTiles(t *testing.T) {
 	tiles := newTileServer(t)
 
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationTiles:   true,
 		ElevationTileURL: tiles.url(),
 		ElevationHost:    dem.URL,
@@ -585,7 +585,7 @@ func TestPrefetchEndpointsReportDisabledWithoutTiles(t *testing.T) {
 
 func TestPrefetchEndpointValidatesBbox(t *testing.T) {
 	ts := newTileServer(t)
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: ts.url()})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: ts.url()})
 	if err != nil {
 		t.Fatal(err)
 	}

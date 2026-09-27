@@ -28,7 +28,7 @@ func TestRegionalPackHasSeparateBulkAdmission(t *testing.T) {
 		_, _ = w.Write([]byte("pbf"))
 	}))
 	t.Cleanup(upstream.Close)
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OfflineCacheMaxEntries: 200000, OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OfflineCacheMaxEntries: 200000, OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	var clock atomic.Int64
@@ -42,11 +42,11 @@ func TestRegionalPackHasSeparateBulkAdmission(t *testing.T) {
 		clock.Add(int64(delay))
 		return ctx.Err()
 	}
-	pack, _, err := s.packs.start(packInput{Regional: true, Name: "large map", BBox: &bbox{South: -70, West: -85, North: 70, East: 85}, ZoomMin: 6, ZoomMax: 6, Layers: []string{"openfreemap"}})
+	pack, _, err := s.packs.start(LocalOwner, packInput{Regional: true, Name: "large map", BBox: &bbox{South: -70, West: -85, North: 70, East: 85}, ZoomMin: 6, ZoomMax: 6, Layers: []string{"openfreemap"}})
 	require.NoError(t, err)
 	var status packSummary
 	require.Eventually(t, func() bool {
-		status, _ = s.packs.publicManifest(pack.ID)
+		status, _ = s.packs.publicManifest(LocalOwner, pack.ID)
 		return status.State == "complete"
 	}, 90*time.Second, 10*time.Millisecond)
 	assert.Greater(t, status.Total, 1000)
@@ -91,11 +91,11 @@ func TestPackMapsProceedWhileElevationIsBlocked(t *testing.T) {
 				}
 			}))
 			t.Cleanup(upstream.Close)
-			s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true, ElevationTiles: true, ElevationTileURL: upstream.URL + "/terrain/{z}/{x}/{y}.png", ElevationTileCache: t.TempDir()})
+			s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), OfflineCacheMaxBytes: 4 << 30, OpenFreeMapURL: upstream.URL + "/style.json", OpenFreeMapAllowBulk: true, ElevationTiles: true, ElevationTileURL: upstream.URL + "/terrain/{z}/{x}/{y}.png", ElevationTileCache: t.TempDir()})
 			require.NoError(t, err)
 			cleanupTestServer(t, s)
 			input := packInput{Regional: true, Name: "parallel", BBox: &bbox{South: 40, West: -1, North: 40.1, East: -0.9}, ZoomMin: 0, ZoomMax: 0, Layers: []string{"openfreemap"}, Scopes: []string{"elevation"}}
-			pack, _, err := s.packs.startContext(t.Context(), input)
+			pack, _, err := s.packs.startContext(t.Context(), LocalOwner, input)
 			require.NoError(t, err)
 			for range 4 {
 				select {
@@ -105,14 +105,14 @@ func TestPackMapsProceedWhileElevationIsBlocked(t *testing.T) {
 				}
 			}
 			require.Eventually(t, func() bool {
-				status, _ := s.packs.publicManifest(pack.ID)
+				status, _ := s.packs.publicManifest(LocalOwner, pack.ID)
 				return status.Resources[packResourceVectorMap].Done == status.Resources[packResourceVectorMap].Total
 			}, 3*time.Second, 10*time.Millisecond)
-			status, _ := s.packs.publicManifest(pack.ID)
+			status, _ := s.packs.publicManifest(LocalOwner, pack.ID)
 			assert.Zero(t, status.Resources[packResourceElevation].Done)
 			assert.Equal(t, "running", status.State, "maps finishing must not complete the whole pack")
 			if cancel {
-				require.True(t, s.packs.cancel(pack.ID))
+				require.True(t, s.packs.cancel(LocalOwner, pack.ID))
 				status = waitForPackState(t, s.packs, pack.ID, "incomplete")
 				assert.Equal(t, "cancelled", status.ErrorCode)
 				require.Eventually(t, func() bool { return active.Load() == 0 }, 3*time.Second, 10*time.Millisecond)

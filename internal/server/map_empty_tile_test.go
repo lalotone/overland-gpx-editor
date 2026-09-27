@@ -33,10 +33,10 @@ func TestEmptyVectorTilesCompletePackAndSurviveOfflineRestart(t *testing.T) {
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	cacheDir := t.TempDir()
+	cacheDir, dataDir := t.TempDir(), t.TempDir()
 	newServer := func(mode string) *Server {
 		s, err := New(Config{
-			GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+			DataDir: dataDir, ElevationHost: "http://elevation.invalid",
 			OfflineCacheDir: cacheDir, OfflineMode: mode, OpenFreeMapURL: upstream.URL, OpenFreeMapAllowBulk: true,
 		})
 		require.NoError(t, err)
@@ -45,7 +45,7 @@ func TestEmptyVectorTilesCompletePackAndSurviveOfflineRestart(t *testing.T) {
 	online := newServer("auto")
 	t.Cleanup(func() { _ = online.Close() })
 	input := packInput{Regional: true, Name: "Empty countryside", BBox: &bbox{South: 1, West: 1, North: 1.001, East: 1.001}, ZoomMin: 14, ZoomMax: 14, Layers: []string{"openfreemap"}}
-	manifest, estimate, err := online.packs.start(input)
+	manifest, estimate, err := online.packs.start(LocalOwner, input)
 	require.NoError(t, err)
 	summary := waitForPackState(t, online.packs, manifest.ID, "complete")
 	assert.Zero(t, summary.Failures)
@@ -68,7 +68,7 @@ func TestEmptyVectorTilesCompletePackAndSurviveOfflineRestart(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code)
 	assert.Empty(t, response.Body.Bytes())
 	assert.Equal(t, "hit", response.Header().Get("X-GPX-Cache"))
-	restored, ok := offline.packs.publicManifest(manifest.ID)
+	restored, ok := offline.packs.publicManifest(LocalOwner, manifest.ID)
 	require.True(t, ok)
 	assert.Equal(t, "complete", restored.State)
 	estimate, err = offline.packs.estimate(input)

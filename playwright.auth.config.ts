@@ -26,7 +26,7 @@ export default defineConfig({
       'npm run build',
       `go build -o ${process.env.APP_BIN} ./cmd/overland`,
       `${process.env.APP_BIN} serve --auth --addr 127.0.0.1:${port} --auth-db ${process.env.APP_DB}` +
-        ` --gpx-dir ${join(work, 'gpx')} --routing-cache-dir '' --offline-cache-dir '' --elevation-tile-cache ''` +
+        ` --data-dir ${join(work, 'data')} --routing-cache-dir '' --offline-cache-dir '' --elevation-tile-cache ''` +
         ' --stats-log-interval 0',
     ].join(' && '),
     url: `http://127.0.0.1:${port}/healthz`,

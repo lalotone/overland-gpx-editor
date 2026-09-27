@@ -14,18 +14,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 )
 
-// Config wires a Server up. Only GPXDir is required.
+// Config wires a Server up. Only DataDir is required.
 type Config struct {
 	// UseAvailableStorage uses filesystem free space rather than fixed cache
 	// byte quotas for both caches. It fails startup where free space cannot be
@@ -36,8 +31,14 @@ type Config struct {
 	// Where free space cannot be measured they fall back to the byte quotas.
 	AvailableCacheStorage bool
 	AvailableTileStorage  bool
-	// GPXDir is the track library directory. It is created if missing.
-	GPXDir string
+	// DataDir holds private data by owner: track libraries, trip-pack
+	// manifests and owner-scoped provider responses under owners/<owner>/.
+	// It is created if missing. Shared caches live in their own directories.
+	DataDir string
+	// RequireOwner refuses owner-scoped routes for requests that carry no
+	// owner instead of serving them as the local owner. serve --auth sets it,
+	// so a handler mounted without the passkey wrapper fails closed.
+	RequireOwner bool
 	// ElevationHost is a self-hosted opentopodata-style DEM service. Empty
 	// uses tiles when enabled, otherwise the public Open-Meteo API.
 	ElevationHost string
@@ -130,9 +131,11 @@ const (
 
 // Server is an http.Handler exposing the whole app.
 type Server struct {
-	gpxDir          string
-	gpxRoot         *os.Root
-	gpxMu           sync.RWMutex
+	dataDir         string
+	spaces          *ownerSpaces
+	library         *library
+	requireOwner    bool
+	routeClasses    map[string]routeClass
 	elevation       *elevationProxy
 	nominatimURL    string
 	modes           *offlineModeController
@@ -166,19 +169,17 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(cfg.GPXDir, 0o755); err != nil {
-		return nil, err
-	}
-	gpxRoot, err := os.OpenRoot(cfg.GPXDir)
+	spaces, err := openOwnerSpaces(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
+	gpxRoot := spaces
 	mode := offlineMode(strings.TrimSpace(cfg.OfflineMode))
 	if mode == "" {
 		mode = modeAuto
 	}
 	if mode != modeAuto && mode != modeCacheOnly {
-		gpxRoot.Close()
+		gpxRoot.close()
 		return nil, errors.New("offline mode must be auto or cache-only")
 	}
 	if cfg.OfflineCacheMaxBytes == 0 {
@@ -187,10 +188,10 @@ func New(cfg Config) (*Server, error) {
 	availableCache := cfg.UseAvailableStorage || cfg.AvailableCacheStorage
 	availableTiles := cfg.UseAvailableStorage || cfg.AvailableTileStorage
 	if availableCache || availableTiles {
-		_, supported, err := availableDiskBytes(cfg.GPXDir)
+		_, supported, err := availableDiskBytes(cfg.DataDir)
 		switch {
 		case (err != nil || !supported) && cfg.UseAvailableStorage:
-			gpxRoot.Close()
+			gpxRoot.close()
 			return nil, fmt.Errorf("available-storage cache policy requires filesystem space reporting: %v", err)
 		case err != nil || !supported:
 			log.Printf("free disk space cannot be measured here (%v); using fixed cache quotas", err)
@@ -210,22 +211,22 @@ func New(cfg Config) (*Server, error) {
 		cfg.ElevationTileCacheMaxBytes = defaultElevationTileCacheBytes
 	}
 	if cfg.ElevationTileCacheMaxBytes < 0 {
-		gpxRoot.Close()
+		gpxRoot.close()
 		return nil, errors.New("elevation tile cache max bytes must be positive")
 	}
 	if strings.TrimSpace(cfg.RoutingRegion) != "" && strings.TrimSpace(cfg.RoutingGraph) != "" {
-		gpxRoot.Close()
+		gpxRoot.close()
 		return nil, errors.New("routing region and routing graph are mutually exclusive")
 	}
 	if cfg.RoutingJobs < 0 || cfg.RoutingConcurrency < 0 || cfg.RoutingTimeout < 0 {
-		gpxRoot.Close()
+		gpxRoot.close()
 		return nil, errors.New("routing jobs, concurrency and timeout cannot be negative")
 	}
 	// Persisted pins are derived from pack manifests, so defer pin-aware
 	// eviction until the manifests have been reconciled below.
 	cache, err := openCacheStore(cfg.OfflineCacheDir, cfg.OfflineCacheMaxBytes, cfg.OfflineCacheMaxEntries, false)
 	if err != nil {
-		gpxRoot.Close()
+		gpxRoot.close()
 		return nil, err
 	}
 	cache.useAvailableStorage = availableCache
@@ -236,7 +237,7 @@ func New(cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.TrustedUIOrigin) != "" {
 		trustedUIOrigin, err = normalizeOrigin(cfg.TrustedUIOrigin)
 		if err != nil {
-			gpxRoot.Close()
+			gpxRoot.close()
 			cache.close()
 			return nil, fmt.Errorf("trusted UI origin: %w", err)
 		}
@@ -252,7 +253,7 @@ func New(cfg Config) (*Server, error) {
 	for name, raw := range providerURLs {
 		parsedURLs[name], err = parseProviderURL(name, raw)
 		if err != nil {
-			gpxRoot.Close()
+			gpxRoot.close()
 			cache.close()
 			return nil, err
 		}
@@ -261,17 +262,17 @@ func New(cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.OpenFreeMapURL) != "" {
 		openFreeMapURL, err = parseProviderURL("openfreemap", cfg.OpenFreeMapURL)
 		if err != nil {
-			gpxRoot.Close()
+			gpxRoot.close()
 			cache.close()
 			return nil, err
 		}
 	}
-	controlReserve := int64(maxRegionalManifestBytes)
+	controlReserve := int64(0)
 	if openFreeMapURL != nil {
-		controlReserve += maxMapGenerationBytes
+		controlReserve = maxMapGenerationBytes
 	}
 	if err := cache.setReservedBytes(controlReserve); err != nil {
-		gpxRoot.Close()
+		gpxRoot.close()
 		cache.close()
 		return nil, fmt.Errorf("reserve offline control storage: %w", err)
 	}
@@ -324,7 +325,7 @@ func New(cfg Config) (*Server, error) {
 		tiles.downloadsUseDisk = tiles.cacheRoot != nil && diskSpaceMeasurable(tiles.cacheDir)
 		if tiles.cacheErr != nil {
 			cancel()
-			gpxRoot.Close()
+			gpxRoot.close()
 			cache.close()
 			return nil, fmt.Errorf("open elevation tile cache: %w", tiles.cacheErr)
 		}
@@ -333,8 +334,10 @@ func New(cfg Config) (*Server, error) {
 	nominatimURL := strings.TrimRight(parsedURLs["nominatim"].String(), "/")
 
 	s := &Server{
-		gpxDir:          cfg.GPXDir,
-		gpxRoot:         gpxRoot,
+		dataDir:         cfg.DataDir,
+		spaces:          spaces,
+		library:         &library{spaces: spaces},
+		requireOwner:    cfg.RequireOwner,
 		modes:           modes,
 		cache:           cache,
 		providers:       providers,
@@ -376,7 +379,7 @@ func New(cfg Config) (*Server, error) {
 	s.rasterMaps, err = newRasterAdapters()
 	if err != nil {
 		cancel()
-		gpxRoot.Close()
+		gpxRoot.close()
 		cache.close()
 		if tiles != nil {
 			tiles.closeCache()
@@ -393,7 +396,7 @@ func New(cfg Config) (*Server, error) {
 		}
 		if err != nil {
 			cancel()
-			gpxRoot.Close()
+			gpxRoot.close()
 			cache.close()
 			if tiles != nil {
 				tiles.closeCache()
@@ -408,7 +411,7 @@ func New(cfg Config) (*Server, error) {
 	s.packs, err = newPackManager(s)
 	if err != nil {
 		cancel()
-		gpxRoot.Close()
+		gpxRoot.close()
 		cache.close()
 		if tiles != nil {
 			tiles.closeCache()
@@ -417,7 +420,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	if err := cache.enforceLoadedLimits(); err != nil {
 		cancel()
-		gpxRoot.Close()
+		gpxRoot.close()
 		cache.close()
 		if tiles != nil {
 			tiles.closeCache()
@@ -437,7 +440,7 @@ func New(cfg Config) (*Server, error) {
 		if err != nil {
 			cancel()
 			s.wg.Wait()
-			gpxRoot.Close()
+			gpxRoot.close()
 			cache.close()
 			if tiles != nil {
 				tiles.closeCache()
@@ -480,10 +483,10 @@ func (s *Server) Close() error {
 	if s.elevation.tiles != nil {
 		tileCacheErr = s.elevation.tiles.closeCache()
 	}
-	s.gpxMu.Lock()
-	gpxErr := s.gpxRoot.Close()
-	s.gpxMu.Unlock()
-	return errors.Join(gpxErr, s.cache.close(), tileCacheErr, routingErr)
+	s.library.mu.Lock()
+	spacesErr := s.spaces.close()
+	s.library.mu.Unlock()
+	return errors.Join(spacesErr, s.cache.close(), tileCacheErr, routingErr)
 }
 
 func valueOrDefault(value, fallback string) string {
@@ -518,140 +521,6 @@ func skipPath(path string, mw func(http.Handler) http.Handler) func(http.Handler
 			wrapped.ServeHTTP(w, r)
 		})
 	}
-}
-
-func (s *Server) routes() http.Handler {
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.Recoverer)
-	r.Use(securityHeaders)
-	r.Use(skipPath(mcpBrowserEventsPath, middleware.ThrottleBacklog(maxInFlightRequests, maxQueuedRequests, 5*time.Second)))
-	r.Use(middleware.Compress(5))
-	r.Use(middleware.GetHead)
-	r.Use(s.protectBrowserWrites)
-	if len(s.allowedOrigins) > 0 {
-		r.Use(cors.Handler(cors.Options{
-			AllowedOrigins:     mapKeys(s.allowedOrigins),
-			AllowedMethods:     []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-			AllowedHeaders:     []string{"Accept", "Content-Type", "Authorization", "X-GPX-Editor"},
-			ExposedHeaders:     []string{"X-GPX-Cache", "X-GPX-Cached-At", "Age"},
-			AllowCredentials:   false,
-			MaxAge:             300,
-			OptionsPassthrough: true,
-		}))
-	}
-
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	r.Get("/files", s.handleListFiles)
-	r.Get("/gpx/{filename}", s.handleGetFile)
-	r.Put("/gpx/{filename}", s.handleSaveFile)
-	r.Post("/gpx/{filename}", s.handleSaveFile)
-	r.Delete("/gpx/{filename}", s.handleDeleteFile)
-	r.Post("/upload", s.handleUpload)
-	r.Get("/elevation", s.protectOutboundResource(s.handleElevation))
-	r.Post("/elevation/batch", s.protectOutboundResource(s.handleElevationBatch))
-	r.Post("/elevation/prefetch", s.protectOutboundResource(s.handlePrefetch))
-	r.Get("/elevation/prefetch", s.handlePrefetchStatus)
-	r.Get("/fuel", s.protectOutboundResource(s.handleFuel))
-	r.Get("/places/search", s.protectOutboundResource(s.handlePlaceSearch))
-	r.Post("/pois/search", s.protectOutboundResource(s.handlePOISearch))
-	if s.broom != nil {
-		r.Post("/routing/broom/route", s.protectOutboundResource(s.handleBroomRoute))
-		r.Post("/routing/broom/annotate", s.protectOutboundResource(s.handleBroomAnnotate))
-	}
-	r.Get("/map/raster/{layer}/{z}/{x}/{y}", s.protectOutboundResource(s.handleRasterMap))
-	r.Get("/map/openfreemap/style.json", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleStyle(w, r)
-	}))
-	r.Get("/map/openfreemap/source/{source}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleSource(w, r)
-	}))
-	r.Get("/map/openfreemap/source.json", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleSource(w, r)
-	}))
-	r.Get("/map/openfreemap/tiles/{source}/{z}/{x}/{y}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleTile(w, r, false)
-	}))
-	r.Get("/map/openfreemap/tiles/{z}/{x}/{y}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleTile(w, r, false)
-	}))
-	r.Get("/map/openfreemap/raster/{source}/{z}/{x}/{y}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleTile(w, r, true)
-	}))
-	r.Get("/map/openfreemap/glyphs/{fontstack}/{range}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleGlyph(w, r)
-	}))
-	r.Get("/map/openfreemap/{variant:sprite(?:@2x)?\\.(?:json|png)}", s.protectOutboundResource(func(w http.ResponseWriter, r *http.Request) {
-		if s.openFreeMap == nil {
-			writeError(w, http.StatusNotFound, "OpenFreeMap-compatible source is not configured")
-			return
-		}
-		s.openFreeMap.handleSprite(w, r)
-	}))
-	r.Get("/offline/status", s.handleOfflineStatus)
-	r.Put("/offline/mode", s.requireOfflineControl(s.handleOfflineMode))
-	r.Get("/offline/packs", s.requireOfflineRead(s.handleListPacks))
-	r.Post("/offline/packs/estimate", s.requireOfflineControl(s.handleEstimatePack))
-	r.Post("/offline/packs", s.requireOfflineControl(s.handleCreatePack))
-	r.Get("/offline/packs/{id}", s.requireOfflineRead(s.handleGetPack))
-	r.Post("/offline/packs/{id}/cancel", s.requireOfflineControl(s.handleCancelPack))
-	r.Delete("/offline/packs/{id}", s.requireOfflineControl(s.handleDeletePack))
-	r.Delete("/offline/cache", s.requireOfflineControl(s.handleClearCache))
-	if s.broom != nil {
-		r.Get("/offline/routing", s.requireOfflineRead(s.handleBroomStatus))
-		r.Get("/offline/routing/regions", s.requireOfflineRead(s.handleBroomRegions))
-		r.Post("/offline/routing/suggest", s.requireOfflineRead(s.handleBroomSuggest))
-		r.Post("/offline/routing/plan", s.requireOfflineControl(s.handleBroomPlan))
-		r.Post("/offline/routing/profile", s.requireOfflineControl(s.handleSessionProfile))
-		r.Post("/offline/routing/profile/release", s.requireOfflineControl(s.handleReleaseSessionProfile))
-		r.Post("/offline/routing/prepare", s.requireOfflineControl(s.handleBroomPrepare))
-		r.Post("/offline/routing/cancel", s.requireOfflineControl(s.handleBroomCancel))
-		r.Post("/offline/routing/pin", s.requireOfflineControl(s.handleBroomPin))
-		r.Post("/offline/routing/prune", s.requireOfflineControl(s.handleBroomPrune))
-	}
-	r.Options("/offline/*", s.handleOfflineOptions)
-	r.Get("/config", s.handleConfig)
-	if s.mcpBrowser != nil {
-		r.Mount("/mcp/browser", http.StripPrefix("/mcp/browser", s.mcpBrowser))
-	}
-	r.Options("/*", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	r.Get("/*", s.assetHandler().ServeHTTP)
-	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, "Not found")
-	})
-	return r
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

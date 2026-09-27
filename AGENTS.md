@@ -155,6 +155,15 @@ Two rules it is worth repeating here:
   reads as sea level.
   `VITE_ELEVATION_API` adds an optional direct-from-browser fallback and is
   empty by default.
+- **Mirror**: the vector map style and all routing inputs (Geofabrik
+  index and extracts, Skadi DEM) default to the project's own
+  [oms](https://code.rbel.co/rubiojr/oms) instance at `https://oms.rbel.co`,
+  declared once in `internal/server/upstreams.go` and used by both `serve`
+  and the mobile host. Reads need no token; oms tokens only guard its
+  mirror-job API, which overland never calls. `OPENFREEMAP_URL` and the
+  `ROUTING_*_URL` variables override it. Terrain-RGB elevation tiles, the
+  raster base layers, Nominatim, Overpass and the fuel feed are not mirrored
+  and still go to their public sources.
 - **Routing**: embedded Broom with an application-owned motorcycle BRF and
   Road/Dirt/Trail overrides plus an adaptation of Broom's Enduro profile. Both
   default and rider-declared permit variants are warmed before queries. Session-uploaded BRFs

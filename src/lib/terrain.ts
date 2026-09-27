@@ -74,7 +74,8 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
     label: 'OFM',
     title: 'OpenFreeMap Liberty — fast, sharp vector map',
     kind: 'vector',
-    styleUrl: 'https://tiles.openfreemap.org/styles/liberty',
+    // No-backend fallback; a backend replaces it with its own proxied style.
+    styleUrl: 'https://oms.rbel.co/maps/styles/liberty',
     attribution:
       '<a href="https://openfreemap.org">OpenFreeMap</a> | ' +
       '&copy; <a href="https://www.openmaptiles.org/">OpenMapTiles</a> | ' +

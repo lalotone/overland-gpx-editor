@@ -101,7 +101,7 @@ type Config struct {
 	OverpassURL             string
 	FuelURL                 string
 	// OpenFreeMapURL enables the persistent OpenFreeMap-compatible map proxy.
-	// The CLI supplies the public Liberty style by default.
+	// The CLI and the mobile host supply DefaultOpenFreeMapURL by default.
 	OpenFreeMapURL       string
 	OpenFreeMapAllowBulk bool
 	// HTTPClient is an injection seam for tests and controlled embeddings.

@@ -23,8 +23,6 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-const defaultOpenFreeMapURL = "https://tiles.openfreemap.org/styles/liberty"
-
 var Command = &cli.Command{
 	Name:   "serve",
 	Usage:  "Serve the GPX editor and track library",
@@ -133,13 +131,13 @@ func Flags() []cli.Flag {
 		&cli.IntFlag{Name: "routing-jobs", Usage: "parallel Broom graph preparation jobs", Value: 2, Sources: util.IntEnv("ROUTING_JOBS")},
 		&cli.IntFlag{Name: "routing-concurrency", Usage: "maximum concurrent local route queries", Value: 4, Sources: util.IntEnv("ROUTING_CONCURRENCY")},
 		&cli.DurationFlag{Name: "routing-timeout", Usage: "deadline for one local route query", Value: 45 * time.Second, Sources: util.NonEmptyEnv("ROUTING_TIMEOUT")},
-		&cli.StringFlag{Name: "routing-index-url", Usage: "Broom geometry index mirror", Sources: util.NonEmptyEnv("ROUTING_INDEX_URL")},
-		&cli.StringFlag{Name: "routing-metadata-index-url", Usage: "Broom metadata index mirror", Sources: util.NonEmptyEnv("ROUTING_METADATA_INDEX_URL")},
-		&cli.StringFlag{Name: "routing-pbf-base-url", Usage: "Broom PBF/checksum mirror base", Sources: util.NonEmptyEnv("ROUTING_PBF_BASE_URL")},
-		&cli.StringFlag{Name: "routing-dem-base-url", Usage: "Broom Skadi-compatible DEM mirror base", Sources: util.NonEmptyEnv("ROUTING_DEM_BASE_URL")},
+		&cli.StringFlag{Name: "routing-index-url", Usage: "Broom geometry index mirror", Value: server.DefaultRoutingIndexURL, Sources: util.NonEmptyEnv("ROUTING_INDEX_URL")},
+		&cli.StringFlag{Name: "routing-metadata-index-url", Usage: "Broom metadata index mirror", Value: server.DefaultRoutingMetadataIndexURL, Sources: util.NonEmptyEnv("ROUTING_METADATA_INDEX_URL")},
+		&cli.StringFlag{Name: "routing-pbf-base-url", Usage: "Broom PBF/checksum mirror base", Value: server.DefaultRoutingPBFBaseURL, Sources: util.NonEmptyEnv("ROUTING_PBF_BASE_URL")},
+		&cli.StringFlag{Name: "routing-dem-base-url", Usage: "Broom Skadi-compatible DEM mirror base", Value: server.DefaultRoutingDEMBaseURL, Sources: util.NonEmptyEnv("ROUTING_DEM_BASE_URL")},
 		&cli.StringFlag{Name: "overpass-url", Usage: "Overpass interpreter URL", Value: "https://overpass-api.de/api/interpreter", Sources: util.NonEmptyEnv("OVERPASS_URL")},
 		&cli.StringFlag{Name: "fuel-url", Usage: "Spanish fuel snapshot URL", Value: "https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/", Sources: util.NonEmptyEnv("FUEL_URL")},
-		&cli.StringFlag{Name: "openfreemap-url", Usage: "OpenFreeMap-compatible style source", Value: defaultOpenFreeMapURL, Sources: util.NonEmptyEnv("OPENFREEMAP_URL")},
+		&cli.StringFlag{Name: "openfreemap-url", Usage: "OpenFreeMap-compatible style source", Value: server.DefaultOpenFreeMapURL, Sources: util.NonEmptyEnv("OPENFREEMAP_URL")},
 		&cli.BoolFlag{Name: "openfreemap-allow-bulk", Usage: "allow bounded trip-pack fetches from the configured map source", Value: true, Sources: util.BoolEnv("OPENFREEMAP_ALLOW_BULK")},
 		&cli.StringSliceFlag{
 			Name:    "allowed-origin",

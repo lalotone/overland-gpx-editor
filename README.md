@@ -417,10 +417,10 @@ bundle at build time.
 | `ROUTING_GRAPH` | backend | *(empty)* | Trusted application-owned Broom graph, including cross-border unions |
 | `ROUTING_PREPARE` / `ROUTING_UPDATE` | backend | `off` | Prepare or explicitly refresh `ROUTING_REGION` at startup |
 | `ROUTING_JOBS` / `ROUTING_CONCURRENCY` / `ROUTING_TIMEOUT` | backend | `2` / `4` / `45s` | Preparation parallelism and route-query bounds |
-| `ROUTING_INDEX_URL` / `ROUTING_METADATA_INDEX_URL` | backend | Broom defaults | Optional region catalogue mirrors |
-| `ROUTING_PBF_BASE_URL` / `ROUTING_DEM_BASE_URL` | backend | Broom defaults | Optional OSM extract and DEM mirrors |
+| `ROUTING_INDEX_URL` / `ROUTING_METADATA_INDEX_URL` | backend | `https://oms.rbel.co/routing/osm/index-v1.json` and `…/index-v1-nogeom.json` | Region catalogue; the project's [oms](https://code.rbel.co/rubiojr/oms) mirror of Geofabrik by default |
+| `ROUTING_PBF_BASE_URL` / `ROUTING_DEM_BASE_URL` | backend | `https://oms.rbel.co/routing/osm` / `…/routing/skadi` | OSM extract and DEM sources; the oms mirror of Geofabrik and the AWS Skadi set by default |
 | `OVERPASS_URL` / `FUEL_URL` | backend | public services | Startup-only data-service overrides |
-| `OPENFREEMAP_URL` | backend | OpenFreeMap Liberty style | OpenFreeMap-compatible source eligible for persistent proxying |
+| `OPENFREEMAP_URL` | backend | `https://oms.rbel.co/maps/styles/liberty` | OpenFreeMap-compatible style source eligible for persistent proxying; the oms mirror of Liberty by default, `https://tiles.openfreemap.org/styles/liberty` for the public service |
 | `OPENFREEMAP_ALLOW_BULK` | backend | `on` | Permit bounded trip-pack fetching from the configured source |
 | `ELEVATION_TILES` | backend | `on` | Read elevation from ~30 m terrain tiles; `0` falls back to Open-Meteo |
 | `ELEVATION_TILE_ZOOM` | backend | `13` | Tile zoom — higher is finer and heavier |
@@ -505,16 +505,22 @@ How it fits together, the file tree and the HTTP API are in
 ## External services
 
 All are public and keyless. Attribution for map, OSM-derived and elevation data
-is rendered on the map by Leaflet.
+is rendered on the map by Leaflet. The vector map and routing data default to
+the project's own [oms](https://code.rbel.co/rubiojr/oms) mirror at
+`oms.rbel.co`, which fetches each object once from the upstream service and
+keeps it, so a fleet of overland installs does not hit OpenFreeMap or
+Geofabrik once per user. `OPENFREEMAP_URL` and the `ROUTING_*_URL` variables
+point at another mirror or straight at the public services.
 
 | Service | Used for |
 | --- | --- |
-| [OpenFreeMap](https://openfreemap.org) | Vector base map (OpenStreetMap data) |
+| [oms](https://code.rbel.co/rubiojr/oms) at `oms.rbel.co` | Default source of the OpenFreeMap Liberty map and of Geofabrik extracts and Skadi elevation for routing |
+| [OpenFreeMap](https://openfreemap.org) | Vector base map (OpenStreetMap data), through the oms mirror by default |
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | Raster library thumbnails and non-WebGL fallback — see the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) |
 | [OpenTopoMap](https://opentopomap.org) | Contour base map (CC-BY-SA, low volume only) |
 | [CyclOSM](https://www.cyclosm.org) | Surface/grade base map |
 | Esri ArcGIS | Satellite, relief, hillshade (attribution required; World Shaded Relief retires March 2028) |
-| [Broom](https://code.rbel.co/rubiojr/broom) | Embedded local routing over explicitly prepared OpenStreetMap and DEM data |
+| [Broom](https://code.rbel.co/rubiojr/broom) | Embedded local routing over explicitly prepared OpenStreetMap and DEM data, fetched through the oms mirror by default |
 | [Nominatim](https://nominatim.org) | Place search, throttled to one request/second and cached; switchable with `NOMINATIM_URL` |
 | [Overpass](https://overpass-api.de) | User-triggered fuel / water / campsite POIs |
 | [Spanish fuel-price feed](https://datos.gob.es/es/catalogo/e05068001-precio-de-carburantes-en-las-gasolineras-espanolas) | Official national snapshot, persistently cached with its publication time |

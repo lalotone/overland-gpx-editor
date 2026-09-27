@@ -171,8 +171,18 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			if got := cmd.String("nominatim-url"); got != "https://nominatim.openstreetmap.org" {
 				t.Errorf("nominatim-url = %q", got)
 			}
-			if got := cmd.String("openfreemap-url"); got != defaultOpenFreeMapURL {
-				t.Errorf("openfreemap-url = %q, want %q", got, defaultOpenFreeMapURL)
+			if got := cmd.String("openfreemap-url"); got != server.DefaultOpenFreeMapURL {
+				t.Errorf("openfreemap-url = %q, want %q", got, server.DefaultOpenFreeMapURL)
+			}
+			for flag, want := range map[string]string{
+				"routing-index-url":          server.DefaultRoutingIndexURL,
+				"routing-metadata-index-url": server.DefaultRoutingMetadataIndexURL,
+				"routing-pbf-base-url":       server.DefaultRoutingPBFBaseURL,
+				"routing-dem-base-url":       server.DefaultRoutingDEMBaseURL,
+			} {
+				if got := cmd.String(flag); got != want {
+					t.Errorf("%s = %q, want %q", flag, got, want)
+				}
 			}
 			if got := cmd.String("routing-cache-dir"); got != "" {
 				t.Errorf("routing-cache-dir = %q, want explicit empty environment value", got)

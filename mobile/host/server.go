@@ -94,7 +94,9 @@ func start(data, address string, assets fs.FS, native Native, openBackend func(s
 		OfflineCacheDir: filepath.Join(data, "responses"), UseAvailableStorage: true, OfflineCacheMaxEntries: 200000,
 		ElevationTiles: true, ElevationTileCache: filepath.Join(data, "terrain"),
 		RoutingCacheDir: filepath.Join(data, "routing"), RoutingJobs: 1, RoutingConcurrency: 1,
-		OpenFreeMapURL: "https://tiles.openfreemap.org/styles/liberty", OpenFreeMapAllowBulk: true,
+		RoutingIndexURL: server.DefaultRoutingIndexURL, RoutingMetadataIndexURL: server.DefaultRoutingMetadataIndexURL,
+		RoutingPBFBaseURL: server.DefaultRoutingPBFBaseURL, RoutingDEMBaseURL: server.DefaultRoutingDEMBaseURL,
+		OpenFreeMapURL: server.DefaultOpenFreeMapURL, OpenFreeMapAllowBulk: true,
 	}
 	h.http = &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 32 << 10}
 	go func() { _ = h.http.Serve(listener) }()

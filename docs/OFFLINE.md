@@ -80,13 +80,13 @@ before changing an adapter or release default.
 | OpenTopoMap | Viewed tiles with attribution; dated stale replay | Prohibited without operator permission |
 | CyclOSM | Viewed tiles, at most 72 hours, no expired replay | Prohibited |
 | Esri live imagery/relief/hillshade | Disabled; remains browser-direct | Prohibited |
-| Public OpenFreeMap live service | Enabled by default; honor upstream cache headers and attribution | Bounded trip-pack prefetch enabled by default |
-| Configured compatible map source | Set with `OPENFREEMAP_URL` | Controlled by `OPENFREEMAP_ALLOW_BULK`, which defaults to `true` |
+| Project oms mirror of OpenFreeMap Liberty (default) | Enabled by default; honor mirror cache headers and OpenFreeMap attribution | Bounded trip-pack prefetch enabled by default |
+| Public OpenFreeMap live service or another compatible source | Set with `OPENFREEMAP_URL` | Controlled by `OPENFREEMAP_ALLOW_BULK`, which defaults to `true` |
 | Terrarium elevation | Existing immutable tile cache | Bounded viewport/corridor prefetch |
 | Fuel snapshot | Explicit open-data snapshot, dated by source and cache | One bounded snapshot |
 | Nominatim | Exact user searches, one server-wide request/second | No autocomplete, grid or area sweep |
 | Overpass | Exact bounded user POI query | No tiled sweeps or harvesting |
-| Broom routing data | Local OSM extract, DEM, graph and profile metrics | Explicit region preparation; automatic migration of the active region after an engine upgrade |
+| Broom routing data | Local OSM extract, DEM, graph and profile metrics, fetched from the oms mirror by default (`ROUTING_*_URL`) | Explicit region preparation; automatic migration of the active region after an engine upgrade |
 | API elevation | Exact source/dataset coordinates | Bounded requests subject to provider licence/quota |
 
 Policy sources: [OSMF tiles](https://operations.osmfoundation.org/policies/tiles/),

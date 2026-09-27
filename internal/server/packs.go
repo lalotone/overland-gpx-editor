@@ -481,7 +481,7 @@ func validatePackInput(input packInput) (bbox, error) {
 	}
 	for _, scope := range input.Scopes {
 		switch scope {
-		case "elevation", "pois", "fuel", "places":
+		case "elevation", "pois", "fuel":
 		default:
 			return bbox{}, fmt.Errorf("unknown data scope %q", scope)
 		}
@@ -1126,28 +1126,19 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			estimate.Scopes["pois"] = cacheScopeStat{Bytes: poiBytes, Entries: len(estimate.POIRequests)}
 		}
 	}
-	for _, scope := range []string{"pois", "places"} {
-		if !containsString(input.Scopes, scope) {
-			continue
-		}
-		if scope == "pois" && len(estimate.POIRequests) != 0 {
-			continue
-		}
-		keys, bytes := m.server.cache.retainedKeys(scope, time.Now().UTC())
-		category := map[string]string{"pois": packResourcePOIs, "places": packResourcePlaces}[scope]
+	// Place searches are owner-scoped and never packed: a pack pins shared
+	// cache objects only.
+	if containsString(input.Scopes, "pois") && len(estimate.POIRequests) == 0 {
+		keys, bytes := m.server.cache.retainedKeys("pois", time.Now().UTC())
 		for _, key := range keys {
-			estimate.ExistingKeys = append(estimate.ExistingKeys, existingPackResource{Category: category, Key: key})
+			estimate.ExistingKeys = append(estimate.ExistingKeys, existingPackResource{Category: packResourcePOIs, Key: key})
 		}
-		estimate.Counts[scope] = len(keys)
-		estimate.Scopes[scope] = cacheScopeStat{Bytes: bytes, Entries: len(keys)}
+		estimate.Counts["pois"] = len(keys)
+		estimate.Scopes["pois"] = cacheScopeStat{Bytes: bytes, Entries: len(keys)}
 		estimate.Resources += len(keys)
 		estimate.Reused += len(keys)
 		estimate.ReusedBytes += bytes
-		detail := map[string]string{
-			"pois":   "POIs protect exact searches already in the cache; the pack does not run new POI queries for this area",
-			"places": "Places protect exact searches already in the cache; the pack does not search for new places",
-		}[scope]
-		estimate.Dynamic = append(estimate.Dynamic, detail)
+		estimate.Dynamic = append(estimate.Dynamic, "POIs protect exact searches already in the cache; the pack does not run new POI queries for this area")
 	}
 	if estimate.Resources > packResourceLimit(input) {
 		return packEstimate{}, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", packResourceLimit(input)))

@@ -179,6 +179,11 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, r *http.Request) {
 		jobs = append(jobs, active)
 	}
 	cache := s.cache.stats()
+	// The caller's private scopes sit beside the shared ones. They never
+	// overlap: a scope is either shared or owner-scoped.
+	for scope, stat := range s.ownerCaches.stats(owner).Scopes {
+		cache.Scopes[scope] = stat
+	}
 	noStoreJSON(w, http.StatusOK, struct {
 		Enabled    bool                      `json:"enabled"`
 		Mode       offlineMode               `json:"mode"`
@@ -246,16 +251,41 @@ func (s *Server) handleOfflineMode(w http.ResponseWriter, r *http.Request) {
 	}{Mode: s.modes.mode(), Changed: changed})
 }
 
+// handleClearCache clears one scope, or everything. An owner-scoped scope is
+// the caller's own cache and needs no more than that; the shared scopes, and
+// "everything", are the operator's, and clear the caller's own cache too.
 func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
 	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
 	if scope != "" && !validScope(scope) {
 		writeError(w, http.StatusBadRequest, "invalid cache scope")
 		return
 	}
+	owner, _ := ownerOf(r)
+	if scope != "" && s.ownerScopes[scope] {
+		removed, err := s.ownerCaches.clear(owner, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Cache deletion failed")
+			return
+		}
+		noStoreJSON(w, http.StatusOK, map[string]int{"removed": removed})
+		return
+	}
+	if s.requireOwner && !IsOperator(r.Context()) && !s.validAdminToken(r) {
+		writeError(w, http.StatusForbidden, "Operator access required")
+		return
+	}
 	removed, err := s.cache.clear(scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Cache deletion failed")
 		return
+	}
+	if scope == "" {
+		own, err := s.ownerCaches.clear(owner, "")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Cache deletion failed")
+			return
+		}
+		removed += own
 	}
 	noStoreJSON(w, http.StatusOK, map[string]int{"removed": removed})
 }

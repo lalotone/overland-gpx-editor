@@ -130,9 +130,26 @@ func (e *upstreamStatusError) Error() string {
 	return fmt.Sprintf("%s returned %d", e.Provider, e.Status)
 }
 
+// providerData says whose cache a provider's responses belong in. Every
+// policy names one; a request through an unclassified policy is refused, so
+// a new provider cannot land in the shared cache by omission.
+type providerData int
+
+const (
+	_ providerData = iota
+	// sharedProviderData is public: map tiles, the fuel snapshot, POIs by
+	// area. Everyone benefits from everyone's fetches.
+	sharedProviderData
+	// ownerProviderData describes the caller: place searches and exact
+	// elevation points. It is cached under the owner's own directory, so
+	// one user's history is invisible to another's cache headers.
+	ownerProviderData
+)
+
 type providerPolicy struct {
 	name              string
 	scope             string
+	data              providerData
 	baseURL           *url.URL
 	sourceFingerprint string
 	fallbackFresh     time.Duration
@@ -213,14 +230,18 @@ type healthState struct {
 }
 
 type outboundClient struct {
-	modes     *offlineModeController
-	store     *cacheStore
-	client    *http.Client
-	ctx       context.Context
-	wg        *sync.WaitGroup
-	userAgent string
-	referer   string
-	now       func() time.Time
+	modes *offlineModeController
+	store *cacheStore
+	// ownerStore returns the caller's private cache for owner-scoped
+	// providers, or nil when there is none, in which case the response is
+	// served but not cached.
+	ownerStore func(context.Context) *cacheStore
+	client     *http.Client
+	ctx        context.Context
+	wg         *sync.WaitGroup
+	userAgent  string
+	referer    string
+	now        func() time.Time
 
 	mu       sync.Mutex
 	inflight map[string]*inflightFetch
@@ -270,12 +291,15 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 	if request.method == "" {
 		request.method = http.MethodGet
 	}
-	request.cacheable = request.cacheable && o.store != nil && o.store.writable
-	key := canonicalCacheKey(p.name, p.sourceFingerprint, request.method, request.params, request.language, request.body)
+	store, inflightKey, key, err := o.storeFor(ctx, request)
+	if err != nil {
+		return cachedResponse{}, err
+	}
+	request.cacheable = request.cacheable && store != nil && store.writable
 	now := o.now().UTC()
 	var stale *cacheEntry
 	if request.cacheable {
-		if entry, ok := o.store.get(p.scope, key); ok && retainedAt(entry.Meta, now) {
+		if entry, ok := store.get(p.scope, key); ok && retainedAt(entry.Meta, now) {
 			if now.Before(entry.Meta.FreshUntil) {
 				return responseFromEntry(entry, key, "hit"), nil
 			}
@@ -290,7 +314,7 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 	}
 
 	o.mu.Lock()
-	if existing := o.inflight[key]; existing != nil {
+	if existing := o.inflight[inflightKey]; existing != nil {
 		o.mu.Unlock()
 		select {
 		case <-existing.done:
@@ -308,7 +332,7 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 		return cachedResponse{}, &outboundBusyError{Scope: p.scope}
 	}
 	fetch := &inflightFetch{done: make(chan struct{})}
-	o.inflight[key] = fetch
+	o.inflight[inflightKey] = fetch
 	o.pending[p.name]++
 	if len(o.inflight) > o.stats.PeakInFlight {
 		o.stats.PeakInFlight = len(o.inflight)
@@ -328,7 +352,7 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 				fetch.err = &offlineMissError{Scope: p.scope}
 			}
 		} else {
-			fetch.resp, fetch.err = o.fetch(networkCtx, request, key, stale)
+			fetch.resp, fetch.err = o.fetch(networkCtx, store, request, key, stale)
 			release()
 			if fetch.err != nil && o.modes.mode() == modeCacheOnly {
 				if stale != nil && staleAllowed(stale.Meta, o.now().UTC()) {
@@ -340,7 +364,7 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 			}
 		}
 		o.mu.Lock()
-		delete(o.inflight, key)
+		delete(o.inflight, inflightKey)
 		o.pending[p.name]--
 		close(fetch.done)
 		o.mu.Unlock()
@@ -352,6 +376,27 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 		return fetch.resp, fetch.err
 	case <-ctx.Done():
 		return cachedResponse{}, ctx.Err()
+	}
+}
+
+// storeFor picks the cache a request reads and writes: the shared store, or
+// the caller's own for owner-scoped providers. In-flight coalescing is keyed
+// the same way, so two owners asking the same question do not share an
+// answer in memory either.
+func (o *outboundClient) storeFor(ctx context.Context, request cachedRequest) (*cacheStore, string, string, error) {
+	p := request.policy
+	key := canonicalCacheKey(p.name, p.sourceFingerprint, request.method, request.params, request.language, request.body)
+	switch p.data {
+	case sharedProviderData:
+		return o.store, key, key, nil
+	case ownerProviderData:
+		owner, ok := OwnerFrom(ctx)
+		if !ok || o.ownerStore == nil {
+			return nil, key, key, nil
+		}
+		return o.ownerStore(ctx), string(owner) + ":" + key, key, nil
+	default:
+		return nil, "", "", fmt.Errorf("provider %s has no data classification", p.name)
 	}
 }
 
@@ -367,7 +412,7 @@ func responseFromEntry(entry *cacheEntry, key, state string) cachedResponse {
 	return cachedResponse{Status: entry.Meta.Status, Headers: cloneStringMap(entry.Meta.Headers), Body: entry.Body, State: state, Meta: entry.Meta, Key: key}
 }
 
-func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key string, stale *cacheEntry) (cachedResponse, error) {
+func (o *outboundClient) fetch(ctx context.Context, store *cacheStore, request cachedRequest, key string, stale *cacheEntry) (cachedResponse, error) {
 	p := request.policy
 	fetchTimeout := o.fetchTimeout
 	if p.fetchTimeout > 0 {
@@ -455,9 +500,9 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 		meta.FetchedAt = now
 		meta.LastAccess = now
 		if cachePermitted(freshnessHeaders, p.applicationData) {
-			_ = o.store.updateMetadata(meta)
+			_ = store.updateMetadata(meta)
 		} else {
-			if err := o.store.remove(p.scope, key); err != nil {
+			if err := store.remove(p.scope, key); err != nil {
 				return cachedResponse{}, fmt.Errorf("remove prohibited cached response: %w", err)
 			}
 		}
@@ -511,7 +556,7 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 	state := "bypass"
 	permitted := cachePermitted(resp.Header, p.applicationData)
 	if request.cacheable && permitted {
-		admitted, putErr := o.store.putForRequest(ctx, meta, body, request.admit)
+		admitted, putErr := store.putForRequest(ctx, meta, body, request.admit)
 		if putErr == nil {
 			state = "miss"
 			return cachedResponse{Status: resp.StatusCode, Headers: meta.Headers, Body: body, State: state, Meta: meta, Key: key, AdmittedBytes: admitted}, nil
@@ -520,7 +565,7 @@ func (o *outboundClient) fetch(ctx context.Context, request cachedRequest, key s
 			return cachedResponse{}, fmt.Errorf("cache admission failed: %w", putErr)
 		}
 	} else if request.cacheable && stale != nil {
-		if err := o.store.remove(p.scope, key); err != nil {
+		if err := store.remove(p.scope, key); err != nil {
 			return cachedResponse{}, fmt.Errorf("remove prohibited cached response: %w", err)
 		}
 	}

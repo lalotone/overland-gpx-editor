@@ -65,6 +65,11 @@ type Config struct {
 	OfflineCacheDir        string
 	OfflineCacheMaxBytes   int64
 	OfflineCacheMaxEntries int
+	// OwnerCacheMaxBytes and OwnerCacheMaxEntries bound each owner's private
+	// response cache (place searches, exact elevation points), kept under
+	// the owner's data directory. Zero uses 64 MiB and 4096 entries.
+	OwnerCacheMaxBytes   int64
+	OwnerCacheMaxEntries int
 	// OfflineMode is "auto" or "cache-only". Cache-only never uses an
 	// outbound transport, including for elevation tile misses.
 	OfflineMode string
@@ -140,6 +145,8 @@ type Server struct {
 	nominatimURL    string
 	modes           *offlineModeController
 	cache           *cacheStore
+	ownerCaches     *ownerCaches
+	ownerScopes     map[string]bool
 	outbound        *outboundClient
 	providers       map[string]*providerPolicy
 	ctx             context.Context
@@ -308,9 +315,9 @@ func New(cfg Config) (*Server, error) {
 	nominatimGroup := newRateGroup(time.Second)
 	overpassGroup := newRateGroup(time.Second)
 	providers := map[string]*providerPolicy{
-		"fuel":   newProviderPolicy("fuel", "fuel", parsedURLs["fuel"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json"}, nil, true),
-		"places": newProviderPolicy("nominatim", "places", parsedURLs["nominatim"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 2<<20, []string{"application/json"}, nominatimGroup, false),
-		"pois":   newProviderPolicy("overpass", "pois", parsedURLs["overpass"], time.Hour, 7*24*time.Hour, 30*24*time.Hour, true, 8<<20, []string{"application/json"}, overpassGroup, true),
+		"fuel":   newProviderPolicy("fuel", "fuel", sharedProviderData, parsedURLs["fuel"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json"}, nil, true),
+		"places": newProviderPolicy("nominatim", "places", ownerProviderData, parsedURLs["nominatim"], 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 2<<20, []string{"application/json"}, nominatimGroup, false),
+		"pois":   newProviderPolicy("overpass", "pois", sharedProviderData, parsedURLs["overpass"], time.Hour, 7*24*time.Hour, 30*24*time.Hour, true, 8<<20, []string{"application/json"}, overpassGroup, true),
 	}
 	providers["fuel"].maxFresh = 24 * time.Hour
 	providers["fuel"].applicationData = true
@@ -373,6 +380,10 @@ func New(cfg Config) (*Server, error) {
 	outboundHTTPClient := *client
 	outboundHTTPClient.Timeout = 0
 	s.outbound = newOutboundClientWithModes(modes, cache, &outboundHTTPClient, rootCtx, &s.wg, ua)
+	// Owner-scoped responses persist only where the shared cache does: an
+	// operator who disabled persistence gets none of it.
+	s.ownerCaches = newOwnerCaches(spaces, cache.writable, cfg.OwnerCacheMaxBytes, cfg.OwnerCacheMaxEntries)
+	s.outbound.ownerStore = s.ownerCaches.storeFor
 	if client.Timeout > 0 && client.Timeout < s.outbound.fetchTimeout {
 		s.outbound.fetchTimeout = client.Timeout
 	}
@@ -403,10 +414,16 @@ func New(cfg Config) (*Server, error) {
 			}
 			return nil, err
 		}
-		s.elevation.policy = newProviderPolicy("elevation", "elevation", elevationBase, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, maxElevationBodyBytes, []string{"application/json", "text/plain"}, newConcurrentRateGroup(0, 2), true)
+		s.elevation.policy = newProviderPolicy("elevation", "elevation", ownerProviderData, elevationBase, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, maxElevationBodyBytes, []string{"application/json", "text/plain"}, newConcurrentRateGroup(0, 2), true)
 	}
 	if openFreeMapURL != nil {
 		s.openFreeMap = newOpenFreeMapManager(s, openFreeMapURL, cfg.OpenFreeMapAllowBulk)
+	}
+	s.ownerScopes = make(map[string]bool)
+	for _, policy := range s.providerPolicies() {
+		if policy.data == ownerProviderData {
+			s.ownerScopes[policy.scope] = true
+		}
 	}
 	s.packs, err = newPackManager(s)
 	if err != nil {
@@ -479,6 +496,7 @@ func (s *Server) Close() error {
 		routingErr = errors.Join(s.broom.close(), s.broom.closeSessions())
 	}
 	s.cache.flushAccesses()
+	ownerCacheErr := s.ownerCaches.close()
 	var tileCacheErr error
 	if s.elevation.tiles != nil {
 		tileCacheErr = s.elevation.tiles.closeCache()
@@ -486,7 +504,26 @@ func (s *Server) Close() error {
 	s.library.mu.Lock()
 	spacesErr := s.spaces.close()
 	s.library.mu.Unlock()
-	return errors.Join(spacesErr, s.cache.close(), tileCacheErr, routingErr)
+	return errors.Join(ownerCacheErr, spacesErr, s.cache.close(), tileCacheErr, routingErr)
+}
+
+// providerPolicies lists every policy the server can send a request through,
+// so their data classification can be checked in one place.
+func (s *Server) providerPolicies() []*providerPolicy {
+	var policies []*providerPolicy
+	for _, policy := range s.providers {
+		policies = append(policies, policy)
+	}
+	if s.elevation != nil && s.elevation.policy != nil {
+		policies = append(policies, s.elevation.policy)
+	}
+	if s.openFreeMap != nil {
+		policies = append(policies, s.openFreeMap.policy)
+	}
+	for _, adapter := range s.rasterMaps {
+		policies = append(policies, adapter.policy)
+	}
+	return policies
 }
 
 func valueOrDefault(value, fallback string) string {
@@ -496,12 +533,12 @@ func valueOrDefault(value, fallback string) string {
 	return strings.TrimSpace(value)
 }
 
-func newProviderPolicy(name, scope string, base *url.URL, fresh, stale, retention time.Duration, staleOnError bool, maxBody int64, contentTypes []string, group *rateGroup, packEligible bool) *providerPolicy {
+func newProviderPolicy(name, scope string, data providerData, base *url.URL, fresh, stale, retention time.Duration, staleOnError bool, maxBody int64, contentTypes []string, group *rateGroup, packEligible bool) *providerPolicy {
 	allowStale := stale >= 0
 	if stale < 0 {
 		stale = 0
 	}
-	return &providerPolicy{name: name, scope: scope, baseURL: base, sourceFingerprint: sourceFingerprint(base), fallbackFresh: fresh, maxStale: stale, allowStale: allowStale, retention: retention, staleOnError: staleOnError, maxBody: maxBody, contentTypes: contentTypes, group: group, packEligible: packEligible, approvedHosts: map[string]struct{}{strings.ToLower(base.Host): {}}}
+	return &providerPolicy{name: name, scope: scope, data: data, baseURL: base, sourceFingerprint: sourceFingerprint(base), fallbackFresh: fresh, maxStale: stale, allowStale: allowStale, retention: retention, staleOnError: staleOnError, maxBody: maxBody, contentTypes: contentTypes, group: group, packEligible: packEligible, approvedHosts: map[string]struct{}{strings.ToLower(base.Host): {}}}
 }
 
 // mcpBrowserEventsPath is the long-lived MCP browser command stream. It is

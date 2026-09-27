@@ -255,7 +255,7 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		if err != nil {
 			return nil, err
 		}
-		httpClient.Transport = broomIndexTransport{base: httpClient.Transport, outbound: cfg.IndexCache, policy: newProviderPolicy("routing-index", "routing-index", indexURL, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json", "application/geo+json"}, newRateGroup(0), true)}
+		httpClient.Transport = broomIndexTransport{base: httpClient.Transport, outbound: cfg.IndexCache, policy: newProviderPolicy("routing-index", "routing-index", sharedProviderData, indexURL, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json", "application/geo+json"}, newRateGroup(0), true)}
 	}
 	zeroDistance := 0.0
 	manager, err := broom.New(broom.Options{

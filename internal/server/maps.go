@@ -51,7 +51,7 @@ func newRasterAdapters() (map[string]*rasterAdapter, error) {
 		if err != nil {
 			return nil, err
 		}
-		policy := newProviderPolicy("map-"+definition.name, "maps-"+definition.name, base, definition.fresh, definition.stale, definition.retention, definition.staleError, 2<<20, []string{"image/png", "image/jpeg", "image/webp"}, newConcurrentRateGroup(0, definition.concurrency), false)
+		policy := newProviderPolicy("map-"+definition.name, "maps-"+definition.name, sharedProviderData, base, definition.fresh, definition.stale, definition.retention, definition.staleError, 2<<20, []string{"image/png", "image/jpeg", "image/webp"}, newConcurrentRateGroup(0, definition.concurrency), false)
 		if definition.name == "opentopo" {
 			for _, host := range []string{"a.tile.opentopomap.org", "b.tile.opentopomap.org", "c.tile.opentopomap.org"} {
 				policy.approvedHosts[host] = struct{}{}
@@ -207,7 +207,7 @@ type openFreeMapGeneration struct {
 }
 
 func newOpenFreeMapManager(server *Server, base *url.URL, allowBulk bool) *openFreeMapManager {
-	policy := newProviderPolicy("openfreemap-compatible", "maps-openfreemap", base, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 16<<20,
+	policy := newProviderPolicy("openfreemap-compatible", "maps-openfreemap", sharedProviderData, base, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 16<<20,
 		[]string{"application/json", "application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream", "image/png", "image/jpeg", "image/webp"}, newConcurrentRateGroup(0, 4), allowBulk)
 	m := &openFreeMapManager{server: server, base: base, policy: policy, allowBulk: allowBulk, initialActivation: make(chan struct{})}
 	m.loadGeneration()

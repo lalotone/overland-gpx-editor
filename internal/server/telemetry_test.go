@@ -39,7 +39,7 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 
 	var logs lockedLogBuffer
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		OfflineCacheDir:  t.TempDir(),
 		NominatimURL:     upstream.URL,
 		StatsLogInterval: 5 * time.Millisecond,
@@ -56,14 +56,14 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 		url: upstream.URL + "/search?q=" + privateQuery, params: "q=" + privateQuery,
 		cacheable: true,
 	}
-	if response, err := s.outbound.do(context.Background(), request); err != nil || response.State != "miss" {
+	if response, err := s.outbound.do(WithOwner(context.Background(), LocalOwner), request); err != nil || response.State != "miss" {
 		t.Fatalf("initial request = state %q, err %v", response.State, err)
 	}
-	if response, err := s.outbound.do(context.Background(), request); err != nil || response.State != "hit" {
+	if response, err := s.outbound.do(WithOwner(context.Background(), LocalOwner), request); err != nil || response.State != "hit" {
 		t.Fatalf("cached request = state %q, err %v", response.State, err)
 	}
 	s.packs.mu.Lock()
-	s.packs.packs["private-pack-id"] = &packManifest{Name: "private Pyrenees trip", State: "complete"}
+	s.packs.packs["private-pack-id"] = &packManifest{owner: LocalOwner, Name: "private Pyrenees trip", State: "complete"}
 	s.packs.mu.Unlock()
 
 	deadline := time.Now().Add(time.Second)
@@ -78,7 +78,9 @@ func TestOperationalStatsArePeriodicAndPrivate(t *testing.T) {
 		"OFFLINE STATISTICS (cumulative) - mode: auto",
 		"SECTION          METRIC            VALUE",
 		"Cache storage    Persistence       writable",
-		"Cache responses  Store gets        1 hit / 1 miss (50.0% hit rate)",
+		"Owner caches     Open              1 store / 1 entry",
+		"                 Store gets        1 hit / 1 miss (50.0% hit rate)",
+		"Cache responses  Store gets        0 hits / 0 misses (n/a hit rate)",
 		"Request outcomes  1 hit / 1 miss / 0 stale / 0 revalidated / 0 bypasses",
 		"Outbound         Requests          1 request / 0 failures / 0 offline misses",
 		"Packs            Total             1 pack",
@@ -105,6 +107,7 @@ func TestOperationalStatsFormatting(t *testing.T) {
 	report := formatOperationalStats(
 		modeCacheOnly,
 		cacheStats{Writable: true, Entries: 1234, Bytes: 256 << 20, Quota: 1 << 30, Reserved: 16 << 20, Hits: 9, Misses: 1},
+		ownerCacheStats{Open: 2, Entries: 40, Bytes: 96 << 10, Hits: 3, Misses: 1},
 		outboundStats{
 			CacheHits: 8, CacheMisses: 2, CacheStale: 1, CacheRevalidated: 3, CacheBypass: 4,
 			OfflineMisses: 5, QueueRejected: 3, NetworkRequests: 12, NetworkFailures: 2,
@@ -142,7 +145,7 @@ func TestOperationalStatsFormatting(t *testing.T) {
 }
 
 func TestNegativeStatsLogIntervalIsRejected(t *testing.T) {
-	if _, err := New(Config{GPXDir: t.TempDir(), StatsLogInterval: -time.Second}); err == nil {
+	if _, err := New(Config{DataDir: t.TempDir(), StatsLogInterval: -time.Second}); err == nil {
 		t.Fatal("New accepted a negative stats log interval")
 	}
 }

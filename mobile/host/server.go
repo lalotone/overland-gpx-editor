@@ -90,7 +90,7 @@ func start(data, address string, assets fs.FS, native Native, openBackend func(s
 	}
 	h.StartURL = h.URL + "/mobile/start?token=" + h.token
 	config := server.Config{
-		GPXDir: filepath.Join(data, "gpx"), Assets: assets,
+		DataDir: filepath.Join(data, "gpx"), Assets: assets,
 		OfflineCacheDir: filepath.Join(data, "responses"), UseAvailableStorage: true, OfflineCacheMaxEntries: 200000,
 		ElevationTiles: true, ElevationTileCache: filepath.Join(data, "terrain"),
 		RoutingCacheDir: filepath.Join(data, "routing"), RoutingJobs: 1, RoutingConcurrency: 1,

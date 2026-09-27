@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/lalotone/overland-gpx-editor/cmd/overland/identity"
 	"github.com/lalotone/overland-gpx-editor/internal/passkeyauth"
 	"github.com/lalotone/overland-gpx-editor/internal/server"
 )
@@ -18,6 +20,7 @@ const testAuthOrigin = "http://localhost:8000"
 type authStack struct {
 	handler http.Handler
 	store   *passkeyauth.Store
+	server  *server.Server
 }
 
 // newAuthStack is the real backend behind the passkey guard, with a stand-in
@@ -25,8 +28,11 @@ type authStack struct {
 func newAuthStack(t *testing.T) *authStack {
 	t.Helper()
 	srv, err := server.New(server.Config{
-		GPXDir:        t.TempDir(),
+		DataDir:       t.TempDir(),
+		RequireOwner:  true,
 		ElevationHost: "http://elevation.invalid",
+		// serve does the same: the auth origin is the UI origin.
+		TrustedUIOrigin: testAuthOrigin,
 		Assets: fstest.MapFS{
 			"index.html":        {Data: []byte("<html><head></head><title>GPX Editor</title></html>")},
 			"assets/index-1.js": {Data: []byte("console.log('GPX Editor')")},
@@ -42,16 +48,24 @@ func newAuthStack(t *testing.T) *authStack {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	handler, _, err := protectWithPasskeys(srv, store, testAuthOrigin)
+	secret, err := identity.LoadOrCreate(filepath.Join(t.TempDir(), "owner.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &authStack{handler: handler, store: store}
+	handler, _, err := protectWithPasskeys(srv, store, testAuthOrigin, newOwnerResolver(secret, []string{"Operator"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &authStack{handler: handler, store: store, server: srv}
 }
 
 func (s *authStack) session(t *testing.T) string {
+	return s.sessionFor(t, "rider")
+}
+
+func (s *authStack) sessionFor(t *testing.T, name string) string {
 	t.Helper()
-	acct, err := s.store.CreateUser("rider")
+	acct, err := s.store.CreateUser(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +77,11 @@ func (s *authStack) session(t *testing.T) string {
 }
 
 func (s *authStack) do(method, target, session string, header map[string]string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, nil)
+	return s.send(method, target, session, header, nil)
+}
+
+func (s *authStack) send(method, target, session string, header map[string]string, body io.Reader) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, body)
 	req.Host = "localhost:8000"
 	for k, v := range header {
 		req.Header.Set(k, v)
@@ -136,6 +154,78 @@ func TestSignedInRequestsReachTheApp(t *testing.T) {
 	// Cross-site writes stay refused even with a session.
 	if w := stack.do("POST", "/upload", session, map[string]string{"Origin": "https://evil.example"}); w.Code != http.StatusForbidden {
 		t.Fatalf("cross-site upload = %d", w.Code)
+	}
+}
+
+// Each account gets its own library. The wrapper attaches an opaque owner,
+// so one user's track is another user's 404, and the backend built with
+// RequireOwner refuses the same routes when reached without the wrapper.
+func TestEachAccountHasItsOwnLibrary(t *testing.T) {
+	stack := newAuthStack(t)
+	alice, bob := stack.sessionFor(t, "alice"), stack.sessionFor(t, "bob")
+	same := map[string]string{"Origin": testAuthOrigin, "Content-Type": "application/xml"}
+	if w := stack.send("PUT", "/gpx/trip.gpx", alice, same, strings.NewReader("<gpx/>")); w.Code != http.StatusOK {
+		t.Fatalf("alice save = %d %s", w.Code, w.Body)
+	}
+	if w := stack.do("GET", "/files", alice, nil); !strings.Contains(w.Body.String(), "trip.gpx") {
+		t.Fatalf("alice files = %s", w.Body)
+	}
+	if w := stack.do("GET", "/files", bob, nil); strings.Contains(w.Body.String(), "trip.gpx") {
+		t.Fatalf("bob sees alice's track: %s", w.Body)
+	}
+	if w := stack.do("GET", "/gpx/trip.gpx", bob, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("bob read alice's track = %d", w.Code)
+	}
+	if w := stack.do("DELETE", "/gpx/trip.gpx", bob, map[string]string{"Origin": testAuthOrigin}); w.Code != http.StatusNotFound {
+		t.Fatalf("bob delete alice's track = %d", w.Code)
+	}
+	if w := stack.do("GET", "/gpx/trip.gpx", alice, nil); w.Code != http.StatusOK {
+		t.Fatalf("alice's track after bob's attempts = %d", w.Code)
+	}
+	// Bypassing the wrapper never yields the local library.
+	req := httptest.NewRequest("GET", "/files", nil)
+	w := httptest.NewRecorder()
+	stack.server.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("unwrapped owner route = %d %s", w.Code, w.Body)
+	}
+	if w := stack.do("GET", "/healthz", "", nil); w.Code != http.StatusNoContent {
+		t.Fatalf("healthz = %d", w.Code)
+	}
+}
+
+func TestOnlyOperatorsChangeServerWideState(t *testing.T) {
+	stack := newAuthStack(t)
+	rider, operator := stack.sessionFor(t, "rider"), stack.sessionFor(t, "operator")
+	header := map[string]string{"Origin": testAuthOrigin, "Content-Type": "application/json", "X-GPX-Editor": "1"}
+	body := func() io.Reader { return strings.NewReader(`{"mode":"cache-only"}`) }
+	if w := stack.send("PUT", "/offline/mode", rider, header, body()); w.Code != http.StatusForbidden {
+		t.Fatalf("rider changed the offline mode: %d %s", w.Code, w.Body)
+	}
+	// The match is case-insensitive, as the account database's is.
+	if w := stack.send("PUT", "/offline/mode", operator, header, body()); w.Code != http.StatusOK {
+		t.Fatalf("operator = %d %s", w.Code, w.Body)
+	}
+	// Ordinary users keep their own offline data.
+	if w := stack.do("GET", "/offline/packs", rider, map[string]string{"Sec-Fetch-Site": "same-origin"}); w.Code != http.StatusOK {
+		t.Fatalf("rider packs = %d %s", w.Code, w.Body)
+	}
+}
+
+func TestOwnerResolverCachesSessionsAndForgetsRevokedOnes(t *testing.T) {
+	stack := newAuthStack(t)
+	session := stack.session(t)
+	if w := stack.do("GET", "/files", session, nil); w.Code != http.StatusOK {
+		t.Fatalf("first = %d", w.Code)
+	}
+	if w := stack.do("GET", "/files", session, nil); w.Code != http.StatusOK {
+		t.Fatalf("cached = %d", w.Code)
+	}
+	if _, err := stack.store.DeleteSessions("rider"); err != nil {
+		t.Fatal(err)
+	}
+	if w := stack.do("GET", "/files", session, nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked session still served: %d", w.Code)
 	}
 }
 

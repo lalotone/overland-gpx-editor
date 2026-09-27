@@ -11,7 +11,7 @@ import (
 
 func TestDisabledMCPWithFrontend(t *testing.T) {
 	srv, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
 		Assets: fstest.MapFS{"index.html": {Data: []byte("<!doctype html><head></head><body>app</body>")}},
 	})
 	if err != nil {
@@ -48,7 +48,7 @@ func TestMainRouterServesOnlyTheBrowserBridge(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	enabled, err := New(Config{
-		GPXDir:            t.TempDir(),
+		DataDir:           t.TempDir(),
 		ElevationHost:     "http://elevation.invalid",
 		MCPBrowserHandler: marker,
 	})
@@ -74,7 +74,7 @@ func TestMainRouterServesOnlyTheBrowserBridge(t *testing.T) {
 		}
 	}
 
-	disabled, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid"})
+	disabled, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestBrowserBridgeRejectsNonLoopbackPeer(t *testing.T) {
 	}
 	t.Cleanup(bridge.Close)
 	srv, err := New(Config{
-		GPXDir:            t.TempDir(),
+		DataDir:           t.TempDir(),
 		ElevationHost:     "http://elevation.invalid",
 		MCPBrowserHandler: bridge,
 	})

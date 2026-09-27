@@ -51,7 +51,7 @@ func TestBroomAnnotateTrackOffline(t *testing.T) {
 	graph := filepath.Join(dir, "surfaces.broom")
 	_, err := broom.BuildUnion(t.Context(), inputs, graph, broom.UnionOptions{})
 	require.NoError(t, err)
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph, OfflineMode: "cache-only"})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph, OfflineMode: "cache-only"})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	points := []broom.Point{{Lon: 1.0001, Lat: 42}, {Lon: 1.001, Lat: 42}, {Lon: 1.0019, Lat: 42}}
@@ -106,7 +106,7 @@ func TestBroomAnnotateTrackOffline(t *testing.T) {
 }
 
 func TestBroomAnnotateTrackInputLimits(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), OfflineMode: "cache-only"})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), OfflineMode: "cache-only"})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	for _, body := range []string{

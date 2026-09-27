@@ -60,10 +60,10 @@ func (s *Server) logOperationalStats(logger *log.Logger) {
 	if s.elevation.tiles != nil {
 		tiles = s.elevation.tiles.stats()
 	}
-	logger.Print(formatOperationalStats(s.modes.mode(), cache, outbound, packs, tiles, tilesEnabled, tileDiskEnabled))
+	logger.Print(formatOperationalStats(s.modes.mode(), cache, s.ownerCaches.aggregate(), outbound, packs, tiles, tilesEnabled, tileDiskEnabled))
 }
 
-func formatOperationalStats(mode offlineMode, cache cacheStats, outbound outboundStats, packs packOperationalStats, tiles tileCacheStats, tilesEnabled, tileDiskEnabled bool) string {
+func formatOperationalStats(mode offlineMode, cache cacheStats, owners ownerCacheStats, outbound outboundStats, packs packOperationalStats, tiles tileCacheStats, tilesEnabled, tileDiskEnabled bool) string {
 	var report strings.Builder
 	fmt.Fprintf(&report, "OFFLINE STATISTICS (cumulative) - mode: %s\n", mode)
 	table := tabwriter.NewWriter(&report, 0, 4, 2, ' ', 0)
@@ -80,6 +80,8 @@ func formatOperationalStats(mode offlineMode, cache cacheStats, outbound outboun
 	row("", "Entries", counted(uint64(cache.Entries), "entry", "entries"))
 	row("", "Usage", formatUsage(cache.Bytes, cache.Quota))
 	row("", "Reserved", formatBytes(cache.Reserved))
+	row("Owner caches", "Open", fmt.Sprintf("%s / %s / %s", counted(uint64(owners.Open), "store", "stores"), counted(uint64(owners.Entries), "entry", "entries"), formatBytes(owners.Bytes)))
+	row("", "Store gets", fmt.Sprintf("%s / %s (%s hit rate)", counted(owners.Hits, "hit", "hits"), counted(owners.Misses, "miss", "misses"), formatRate(owners.Hits, owners.Hits+owners.Misses)))
 	row("Cache responses", "Store gets", fmt.Sprintf("%s / %s (%s hit rate)", counted(cache.Hits, "hit", "hits"), counted(cache.Misses, "miss", "misses"), formatRate(cache.Hits, cache.Hits+cache.Misses)))
 	row("", "Request outcomes", fmt.Sprintf("%s / %s / %s / %s / %s",
 		counted(outbound.CacheHits, "hit", "hits"), counted(outbound.CacheMisses, "miss", "misses"),

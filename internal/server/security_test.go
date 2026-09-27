@@ -11,7 +11,7 @@ import (
 
 func TestOfflineManagementSecurity(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		TrustedUIOrigin: "https://planner.example.test", OfflineAdminToken: "secret",
 	})
 	if err != nil {
@@ -63,7 +63,7 @@ func TestOfflineManagementSecurity(t *testing.T) {
 
 func TestOfflineManagementDoesNotTrustGeneralCORSOrigins(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		AllowedOrigins: []string{"https://allowed.example.test"}, TrustedUIOrigin: "https://planner.example.test",
 	})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestOfflineReadWithoutOriginTrustsOnlyTheSameOriginUI(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, err := New(Config{
-				GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+				DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 				TrustedUIOrigin: "https://planner.example.test", BehindProxy: tt.behindProxy,
 			})
 			if err != nil {
@@ -132,7 +132,7 @@ func TestOfflineReadWithoutOriginTrustsOnlyTheSameOriginUI(t *testing.T) {
 // origin-less remote read stays refused however same-origin it claims to be.
 func TestOfflineReadWithoutOriginNeedsADeclaredUIOrigin(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		AllowedOrigins: []string{"https://planner.example.test"}, BehindProxy: true,
 	})
 	if err != nil {
@@ -152,7 +152,7 @@ func TestOfflineReadWithoutOriginNeedsADeclaredUIOrigin(t *testing.T) {
 
 func TestOfflineManagementAllowsDefaultLoopbackBrowser(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestOfflineManagementAllowsDefaultLoopbackBrowser(t *testing.T) {
 
 func TestOfflineManagementRejectsReboundOrForgedDefaultOrigins(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestOfflineStatusContainsOnlyPackAggregates(t *testing.T) {
 	s := newTestServer(t)
 	id := strings.Repeat("a", 32)
 	s.packs.mu.Lock()
-	s.packs.packs[id] = &packManifest{ID: id, Name: "private trip", State: "running"}
+	s.packs.packs[id] = &packManifest{ID: id, owner: LocalOwner, Name: "private trip", State: "running"}
 	s.packs.mu.Unlock()
 	rec := do(t, s, http.MethodGet, "/offline/status", nil)
 	if rec.Code != http.StatusOK {
@@ -237,7 +237,7 @@ func TestOfflineStatusContainsOnlyPackAggregates(t *testing.T) {
 func TestTrafficGeneratingRoutesRejectRemoteRelayRequests(t *testing.T) {
 	var calls atomic.Int64
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			calls.Add(1)
 			return nil, errorsNew("unexpected transport")
@@ -292,7 +292,7 @@ func TestRemoteSameOriginFetchMetadataAllowsLegitimateDataAndMapGets(t *testing.
 		}, nil
 	})}
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		NominatimURL: "https://nominatim.example.test", HTTPClient: client,
 		AllowedOrigins: []string{"https://planner.example.test"},
 	})
@@ -319,7 +319,7 @@ func TestRemoteSameOriginFetchMetadataAllowsLegitimateDataAndMapGets(t *testing.
 func TestOutboundResourcesRejectReboundSameHostOrigin(t *testing.T) {
 	var calls atomic.Int64
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid",
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			calls.Add(1)
 			return nil, errorsNew("unexpected transport")
@@ -354,7 +354,7 @@ func TestProviderRequestsDoNotForwardInboundCredentials(t *testing.T) {
 		w.Write([]byte(`[]`))
 	}))
 	defer upstream.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", NominatimURL: upstream.URL, UpstreamContact: "ops@example.test"})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", NominatimURL: upstream.URL, UpstreamContact: "ops@example.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestRedirectToUnapprovedOriginIsRejected(t *testing.T) {
 	defer target.Close()
 	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, http.StatusFound) }))
 	defer redirector.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", FuelURL: redirector.URL})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", FuelURL: redirector.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestRedirectToUnapprovedOriginIsRejected(t *testing.T) {
 }
 
 func TestConfigurationValidation(t *testing.T) {
-	base := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid"}
+	base := Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid"}
 	tests := []Config{
 		func() Config { c := base; c.OfflineMode = "sometimes"; return c }(),
 		func() Config { c := base; c.OfflineCacheMaxBytes = -1; return c }(),
@@ -432,7 +432,7 @@ func TestBehindProxyWithdrawsLoopbackTrust(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			srv, err := New(Config{
-				GPXDir:        t.TempDir(),
+				DataDir:       t.TempDir(),
 				ElevationHost: "http://elevation.invalid",
 				BehindProxy:   test.behindProxy,
 			})
@@ -456,7 +456,7 @@ func TestBehindProxyWithdrawsLoopbackTrust(t *testing.T) {
 
 func TestBehindProxyStillHonoursTheAdminToken(t *testing.T) {
 	srv, err := New(Config{
-		GPXDir:            t.TempDir(),
+		DataDir:           t.TempDir(),
 		ElevationHost:     "http://elevation.invalid",
 		BehindProxy:       true,
 		OfflineAdminToken: "s3cret",

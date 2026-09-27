@@ -67,10 +67,8 @@ func (e *cacheAdmissionRateError) Error() string { return "cache distinct-key ad
 type cacheStore struct {
 	dir                 string
 	entriesDir          string
-	packsDir            string
 	tmpDir              string
 	entriesRel          string
-	packsRel            string
 	tmpRel              string
 	root                *os.Root
 	removeFile          func(string) error
@@ -181,12 +179,10 @@ func openCacheStore(dir string, maxBytes int64, maxEntries int, enforceLimits bo
 		return nil, fmt.Errorf("secure offline cache: %w", err)
 	}
 	s.entriesRel = filepath.Join("v1", "entries")
-	s.packsRel = filepath.Join("v1", "packs")
 	s.tmpRel = filepath.Join("v1", "tmp")
 	s.entriesDir = filepath.Join(s.dir, s.entriesRel)
-	s.packsDir = filepath.Join(s.dir, s.packsRel)
 	s.tmpDir = filepath.Join(s.dir, s.tmpRel)
-	for _, path := range []string{s.entriesRel, s.packsRel, s.tmpRel} {
+	for _, path := range []string{s.entriesRel, s.tmpRel} {
 		if err := s.root.MkdirAll(path, 0o700); err != nil {
 			s.root.Close()
 			return nil, fmt.Errorf("create offline cache: %w", err)

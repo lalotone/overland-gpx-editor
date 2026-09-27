@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestMCPBrowserStreamFlushesThroughTheServerStack(t *testing.T) {
 	}
 	t.Cleanup(bridge.Close)
 	srv, err := server.New(server.Config{
-		GPXDir:            t.TempDir(),
+		DataDir:           t.TempDir(),
 		ElevationHost:     "http://elevation.invalid",
 		MCPBrowserHandler: bridge,
 	})
@@ -126,7 +127,7 @@ func TestMCPBrowserStreamFlushesThroughTheServerStack(t *testing.T) {
 
 func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 	for _, key := range []string{
-		"ADDR", "MCP", "GPX_DIR", "ELEVATION_HOST", "ELEVATION_DATASET",
+		"ADDR", "MCP", "DATA_DIR", "ELEVATION_HOST", "ELEVATION_DATASET",
 		"ELEVATION_TILES", "ELEVATION_TILE_ZOOM", "ELEVATION_TILE_CACHE",
 		"ELEVATION_TILE_CACHE_MAX_BYTES",
 		"NOMINATIM_URL", "OPENFREEMAP_URL", "OPENFREEMAP_ALLOW_BULK", "ALLOWED_ORIGINS", "STATS_LOG_INTERVAL",
@@ -146,8 +147,8 @@ func TestEmptyEnvironmentValuesUseDefaults(t *testing.T) {
 			if cmd.Bool("mcp") {
 				t.Error("mcp = true, want false")
 			}
-			if got := cmd.String("gpx-dir"); got != util.DefaultGPXDir() {
-				t.Errorf("gpx-dir = %q, want %q", got, util.DefaultGPXDir())
+			if got := cmd.String("data-dir"); got != util.DefaultDataDir() {
+				t.Errorf("data-dir = %q, want %q", got, util.DefaultDataDir())
 			}
 			if got := cmd.String("elevation-dataset"); got != "srtm30m" {
 				t.Errorf("elevation-dataset = %q, want srtm30m", got)
@@ -332,6 +333,20 @@ func TestParseCacheQuota(t *testing.T) {
 	}
 }
 
+func TestParseOptionalByteSize(t *testing.T) {
+	for _, none := range []string{"", "0", " 0 "} {
+		if bytes, err := parseOptionalByteSize(none); err != nil || bytes != 0 {
+			t.Fatalf("parseOptionalByteSize(%q) = %d, %v", none, bytes, err)
+		}
+	}
+	if bytes, err := parseOptionalByteSize("20GiB"); err != nil || bytes != 20<<30 {
+		t.Fatalf("explicit = %d, %v", bytes, err)
+	}
+	if _, err := parseOptionalByteSize("lots"); err == nil {
+		t.Fatal("invalid size was accepted")
+	}
+}
+
 func TestParseByteSize(t *testing.T) {
 	tests := map[string]int64{"1": 1, "1KiB": 1 << 10, "2MiB": 2 << 20, "1GiB": 1 << 30, "2MB": 2_000_000}
 	for input, want := range tests {
@@ -410,11 +425,22 @@ func TestRequireLoopbackAddrRefusesExposedMCP(t *testing.T) {
 
 func TestMCPRefusesToRunBehindAProxy(t *testing.T) {
 	cmd := &cli.Command{Name: "serve", Flags: Flags(), Action: Run}
-	err := cmd.Run(context.Background(), []string{"serve", "--mcp", "--behind-proxy", "--gpx-dir", t.TempDir()})
+	err := cmd.Run(context.Background(), []string{"serve", "--mcp", "--behind-proxy", "--data-dir", t.TempDir()})
 	if err == nil {
 		t.Fatal("MCP started behind a reverse proxy")
 	}
 	if !strings.Contains(err.Error(), "--behind-proxy") {
+		t.Fatalf("error = %v, want it to name the conflicting flag", err)
+	}
+}
+
+func TestMCPRefusesToRunWithAuth(t *testing.T) {
+	cmd := &cli.Command{Name: "serve", Flags: Flags(), Action: Run}
+	err := cmd.Run(context.Background(), []string{"serve", "--mcp", "--auth", "--auth-db", filepath.Join(t.TempDir(), "accounts.db"), "--data-dir", t.TempDir()})
+	if err == nil {
+		t.Fatal("MCP started on an authenticated server")
+	}
+	if !strings.Contains(err.Error(), "--auth") {
 		t.Fatalf("error = %v, want it to name the conflicting flag", err)
 	}
 }

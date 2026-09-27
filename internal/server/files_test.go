@@ -17,7 +17,7 @@ import (
 func newTestServer(t *testing.T, assets ...fstest.MapFS) *Server {
 	t.Helper()
 	cfg := Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationHost:    "http://elevation.invalid",
 		ElevationDataset: "srtm30m",
 	}
@@ -30,6 +30,24 @@ func newTestServer(t *testing.T, assets ...fstest.MapFS) *Server {
 	}
 	cleanupTestServer(t, s)
 	return s
+}
+
+// tracksDir is where an owner's GPX files land on disk. Tests reach past
+// the API to plant symlinks and check what a request left behind; the
+// directory is created on the owner's first use, so touch it first.
+func (s *Server) tracksDir(owner Owner) string {
+	if root, err := s.library.tracks(owner); err == nil {
+		root.Close()
+	}
+	return filepath.Join(s.dataDir, ownersDir, string(owner), ownerTracksDir)
+}
+
+// packsDir is where an owner's pack manifests are kept.
+func (s *Server) packsDir(owner Owner) string {
+	if root, err := s.spaces.open(owner); err == nil {
+		root.Close()
+	}
+	return filepath.Join(s.dataDir, ownersDir, string(owner), ownerPacksDir)
 }
 
 func cleanupTestServer(t *testing.T, s *Server) {
@@ -63,7 +81,7 @@ func TestConfigEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, err := New(Config{
-				GPXDir:        t.TempDir(),
+				DataDir:       t.TempDir(),
 				ElevationHost: "http://elevation.invalid",
 				NominatimURL:  tt.set,
 			})
@@ -125,7 +143,7 @@ func TestSafeGPXFilenameRejectsEscapes(t *testing.T) {
 
 func TestTraversalDeleteIsRefused(t *testing.T) {
 	s := newTestServer(t)
-	victim := filepath.Join(filepath.Dir(s.gpxDir), "victim.gpx")
+	victim := filepath.Join(filepath.Dir(s.tracksDir(LocalOwner)), "victim.gpx")
 	if err := os.WriteFile(victim, []byte("<gpx/>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +166,7 @@ func TestGPXRootRejectsSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(outside, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(s.gpxDir, "leak.gpx")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(s.tracksDir(LocalOwner), "leak.gpx")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
@@ -174,7 +192,7 @@ func TestSaveReplacesSymlinkWithoutFollowingIt(t *testing.T) {
 	if err := os.WriteFile(outside, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	inside := filepath.Join(s.gpxDir, "route.gpx")
+	inside := filepath.Join(s.tracksDir(LocalOwner), "route.gpx")
 	if err := os.Symlink(outside, inside); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -277,7 +295,7 @@ func TestUpload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
 	}
-	saved, err := os.ReadFile(filepath.Join(s.gpxDir, "morning-loop.gpx"))
+	saved, err := os.ReadFile(filepath.Join(s.tracksDir(LocalOwner), "morning-loop.gpx"))
 	if err != nil || string(saved) != "<gpx/>" {
 		t.Fatalf("saved = %q, err = %v", saved, err)
 	}
@@ -301,7 +319,7 @@ func TestUploadDoesNotFollowSymlink(t *testing.T) {
 	if err := os.WriteFile(outside, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(s.gpxDir, "route.gpx")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(s.tracksDir(LocalOwner), "route.gpx")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
@@ -320,7 +338,7 @@ func TestUploadDoesNotFollowSymlink(t *testing.T) {
 
 func TestUploadDoesNotReplaceExistingFile(t *testing.T) {
 	s := newTestServer(t)
-	path := filepath.Join(s.gpxDir, "route.gpx")
+	path := filepath.Join(s.tracksDir(LocalOwner), "route.gpx")
 	const original = "<gpx><metadata><name>original</name></metadata></gpx>"
 	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
@@ -371,7 +389,7 @@ func TestConcurrentUploadsDoNotReplace(t *testing.T) {
 	if succeeded != 1 || conflicted != 1 {
 		t.Fatalf("succeeded = %d, conflicted = %d; want 1 each", succeeded, conflicted)
 	}
-	content, err := os.ReadFile(filepath.Join(s.gpxDir, "route.gpx"))
+	content, err := os.ReadFile(filepath.Join(s.tracksDir(LocalOwner), "route.gpx"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,11 +412,11 @@ func TestUploadRejectsNonGPX(t *testing.T) {
 func TestListingSkipsNonGPXAndTempFiles(t *testing.T) {
 	s := newTestServer(t)
 	for _, name := range []string{"a.gpx", "b.GPX", "notes.txt", ".tmp-123.gpx"} {
-		if err := os.WriteFile(filepath.Join(s.gpxDir, name), []byte("<gpx/>"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(s.tracksDir(LocalOwner), name), []byte("<gpx/>"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(s.gpxDir, "nested.gpx"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(s.tracksDir(LocalOwner), "nested.gpx"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,7 +430,7 @@ func TestListingSkipsNonGPXAndTempFiles(t *testing.T) {
 
 func TestCORS(t *testing.T) {
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationHost:    "http://elevation.invalid",
 		ElevationDataset: "srtm30m",
 		AllowedOrigins:   []string{"https://planner.example.test"},
@@ -461,7 +479,7 @@ func TestCrossOriginWritesAreRefused(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body)
 	}
-	if _, err := os.Stat(filepath.Join(s.gpxDir, "track.gpx")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(s.tracksDir(LocalOwner), "track.gpx")); !os.IsNotExist(err) {
 		t.Fatalf("cross-origin write created a file: %v", err)
 	}
 
@@ -484,7 +502,7 @@ func TestCrossOriginWritesAreRefused(t *testing.T) {
 
 func TestConfiguredOriginCanWrite(t *testing.T) {
 	s, err := New(Config{
-		GPXDir:         t.TempDir(),
+		DataDir:        t.TempDir(),
 		ElevationHost:  "http://elevation.invalid",
 		AllowedOrigins: []string{"https://planner.example.test/"},
 	})
@@ -518,7 +536,7 @@ func TestLoopbackSameOriginCanWrite(t *testing.T) {
 
 func TestInvalidAllowedOriginIsRejected(t *testing.T) {
 	_, err := New(Config{
-		GPXDir:         t.TempDir(),
+		DataDir:        t.TempDir(),
 		AllowedOrigins: []string{"https://example.test/path"},
 	})
 	if err == nil {

@@ -103,7 +103,11 @@ type tileStore struct {
 	index    map[tileKey]*list.Element
 	inflight map[tileKey]*tileFetch
 
-	prefetch prefetchState
+	// One prefetch per owner: a newer request replaces that owner's older
+	// one, not everyone's. Bounded, so a crowd of one-off callers cannot
+	// hold a state each forever.
+	prefetchMu sync.Mutex
+	prefetches map[Owner]*prefetchState
 
 	diskMu          sync.Mutex
 	diskPins        map[string]map[string]struct{}
@@ -224,11 +228,55 @@ func (s *tileStore) configureLifecycle(modes *offlineModeController, ctx context
 }
 
 func (s *tileStore) close() {
-	s.prefetch.mu.Lock()
-	if s.prefetch.cancel != nil {
-		s.prefetch.cancel()
+	s.prefetchMu.Lock()
+	defer s.prefetchMu.Unlock()
+	for _, prefetch := range s.prefetches {
+		prefetch.mu.Lock()
+		if prefetch.cancel != nil {
+			prefetch.cancel()
+		}
+		prefetch.mu.Unlock()
 	}
-	s.prefetch.mu.Unlock()
+}
+
+// maxPrefetchOwners bounds the prefetch states kept in memory.
+const maxPrefetchOwners = 256
+
+// prefetchFor returns the owner's prefetch state, creating it on first use.
+// Past the bound the least recently used idle state goes; if every one is
+// running, the oldest is cancelled, which costs its owner a re-request.
+func (s *tileStore) prefetchFor(owner Owner) *prefetchState {
+	s.prefetchMu.Lock()
+	defer s.prefetchMu.Unlock()
+	if s.prefetches == nil {
+		s.prefetches = make(map[Owner]*prefetchState)
+	}
+	if state := s.prefetches[owner]; state != nil {
+		state.lastUse = time.Now()
+		return state
+	}
+	if len(s.prefetches) >= maxPrefetchOwners {
+		var evict Owner
+		var evictState *prefetchState
+		for candidate, state := range s.prefetches {
+			state.mu.Lock()
+			better := evictState == nil || (!state.running && evictState.running) || (state.running == evictState.running && state.lastUse.Before(evictState.lastUse))
+			state.mu.Unlock()
+			if better {
+				evict, evictState = candidate, state
+			}
+		}
+		evictState.mu.Lock()
+		if evictState.cancel != nil {
+			evictState.cancel()
+			evictState.cancel = nil
+		}
+		evictState.mu.Unlock()
+		delete(s.prefetches, evict)
+	}
+	state := &prefetchState{lastUse: time.Now()}
+	s.prefetches[owner] = state
+	return state
 }
 
 func (s *tileStore) closeCache() error {
@@ -762,6 +810,7 @@ type prefetchProgress struct {
 
 type prefetchState struct {
 	mu         sync.Mutex
+	lastUse    time.Time
 	cancel     context.CancelFunc
 	running    bool
 	done       int
@@ -801,22 +850,24 @@ func (s *tileStore) have(key tileKey) bool {
 }
 
 // startPrefetch pulls every tile covering the box in the background. A newer
-// request replaces an older one: the map has moved, and the tiles for where
-// it was are no longer the ones wanted.
-func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProgress {
+// request from the same owner replaces their older one: the map has moved,
+// and the tiles for where it was are no longer the ones wanted. Other
+// owners' prefetches are untouched; the tiles themselves are shared.
+func (s *tileStore) startPrefetch(owner Owner, south, west, north, east float64) prefetchProgress {
 	x0, y0, x1, y1 := s.tileRange(south, west, north, east)
 	world := int(math.Exp2(float64(s.zoom)))
 	count := (x1 - x0 + 1) * (y1 - y0 + 1)
 
-	s.prefetch.mu.Lock()
-	defer s.prefetch.mu.Unlock()
+	prefetch := s.prefetchFor(owner)
+	prefetch.mu.Lock()
+	defer prefetch.mu.Unlock()
 
-	if s.prefetch.cancel != nil {
-		s.prefetch.cancel()
-		s.prefetch.cancel = nil
+	if prefetch.cancel != nil {
+		prefetch.cancel()
+		prefetch.cancel = nil
 	}
-	s.prefetch.generation++
-	generation := s.prefetch.generation
+	prefetch.generation++
+	generation := prefetch.generation
 
 	// Zoomed out, the view runs to thousands of tiles — the planner opens at a
 	// whole-province zoom, where refusing outright would mean it never caches
@@ -846,23 +897,23 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 		}
 	}
 
-	s.prefetch.skipped = false
-	s.prefetch.clamped, s.prefetch.reason = clamped, reason
-	s.prefetch.done, s.prefetch.total = 0, len(missing)
+	prefetch.skipped = false
+	prefetch.clamped, prefetch.reason = clamped, reason
+	prefetch.done, prefetch.total = 0, len(missing)
 	if len(missing) == 0 {
-		s.prefetch.running = false
+		prefetch.running = false
 		return prefetchProgress{Running: false, Clamped: clamped, Reason: reason}
 	}
 	if s.modes.mode() == modeCacheOnly {
-		s.prefetch.running = false
-		s.prefetch.skipped = true
-		s.prefetch.reason = "cache-only mode: uncached tiles were not fetched"
-		return prefetchProgress{Running: false, Total: len(missing), Skipped: true, Reason: s.prefetch.reason}
+		prefetch.running = false
+		prefetch.skipped = true
+		prefetch.reason = "cache-only mode: uncached tiles were not fetched"
+		return prefetchProgress{Running: false, Total: len(missing), Skipped: true, Reason: prefetch.reason}
 	}
 
 	ctx, cancel := context.WithCancel(s.ctx)
-	s.prefetch.cancel = cancel
-	s.prefetch.running = true
+	prefetch.cancel = cancel
+	prefetch.running = true
 
 	s.wg.Add(1)
 	go func() {
@@ -879,20 +930,20 @@ func (s *tileStore) startPrefetch(south, west, north, east float64) prefetchProg
 				// concurrency limit, so a prefetch and a live lookup asking
 				// for the same tile still only fetch it once.
 				s.grid(ctx, k)
-				s.prefetch.mu.Lock()
-				if s.prefetch.generation == generation {
-					s.prefetch.done++
+				prefetch.mu.Lock()
+				if prefetch.generation == generation {
+					prefetch.done++
 				}
-				s.prefetch.mu.Unlock()
+				prefetch.mu.Unlock()
 			}(key)
 		}
 		wg.Wait()
-		s.prefetch.mu.Lock()
-		if s.prefetch.generation == generation {
-			s.prefetch.running = false
-			s.prefetch.cancel = nil
+		prefetch.mu.Lock()
+		if prefetch.generation == generation {
+			prefetch.running = false
+			prefetch.cancel = nil
 		}
-		s.prefetch.mu.Unlock()
+		prefetch.mu.Unlock()
 		cancel()
 	}()
 
@@ -928,15 +979,21 @@ func (s *tileStore) downloadCapacity() int64 {
 	return availableStorageQuota(s.cacheDir, s.diskBytes)
 }
 
-func (s *tileStore) progress() prefetchProgress {
-	s.prefetch.mu.Lock()
-	defer s.prefetch.mu.Unlock()
+func (s *tileStore) progress(owner Owner) prefetchProgress {
+	s.prefetchMu.Lock()
+	prefetch := s.prefetches[owner]
+	s.prefetchMu.Unlock()
+	if prefetch == nil {
+		return prefetchProgress{}
+	}
+	prefetch.mu.Lock()
+	defer prefetch.mu.Unlock()
 	return prefetchProgress{
-		Running: s.prefetch.running,
-		Done:    s.prefetch.done,
-		Total:   s.prefetch.total,
-		Skipped: s.prefetch.skipped,
-		Clamped: s.prefetch.clamped,
-		Reason:  s.prefetch.reason,
+		Running: prefetch.running,
+		Done:    prefetch.done,
+		Total:   prefetch.total,
+		Skipped: prefetch.skipped,
+		Clamped: prefetch.clamped,
+		Reason:  prefetch.reason,
 	}
 }

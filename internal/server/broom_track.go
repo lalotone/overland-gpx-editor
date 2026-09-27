@@ -47,12 +47,12 @@ func broomTrackSurfaces(annotation *broom.TrackAnnotation) []broomSurfaceDistanc
 }
 
 func (s *broomRoutingService) annotateTrack(ctx context.Context, points []broom.Point) (broomTrackResponse, error) {
-	select {
-	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
-	default:
+	owner, _ := OwnerFrom(ctx)
+	release, ok := s.acquireSlot(owner)
+	if !ok {
 		return broomTrackResponse{}, &routingBusyError{}
 	}
+	defer release()
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	stopRootCancel := context.AfterFunc(s.ctx, cancel)

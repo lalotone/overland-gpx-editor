@@ -114,8 +114,23 @@ Two rules it is worth repeating here:
   `notifications`), because the agent has already been told `ok`.
 - **Treat every filename from the network as hostile.** Anything touching the
   library goes through `safeGPXFilename`, which refuses directory components
-  and non-`.gpx` names, then through `os.Root` so symlinks cannot escape
-  `GPX_DIR`. There is no authentication in front of it.
+  and non-`.gpx` names, then through the owner's `os.Root` so symlinks cannot
+  escape that owner's directory under `DATA_DIR`.
+- **Account details stay in the `serve` wrapper.** `internal/server` sees an
+  opaque `Owner` key and an operator mark, never a username, account ID or
+  handle; the key is derived in `cmd/overland/identity` from the handle and
+  `owner.key`. Never log an owner key, return it in a response or put it in
+  telemetry. No-auth `serve` and the mobile host run as `LocalOwner`.
+- **Private data is filed by owner; public data is shared.** Tracks, pack
+  manifests and owner-scoped provider responses live under
+  `owners/<owner>/`, and ownership comes from the location, not a field. Map
+  and terrain tiles, routing data, the fuel snapshot and POIs by area are
+  shared caches. Every provider policy declares which it is, and every route
+  is registered with a data class in `routes.go`; a test fails otherwise.
+  Another owner's object is a 404, never a 403.
+- **Server-wide state is the operator's.** Offline mode, routing regions,
+  pinning, pruning and the shared cache need `--auth-operator` or the admin
+  token under `--auth`; a user's own packs, profiles and cache do not.
 - **Passkey auth wraps the handler; it does not live in `internal/server`.**
   `serve --auth` puts `internal/passkeyauth` around everything in
   `cmd/overland/serve/auth.go`, so the mobile host stays unaffected and never

@@ -24,6 +24,7 @@ import {
   partsProgress,
   regionIdName,
   resourceTransferText,
+  ROUTING_OPERATOR_ONLY,
   routingDiagnosticsText,
   routingJobView,
 } from '../lib/offlineRegions'
@@ -230,6 +231,9 @@ export function OfflineRegionsDialog({
   const [routingBytes, setRoutingBytes] = useState<{ bytes: number; stale: boolean } | null>(null)
   const offline = runtime.offline?.mode === 'cache-only'
   const routingAvailable = downloads.available
+  // Routing regions are server-wide; only an operator changes them. Others
+  // see the state and download their own maps for the region.
+  const operator = runtime.offline?.operator !== false
 
   const back = () => {
     if (confirmRemove) setConfirmRemove(null)
@@ -450,14 +454,16 @@ export function OfflineRegionsDialog({
           <strong>{regionName(routingJob.regionId)}</strong>
           <small>{routingJob.upgrading ? 'Updating routing data for this version of Overland' : 'Routing data'}</small>
         </span>
-        <button
-          type="button"
-          className="btn btn-ghost btn-xs"
-          disabled={downloads.busyPack !== null}
-          onClick={() => void downloads.stopRouting()}
-        >
-          {routingJob.upgrading ? 'Pause update' : 'Stop'}
-        </button>
+        {operator && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs"
+            disabled={downloads.busyPack !== null}
+            onClick={() => void downloads.stopRouting()}
+          >
+            {routingJob.upgrading ? 'Pause update' : 'Stop'}
+          </button>
+        )}
       </header>
       <RoutingProgress job={routingJob} />
       {routingJob.upgrading && routing?.ready && <small>Your downloaded region stays available while it rebuilds.</small>}
@@ -518,7 +524,7 @@ export function OfflineRegionsDialog({
               ? 'Your downloaded region is available. Its routing update will resume when you go online.'
               : 'Your downloaded region is available. Finish its routing update to refresh road-access connectivity.'}
           </p>
-          {!offline && routing.regionId && (
+          {!offline && operator && routing.regionId && (
             <button type="button" className="btn btn-primary btn-sm" disabled={downloads.busyPack !== null} onClick={() => void downloads.useRegion(routing.regionId!)}>
               Resume routing update
             </button>
@@ -797,7 +803,7 @@ export function OfflineRegionsDialog({
 
     const statuses = Object.fromEntries(PACK_GROUPS.map(group => [group, groupStatus(downloads.packs, detailArea, group)])) as Record<ResourceGroup, GroupStatus>
     const missing: DownloadResource[] = [
-      ...(regionInstalled || regionRunning || !routingAvailable ? [] : ['routing' as const]),
+      ...(regionInstalled || regionRunning || !routingAvailable || !operator ? [] : ['routing' as const]),
       ...PACK_GROUPS.filter(group => statuses[group].state !== 'done' && statuses[group].state !== 'running' && statuses[group].state !== 'queued'),
     ]
     const nothingYet = !regionInstalled && !regionRunning && PACK_GROUPS.every(group => statuses[group].state === 'none')
@@ -846,7 +852,9 @@ export function OfflineRegionsDialog({
                   {planText ? ` · ${planText}` : ''}
                 </small>
               </span>
-              {regionRunning ? (
+              {!operator ? (
+                !regionInstalled && !regionRunning && <small className="offline-regions-muted">{ROUTING_OPERATOR_ONLY}</small>
+              ) : regionRunning ? (
                 <button type="button" className="btn btn-ghost btn-xs" disabled={downloads.busyPack !== null} onClick={() => void downloads.stopRouting()}>
                   <Icon name="stop" />Stop
                 </button>

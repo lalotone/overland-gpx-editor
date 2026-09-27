@@ -21,7 +21,7 @@ func TestDeviceStoragePolicyReplacesFixedCacheBudgets(t *testing.T) {
 	if !supported {
 		t.Skip("filesystem space reporting is unavailable on this platform")
 	}
-	s, err := New(Config{GPXDir: dir, OfflineCacheDir: t.TempDir(), UseAvailableStorage: true, OfflineCacheMaxBytes: 1, OfflineCacheMaxEntries: 200000, ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: 1})
+	s, err := New(Config{DataDir: dir, OfflineCacheDir: t.TempDir(), UseAvailableStorage: true, OfflineCacheMaxBytes: 1, OfflineCacheMaxEntries: 200000, ElevationTiles: true, ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: 1})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	assert.Equal(t, int64(math.MaxInt64), s.cache.maxBytes)

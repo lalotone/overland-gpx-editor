@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lalotone/overland-gpx-editor/cmd/overland/identity"
 	"github.com/lalotone/overland-gpx-editor/cmd/overland/util"
 	"github.com/lalotone/overland-gpx-editor/internal/mcp"
 	"github.com/lalotone/overland-gpx-editor/internal/passkeyauth"
@@ -66,8 +67,13 @@ func Flags() []cli.Flag {
 			Usage:   "public URL browsers use with --auth (https://host, or http://localhost:PORT); passkeys bind to its host name (default: http://localhost:<--addr port>)",
 			Sources: util.NonEmptyEnv("AUTH_ORIGIN"),
 		},
+		&cli.StringSliceFlag{
+			Name:    "auth-operator",
+			Usage:   "username allowed to change server-wide state with --auth (offline mode, routing regions, cache); repeatable",
+			Sources: util.NonEmptyEnv("AUTH_OPERATORS"),
+		},
 		util.AuthDBFlag(),
-		util.GPXDirFlag(),
+		util.DataDirFlag(),
 		&cli.StringFlag{
 			Name:    "elevation-host",
 			Usage:   "self-hosted opentopodata-style DEM service; empty uses tiles or Open-Meteo",
@@ -114,6 +120,7 @@ func Flags() []cli.Flag {
 		// country's maps need several hundred thousand entries.
 		&cli.IntFlag{Name: "offline-cache-max-entries", Usage: "response-cache entry limit (about 0.9 KB of memory each when used)", Value: 1000000, Sources: util.IntEnv("OFFLINE_CACHE_MAX_ENTRIES")},
 		&cli.StringFlag{Name: "offline-mode", Usage: "outbound mode: auto or cache-only", Value: "auto", Sources: util.NonEmptyEnv("OFFLINE_MODE")},
+		&cli.StringFlag{Name: "owner-download-max-bytes", Usage: `cap on one signed-in account's trip-pack storage (for example 20GiB); 0 is no cap`, Value: "0", Sources: util.NonEmptyEnv("OWNER_DOWNLOAD_MAX_BYTES")},
 		&cli.DurationFlag{Name: "stats-log-interval", Usage: "interval for privacy-safe aggregate cache and outbound stats (0 disables)", Value: time.Minute, Sources: util.NonEmptyEnv("STATS_LOG_INTERVAL")},
 		&cli.StringFlag{Name: "upstream-contact", Usage: "operator contact included in outbound User-Agent", Value: "https://github.com/lalotone/overland-gpx-editor", Sources: util.NonEmptyEnv("UPSTREAM_CONTACT")},
 		&cli.StringFlag{Name: "trusted-ui-origin", Usage: "exact remote UI origin allowed to manage offline data", Sources: util.NonEmptyEnv("TRUSTED_UI_ORIGIN")},
@@ -160,6 +167,10 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return fmt.Errorf("elevation-tile-cache-max-bytes: %w", err)
 	}
+	ownerDownloadBytes, err := parseOptionalByteSize(cmd.String("owner-download-max-bytes"))
+	if err != nil {
+		return fmt.Errorf("owner-download-max-bytes: %w", err)
+	}
 	if (cmd.Bool("routing-prepare") || cmd.Bool("routing-update")) && strings.TrimSpace(cmd.String("routing-region")) == "" {
 		return errors.New("--routing-prepare and --routing-update require --routing-region")
 	}
@@ -170,7 +181,15 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	}
 	var origin string
 	var accounts *passkeyauth.Store
+	var owners *ownerResolver
+	trustedUIOrigin := cmd.String("trusted-ui-origin")
 	if cmd.Bool("auth") {
+		if cmd.Bool("mcp") {
+			// The bridge drives whichever tab is focused, with no idea whose
+			// session it carries. On a shared server that is another user's
+			// planner; refuse rather than bind an agent to a stranger.
+			return errors.New("--mcp cannot be combined with --auth: the browser bridge is not bound to an account")
+		}
 		if origin, err = authOrigin(cmd.String("auth-origin"), addr); err != nil {
 			return err
 		}
@@ -178,6 +197,16 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 			return fmt.Errorf("open account database: %w", err)
 		}
 		defer accounts.Close()
+		secret, err := identity.LoadOrCreate(identity.KeyPath(cmd.String("auth-db")))
+		if err != nil {
+			return fmt.Errorf("owner key: %w", err)
+		}
+		owners = newOwnerResolver(secret, cmd.StringSlice("auth-operator"))
+		// Sessions are bound to the auth origin, so it is the UI origin; a
+		// signed-in user must not need a second flag to build a trip pack.
+		if strings.TrimSpace(trustedUIOrigin) == "" {
+			trustedUIOrigin = origin
+		}
 	}
 
 	behindProxy := cmd.Bool("behind-proxy")
@@ -186,7 +215,8 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	srv, err := server.New(server.Config{
-		GPXDir:                     cmd.String("gpx-dir"),
+		DataDir:                    cmd.String("data-dir"),
+		RequireOwner:               accounts != nil,
 		ElevationHost:              elevationHost,
 		ElevationDataset:           cmd.String("elevation-dataset"),
 		ElevationTiles:             elevationTiles,
@@ -199,10 +229,11 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		OfflineCacheDir:            cmd.String("offline-cache-dir"),
 		OfflineCacheMaxBytes:       cacheBytes,
 		OfflineCacheMaxEntries:     cmd.Int("offline-cache-max-entries"),
+		OwnerDownloadMaxBytes:      ownerDownloadBytes,
 		OfflineMode:                cmd.String("offline-mode"),
 		StatsLogInterval:           cmd.Duration("stats-log-interval"),
 		UpstreamContact:            cmd.String("upstream-contact"),
-		TrustedUIOrigin:            cmd.String("trusted-ui-origin"),
+		TrustedUIOrigin:            trustedUIOrigin,
 		OfflineAdminToken:          cmd.String("offline-admin-token"),
 		RoutingCacheDir:            cmd.String("routing-cache-dir"),
 		RoutingRegion:              cmd.String("routing-region"),
@@ -234,7 +265,7 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	var handler http.Handler = srv
 	if accounts != nil {
 		var auth *passkeyauth.Authenticator
-		if handler, auth, err = protectWithPasskeys(srv, accounts, origin); err != nil {
+		if handler, auth, err = protectWithPasskeys(srv, accounts, origin, owners); err != nil {
 			closeMCP(bridge, mcpListener)
 			return err
 		}
@@ -279,8 +310,8 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		elevationSource = fmt.Sprintf("terrain tiles z%d, %s", tileZoom, where)
 	}
 
-	log.Printf("%s %s listening on %s (library: %s, elevation: %s)",
-		util.AppName, cmd.Root().Version, addr, cmd.String("gpx-dir"), elevationSource)
+	log.Printf("%s %s listening on %s (data: %s, elevation: %s)",
+		util.AppName, cmd.Root().Version, addr, cmd.String("data-dir"), elevationSource)
 	if cmd.String("routing-cache-dir") != "" {
 		log.Printf("Broom routing enabled (data: %s, region: %s)", cmd.String("routing-cache-dir"), valueOrNone(cmd.String("routing-region")))
 	}
@@ -290,6 +321,9 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 			log.Printf("with --auth the proxy must preserve the Host header and serve %s", origin)
 		}
 		for _, warning := range authWarnings(origin, addr, cmd.StringSlice("allowed-origin"), cmd.String("trusted-ui-origin")) {
+			log.Printf("warning: %s", warning)
+		}
+		for _, warning := range operatorWarnings(accounts, cmd.StringSlice("auth-operator")) {
 			log.Printf("warning: %s", warning)
 		}
 	}
@@ -407,6 +441,14 @@ func parseCacheQuota(value string) (int64, bool, error) {
 	}
 	bytes, err := parseByteSize(value)
 	return bytes, false, err
+}
+
+// parseOptionalByteSize reads a byte size where "0" or empty means none.
+func parseOptionalByteSize(value string) (int64, error) {
+	if trimmed := strings.TrimSpace(value); trimmed == "" || trimmed == "0" {
+		return 0, nil
+	}
+	return parseByteSize(value)
 }
 
 func parseByteSize(value string) (int64, error) {

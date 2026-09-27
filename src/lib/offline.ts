@@ -16,6 +16,13 @@ export interface OfflineCapability {
   packs: string
   modeControl?: string
   routing?: string
+  /**
+   * Whether this user may change server-wide state: the offline mode, the
+   * routing region, the shared cache. Everyone is on a server without
+   * sign-in; with it, only accounts named with --auth-operator. A hint for
+   * the UI; the server refuses the rest regardless.
+   */
+  operator: boolean
 }
 
 export interface RuntimeConfig {
@@ -311,6 +318,7 @@ export function decodeRuntimeConfig(value: unknown, apiBase = ''): RuntimeConfig
   const packs = text(offlineRaw?.packs)
   const modeControl = text(offlineRaw?.modeControl)
   const routing = text(offlineRaw?.routing)
+  const operator = boolean(offlineRaw?.operator) ?? true
 
   return {
     apiBase,
@@ -323,6 +331,7 @@ export function decodeRuntimeConfig(value: unknown, apiBase = ''): RuntimeConfig
           packs: resolveApiUrl(packs ?? '/offline/packs', apiBase),
           modeControl: modeControl ? resolveApiUrl(modeControl, apiBase) : undefined,
           routing: routing ? resolveApiUrl(routing, apiBase) : undefined,
+          operator,
         }
       : undefined,
     services,

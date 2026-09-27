@@ -16,7 +16,7 @@ import (
 
 func newPackTestServer(t *testing.T) *Server {
 	t.Helper()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir()})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestUpdatePackResourceSupportsLegacyManifest(t *testing.T) {
 func TestPackEstimateDoesNotFetchAndBlocksPublicMaps(t *testing.T) {
 	var calls atomic.Int64
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { calls.Add(1); return nil, errorsNew("no fetch") })}
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png", ElevationTileCache: t.TempDir(), HTTPClient: client, OfflineCacheDir: t.TempDir()})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png", ElevationTileCache: t.TempDir(), HTTPClient: client, OfflineCacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestPackPrefetchesBoundedTripPOIs(t *testing.T) {
 		fmt.Fprint(w, `{"elements":[{"type":"node","id":1,"lat":40.5,"lon":-0.5,"tags":{}}]}`)
 	}))
 	defer upstream.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), OverpassURL: upstream.URL})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), OverpassURL: upstream.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,13 +159,13 @@ func TestPackPrefetchesBoundedTripPOIs(t *testing.T) {
 	if estimate.Counts["pois-fuel"] != 1 || estimate.Counts["pois-water"] != 1 || estimate.Counts["pois-camp"] != 1 || calls.Load() != 0 {
 		t.Fatalf("estimate = %+v, calls = %d", estimate, calls.Load())
 	}
-	manifest, _, err := s.packs.start(input)
+	manifest, _, err := s.packs.start(LocalOwner, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Second)
 	for {
-		summary, _ := s.packs.publicManifest(manifest.ID)
+		summary, _ := s.packs.publicManifest(LocalOwner, manifest.ID)
 		if summary.State == "complete" {
 			for _, category := range []string{packResourceFuelStations, packResourceWater, packResourceCampsites} {
 				progress := summary.Resources[category]
@@ -192,18 +192,18 @@ func TestFuelPackPersistsPinsAndDeleteReleasesThem(t *testing.T) {
 	}))
 	defer upstream.Close()
 	cacheDir := t.TempDir()
-	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir, OfflineCacheMaxBytes: 32 << 20, FuelURL: upstream.URL}
+	config := Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir, OfflineCacheMaxBytes: 32 << 20, FuelURL: upstream.URL}
 	s, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, _, err := s.packs.start(packInput{Name: "fuel", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, ZoomMin: 1, ZoomMax: 1, Scopes: []string{"fuel"}})
+	manifest, _, err := s.packs.start(LocalOwner, packInput{Name: "fuel", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, ZoomMin: 1, ZoomMax: 1, Scopes: []string{"fuel"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		summary, _ := s.packs.publicManifest(manifest.ID)
+		summary, _ := s.packs.publicManifest(LocalOwner, manifest.ID)
 		if summary.State == "complete" {
 			break
 		}
@@ -232,14 +232,14 @@ func TestFuelPackPersistsPinsAndDeleteReleasesThem(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	summary, ok := restarted.packs.publicManifest(manifest.ID)
+	summary, ok := restarted.packs.publicManifest(LocalOwner, manifest.ID)
 	if !ok || summary.State != "complete" {
 		t.Fatalf("restarted pack = %+v, %v", summary, ok)
 	}
 	if progress := summary.Resources[packResourceFuelPrices]; progress.Done != 1 || progress.Total != 1 || progress.Failed != 0 {
 		t.Fatalf("restarted fuel progress = %+v", progress)
 	}
-	if deleted, err := restarted.packs.delete(manifest.ID); !deleted || err != nil {
+	if deleted, err := restarted.packs.delete(LocalOwner, manifest.ID); !deleted || err != nil {
 		t.Fatal("delete failed")
 	}
 	restarted.cache.mu.Lock()
@@ -253,7 +253,7 @@ func TestFuelPackPersistsPinsAndDeleteReleasesThem(t *testing.T) {
 func TestPackStartupReconcilesPinsBeforeLimitEnforcement(t *testing.T) {
 	cacheDir := t.TempDir()
 	config := Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
 		OfflineCacheMaxBytes: 32 << 20, OfflineCacheMaxEntries: 8,
 	}
 	s, err := New(config)
@@ -273,7 +273,7 @@ func TestPackStartupReconcilesPinsBeforeLimitEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest := &packManifest{
-		ID: "0123456789abcdef0123456789abcdef", Name: "retained", State: "complete",
+		owner: LocalOwner, ID: "0123456789abcdef0123456789abcdef", Name: "retained", State: "complete",
 		CreatedAt: now, UpdatedAt: now, Done: 1, Total: 1,
 		Resources: map[string]packResourceProgress{packResourcePlaces: {Done: 1, Total: 1}},
 		CacheKeys: []string{referenced},
@@ -306,7 +306,7 @@ func TestPackStartupReconcilesPinsBeforeLimitEnforcement(t *testing.T) {
 	if referencedMeta == nil || ghostRemains || fmt.Sprint(pins) != "[0123456789abcdef0123456789abcdef]" {
 		t.Fatalf("reconciled startup: referenced=%v ghost=%v pins=%v", referencedMeta != nil, ghostRemains, pins)
 	}
-	if summary, ok := restarted.packs.publicManifest(manifest.ID); !ok || summary.State != "complete" {
+	if summary, ok := restarted.packs.publicManifest(LocalOwner, manifest.ID); !ok || summary.State != "complete" {
 		t.Fatalf("restored manifest = %+v, %v", summary, ok)
 	}
 }
@@ -314,7 +314,7 @@ func TestPackStartupReconcilesPinsBeforeLimitEnforcement(t *testing.T) {
 func TestPackWarmRestartDoesNotRewriteReconciledSidecar(t *testing.T) {
 	cacheDir := t.TempDir()
 	config := Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir,
 		OfflineCacheMaxBytes: 32 << 20,
 	}
 	s, err := New(config)
@@ -327,7 +327,7 @@ func TestPackWarmRestartDoesNotRewriteReconciledSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest := &packManifest{
-		ID: "0123456789abcdef0123456789abcdef", Name: "warm", State: "complete",
+		owner: LocalOwner, ID: "0123456789abcdef0123456789abcdef", Name: "warm", State: "complete",
 		CreatedAt: now, UpdatedAt: now, Done: 1, Total: 1,
 		Resources: map[string]packResourceProgress{packResourcePlaces: {Done: 1, Total: 1}},
 		CacheKeys: []string{key},
@@ -369,7 +369,7 @@ func TestPackWarmRestartDoesNotRewriteReconciledSidecar(t *testing.T) {
 
 func TestPackStartupRejectsMismatchedManifestIdentity(t *testing.T) {
 	cacheDir := t.TempDir()
-	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
+	config := Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
 	s, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -384,7 +384,7 @@ func TestPackStartupRejectsMismatchedManifestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := atomicWriteFileAt(s.cache.root, s.cache.tmpRel, filepath.Join(s.cache.packsRel, filenameID+".json"), raw); err != nil {
+	if err := os.WriteFile(filepath.Join(s.packsDir(LocalOwner), filenameID+".json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -396,29 +396,29 @@ func TestPackStartupRejectsMismatchedManifestIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if summaries := restarted.packs.summaries(); len(summaries) != 0 {
+	if summaries := restarted.packs.summaries(LocalOwner); len(summaries) != 0 {
 		t.Fatalf("mismatched manifest was loaded: %+v", summaries)
 	}
-	if _, err := restarted.cache.root.Lstat(filepath.Join(restarted.cache.packsRel, embeddedID+".json")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(restarted.packsDir(LocalOwner), embeddedID+".json")); !os.IsNotExist(err) {
 		t.Fatalf("mismatched manifest created alternate identity: %v", err)
 	}
 }
 
 func TestLegacyCompleteManifestIsRepreparedWithoutChangingRetention(t *testing.T) {
 	cacheDir := t.TempDir()
-	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
+	config := Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
 	s, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id := "0123456789abcdef0123456789abcdef"
 	legacy := &packManifest{
-		ID: id, Name: "old pack", State: "complete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		owner: LocalOwner, ID: id, Name: "old pack", State: "complete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Done: 1, Total: 1, Input: packInput{Name: "old pack", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}},
 	}
 	automaticID := "fedcba9876543210fedcba9876543210"
 	automatic := &packManifest{
-		ID: automaticID, Name: "Route: Existing", State: "complete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		owner: LocalOwner, ID: automaticID, Name: "Route: Existing", State: "complete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Done: 1, Total: 1, Resources: map[string]packResourceProgress{packResourceFuelPrices: {Done: 1, Total: 1}},
 		Input: packInput{Name: "Route: Existing", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}},
 	}
@@ -440,7 +440,7 @@ func TestLegacyCompleteManifestIsRepreparedWithoutChangingRetention(t *testing.T
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	summary, ok := restarted.packs.publicManifest(id)
+	summary, ok := restarted.packs.publicManifest(LocalOwner, id)
 	if !ok || summary.State != "incomplete" || summary.ErrorCode != "legacy_manifest" {
 		t.Fatalf("legacy pack = %+v, found=%v", summary, ok)
 	}
@@ -450,7 +450,7 @@ func TestLegacyCompleteManifestIsRepreparedWithoutChangingRetention(t *testing.T
 	if legacyRoute == nil || legacyRoute.Input.Automatic {
 		t.Fatalf("legacy route retention changed: %+v", legacyRoute)
 	}
-	reused, _, err := restarted.packs.start(packInput{
+	reused, _, err := restarted.packs.start(LocalOwner, packInput{
 		Name: "Route: Existing", Automatic: true, BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"},
 	})
 	if err != nil {
@@ -467,7 +467,7 @@ func TestPackHTTPContractAcceptsFrontendAliases(t *testing.T) {
 		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
 	}))
 	defer upstream.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,18 +519,18 @@ func TestPackStartReusesIdenticalActiveRoute(t *testing.T) {
 		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
 	}))
 	defer upstream.Close()
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupTestServer(t, s)
 	input := packInput{Name: "automatic route", Route: []coordinate{{Lat: 40, Lon: -1}, {Lat: 40.1, Lon: -0.9}}, PaddingKM: 5, ZoomMin: 8, ZoomMax: 14, Scopes: []string{"fuel"}}
-	first, _, err := s.packs.start(input)
+	first, _, err := s.packs.start(LocalOwner, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitForPackState(t, s.packs, first.ID, "complete")
-	second, _, err := s.packs.start(input)
+	second, _, err := s.packs.start(LocalOwner, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,10 +548,10 @@ func TestPackStartEnforcesQueueCeilingBeforeEstimating(t *testing.T) {
 	s.packs.mu.Lock()
 	for i := 0; i < maxActivePackJobs+maxQueuedPackJobs; i++ {
 		id := fmt.Sprintf("%032x", i+1)
-		s.packs.packs[id] = &packManifest{ID: id, State: "queued"}
+		s.packs.packs[id] = &packManifest{ID: id, owner: LocalOwner, State: "queued"}
 	}
 	s.packs.mu.Unlock()
-	if _, _, err := s.packs.start(input); err == nil || !strings.Contains(err.Error(), "active or queued") {
+	if _, _, err := s.packs.start(LocalOwner, input); err == nil || !strings.Contains(err.Error(), "active or queued") {
 		t.Fatalf("queue capacity error = %v", err)
 	}
 }
@@ -568,7 +568,7 @@ func fuelPackServerWith(t *testing.T, cfg Config) *Server {
 		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
 	}))
 	t.Cleanup(upstream.Close)
-	cfg.GPXDir, cfg.ElevationHost, cfg.OfflineCacheDir, cfg.FuelURL = t.TempDir(), "http://elevation.invalid", t.TempDir(), upstream.URL
+	cfg.DataDir, cfg.ElevationHost, cfg.OfflineCacheDir, cfg.FuelURL = t.TempDir(), "http://elevation.invalid", t.TempDir(), upstream.URL
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -584,7 +584,7 @@ func occupySlots(s *Server) []string {
 	ids := make([]string, 0, maxActivePackJobs)
 	for i := 0; i < maxActivePackJobs; i++ {
 		id := fmt.Sprintf("%032x", 0xf00+i)
-		s.packs.packs[id] = &packManifest{ID: id, State: "running"}
+		s.packs.packs[id] = &packManifest{ID: id, owner: LocalOwner, State: "running"}
 		ids = append(ids, id)
 	}
 	return ids
@@ -596,7 +596,7 @@ func TestPacksBeyondActiveSlotsWaitAndStartInOrder(t *testing.T) {
 	var queued []string
 	for i := 0; i < 3; i++ {
 		input := packInput{Name: fmt.Sprintf("Map: part %d", i), Regional: true, BBox: &bbox{South: 40 + float64(i), West: -1, North: 40.5 + float64(i), East: 0}, Scopes: []string{"fuel"}}
-		pack, _, err := s.packs.start(input)
+		pack, _, err := s.packs.start(LocalOwner, input)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -610,11 +610,6 @@ func TestPacksBeyondActiveSlotsWaitAndStartInOrder(t *testing.T) {
 		if p := s.packs.packs[id]; p.working || p.cancel != nil {
 			t.Fatalf("waiting pack %s was launched", id)
 		}
-	}
-	// A waiting regional pack is charged its manifest size, not the 8 MiB a
-	// running one reserves to grow.
-	if allocation := s.packs.controlAlloc[queued[0]]; allocation >= maxRegionalManifestBytes {
-		t.Fatalf("waiting pack reserved %d bytes", allocation)
 	}
 	s.packs.mu.Unlock()
 
@@ -632,19 +627,19 @@ func TestPacksBeyondActiveSlotsWaitAndStartInOrder(t *testing.T) {
 func TestWaitingPackCancelsWithoutRunning(t *testing.T) {
 	s := fuelPackServer(t)
 	occupySlots(s)
-	pack, _, err := s.packs.start(packInput{Name: "waiting", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
+	pack, _, err := s.packs.start(LocalOwner, packInput{Name: "waiting", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.packs.cancel(pack.ID) {
+	if !s.packs.cancel(LocalOwner, pack.ID) {
 		t.Fatal("waiting pack was not found")
 	}
-	summary, _ := s.packs.publicManifest(pack.ID)
+	summary, _ := s.packs.publicManifest(LocalOwner, pack.ID)
 	if summary.State != "incomplete" || summary.ErrorCode != "cancelled" {
 		t.Fatalf("cancelled waiting pack = %+v", summary)
 	}
 	s.packs.startQueued()
-	if summary, _ := s.packs.publicManifest(pack.ID); summary.State != "incomplete" {
+	if summary, _ := s.packs.publicManifest(LocalOwner, pack.ID); summary.State != "incomplete" {
 		t.Fatalf("cancelled pack restarted: %+v", summary)
 	}
 }
@@ -652,7 +647,7 @@ func TestWaitingPackCancelsWithoutRunning(t *testing.T) {
 func TestQueuedPackThatNoLongerFitsReportsWhy(t *testing.T) {
 	s := fuelPackServer(t)
 	busy := occupySlots(s)
-	pack, _, err := s.packs.start(packInput{Name: "waiting", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
+	pack, _, err := s.packs.start(LocalOwner, packInput{Name: "waiting", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +656,7 @@ func TestQueuedPackThatNoLongerFitsReportsWhy(t *testing.T) {
 	s.packs.packs[busy[0]].State = "complete"
 	s.packs.mu.Unlock()
 	s.packs.startQueued()
-	summary, _ := s.packs.publicManifest(pack.ID)
+	summary, _ := s.packs.publicManifest(LocalOwner, pack.ID)
 	if summary.State != "incomplete" || summary.ErrorCode != "start_failed" || summary.ErrorDetail == "" {
 		t.Fatalf("failed queued start = %+v", summary)
 	}
@@ -693,12 +688,12 @@ func TestAutomaticPacksDoNotEvictAtFormerCountLimit(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		id := fmt.Sprintf("%032x", i+1)
 		s.packs.packs[id] = &packManifest{
-			ID: id, State: "complete", UpdatedAt: time.Unix(int64(i+1), 0),
+			owner: LocalOwner, ID: id, State: "complete", UpdatedAt: time.Unix(int64(i+1), 0),
 			Input: packInput{Automatic: true},
 		}
 	}
 	s.packs.mu.Unlock()
-	created, _, err := s.packs.start(packInput{
+	created, _, err := s.packs.start(LocalOwner, packInput{
 		Name: "new route", Automatic: true, BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"},
 	})
 	if err != nil {
@@ -716,7 +711,7 @@ func TestAutomaticPacksDoNotEvictAtFormerCountLimit(t *testing.T) {
 
 func TestPackManagerRetainsMoreThanSixteenManifestsAfterRestart(t *testing.T) {
 	cacheDir := t.TempDir()
-	config := Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
+	config := Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: cacheDir}
 	s, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -726,7 +721,7 @@ func TestPackManagerRetainsMoreThanSixteenManifestsAfterRestart(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		id := fmt.Sprintf("%032x", i+1)
 		manifest := &packManifest{
-			ID: id, Name: fmt.Sprintf("automatic %d", i), State: "complete", CreatedAt: time.Unix(int64(i+1), 0), UpdatedAt: time.Unix(int64(i+1), 0),
+			owner: LocalOwner, ID: id, Name: fmt.Sprintf("automatic %d", i), State: "complete", CreatedAt: time.Unix(int64(i+1), 0), UpdatedAt: time.Unix(int64(i+1), 0),
 			Resources: map[string]packResourceProgress{packResourceFuelPrices: {Done: 1, Total: 1}}, Input: packInput{Automatic: true},
 		}
 		if err := s.packs.persistLocked(manifest); err != nil {
@@ -744,34 +739,18 @@ func TestPackManagerRetainsMoreThanSixteenManifestsAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if _, ok := restarted.packs.publicManifest(oldestID); !ok || len(restarted.packs.summaries()) != 40 {
-		t.Fatalf("repaired manifests: oldest=%v stored=%d", ok, len(restarted.packs.summaries()))
+	if _, ok := restarted.packs.publicManifest(LocalOwner, oldestID); !ok || len(restarted.packs.summaries(LocalOwner)) != 40 {
+		t.Fatalf("repaired manifests: oldest=%v stored=%d", ok, len(restarted.packs.summaries(LocalOwner)))
 	}
-	entries, err := os.ReadDir(restarted.cache.packsDir)
+	entries, err := os.ReadDir(restarted.packsDir(LocalOwner))
 	if err != nil || len(entries) != 40 {
 		t.Fatalf("repaired manifest files = %d, %v", len(entries), err)
 	}
 }
 
-func TestPackReservesManifestQuota(t *testing.T) {
-	countDownloadsAgainstQuota(t)
-	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
-		OfflineCacheMaxBytes: int64(maxRegionalManifestBytes),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleanupTestServer(t, s)
-	input := packInput{Name: "fuel", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}}
-	if _, _, err := s.packs.start(input); err == nil || !strings.Contains(err.Error(), "quota") {
-		t.Fatalf("reserved quota error = %v", err)
-	}
-}
-
 func TestElevationPackHasSeparateTileCeiling(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png",
+		DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png",
 		ElevationTileCache: t.TempDir(), OfflineCacheDir: t.TempDir(),
 	})
 	if err != nil {
@@ -790,7 +769,7 @@ func TestElevationPackHasSeparateTileCeiling(t *testing.T) {
 func TestElevationPackHonorsConfiguredTileCacheQuota(t *testing.T) {
 	countDownloadsAgainstQuota(t)
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png",
+		DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: "https://tiles.invalid/{z}/{x}/{y}.png",
 		ElevationTileCache: t.TempDir(), ElevationTileCacheMaxBytes: 1, OfflineCacheDir: t.TempDir(),
 	})
 	if err != nil {
@@ -809,14 +788,14 @@ func TestElevationPackHonorsConfiguredTileCacheQuota(t *testing.T) {
 func TestElevationPackCompletesWithinByteLimit(t *testing.T) {
 	tiles := newTileServer(t)
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: tiles.url(),
+		DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: tiles.url(),
 		ElevationTileCache: t.TempDir(), OfflineCacheDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupTestServer(t, s)
-	manifest, _, err := s.packs.start(packInput{
+	manifest, _, err := s.packs.start(LocalOwner, packInput{
 		Name:   "small elevation",
 		BBox:   &bbox{South: 41.999, West: -0.501, North: 42.001, East: -0.499},
 		Scopes: []string{"elevation"},
@@ -845,7 +824,7 @@ func TestElevationPackCompletesWithinByteLimit(t *testing.T) {
 func TestPackPersistenceFailureBecomesStorageError(t *testing.T) {
 	s := newPackTestServer(t)
 	id := strings.Repeat("a", 32)
-	manifest := &packManifest{ID: id, Name: "trip", State: "running", CreatedAt: time.Now().UTC()}
+	manifest := &packManifest{ID: id, owner: LocalOwner, Name: "trip", State: "running", CreatedAt: time.Now().UTC()}
 	s.packs.mu.Lock()
 	s.packs.packs[id] = manifest
 	if err := s.packs.persistLocked(manifest); err != nil {
@@ -854,11 +833,12 @@ func TestPackPersistenceFailureBecomesStorageError(t *testing.T) {
 	}
 	s.packs.mu.Unlock()
 
-	oldPacks := s.cache.packsDir + ".old"
-	if err := os.Rename(s.cache.packsDir, oldPacks); err != nil {
+	packsDir := s.packsDir(LocalOwner)
+	oldPacks := packsDir + ".old"
+	if err := os.Rename(packsDir, oldPacks); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), s.cache.packsDir); err != nil {
+	if err := os.Symlink(t.TempDir(), packsDir); err != nil {
 		t.Fatal(err)
 	}
 	if applied := s.packs.update(manifest, func(pack *packManifest) { pack.Done++ }); applied {
@@ -883,15 +863,15 @@ func TestPackHardStopsWhenActualResourceExceedsBudget(t *testing.T) {
 	}))
 	defer upstream.Close()
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
-		OfflineCacheMaxBytes: int64(maxRegionalManifestBytes + maxPackManifestBytes + 5<<20), OverpassURL: upstream.URL,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		OfflineCacheMaxBytes: int64(5 << 20), OverpassURL: upstream.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupTestServer(t, s)
 	s.providers["pois"].group = newRateGroup(0)
-	manifest, _, err := s.packs.start(packInput{
+	manifest, _, err := s.packs.start(LocalOwner, packInput{
 		Name: "oversized", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"pois"},
 	})
 	if err != nil {
@@ -924,14 +904,14 @@ func TestPackContinuesWithOtherResourcesAfterProviderFailure(t *testing.T) {
 	}))
 	defer upstream.Close()
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), OverpassURL: upstream.URL,
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), OverpassURL: upstream.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupTestServer(t, s)
 	s.providers["pois"].group = newRateGroup(0)
-	manifest, _, err := s.packs.start(packInput{
+	manifest, _, err := s.packs.start(LocalOwner, packInput{
 		Name: "partial POIs", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"pois"},
 	})
 	if err != nil {
@@ -964,7 +944,7 @@ func TestPackWholeJobDeadlineCancelsUpstreamWork(t *testing.T) {
 		return nil, r.Context().Err()
 	})}
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(),
 		OverpassURL: "http://overpass.invalid", HTTPClient: client,
 	})
 	if err != nil {
@@ -973,7 +953,7 @@ func TestPackWholeJobDeadlineCancelsUpstreamWork(t *testing.T) {
 	cleanupTestServer(t, s)
 	s.providers["pois"].group = newRateGroup(0)
 	s.packs.jobTimeout = 200 * time.Millisecond
-	manifest, _, err := s.packs.start(packInput{
+	manifest, _, err := s.packs.start(LocalOwner, packInput{
 		Name: "deadline", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"pois"},
 	})
 	if err != nil {
@@ -999,7 +979,7 @@ func waitForPackState(t *testing.T, packs *packManager, id, state string) packSu
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		summary, ok := packs.publicManifest(id)
+		summary, ok := packs.publicManifest(LocalOwner, id)
 		if !ok {
 			t.Fatal("pack disappeared")
 		}
@@ -1020,7 +1000,7 @@ func TestAvailableStoragePerCache(t *testing.T) {
 	if _, supported, _ := availableDiskBytes(t.TempDir()); !supported {
 		t.Skip("free disk space is not measurable on this platform")
 	}
-	s, err := New(Config{GPXDir: t.TempDir(), OfflineCacheDir: t.TempDir(), AvailableCacheStorage: true, OfflineCacheMaxBytes: 1 << 20})
+	s, err := New(Config{DataDir: t.TempDir(), OfflineCacheDir: t.TempDir(), AvailableCacheStorage: true, OfflineCacheMaxBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

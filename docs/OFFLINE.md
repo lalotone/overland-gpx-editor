@@ -11,11 +11,10 @@ The generic response cache defaults to
 `$XDG_CACHE_HOME/overland/responses` (`~/.cache/overland/responses`). Storage
 is split in two. Responses cached while browsing are bounded by
 `OFFLINE_CACHE_MAX_BYTES` (1 GiB) and a per-scope quarter of the entry limit,
-with least-recently-used eviction. Downloaded data — entries pinned by a pack,
-and pack manifests — is not charged to that quota and never evicts browsing
-data; it is bounded by free disk space less a 64 MiB margin, rechecked on
-every write, so a region download is limited by the disk rather than an
-arbitrary quota. Removing a download returns its entries to browsing, trimmed
+with least-recently-used eviction. Downloaded data — entries pinned by a pack —
+is not charged to that quota and never evicts browsing data; it is bounded by
+free disk space less a 64 MiB margin, rechecked on every write, so a region
+download is limited by the disk rather than an arbitrary quota. Removing a download returns its entries to browsing, trimmed
 back under the quota. `available` lifts the browsing quota as well (the
 Android policy). Where free space cannot be measured (Windows), downloads
 count against the quota as before. The index holds up to 1,000,000 entries,
@@ -30,14 +29,22 @@ evicted first, and pack tiles bounded by the disk.
 Response filenames are hashes. Search text and POI bounds do
 not appear in paths or request logs. Cache directories use mode `0700` and files
 use `0600`; writes use temporary files followed by rename. Bodies and sidecars
-of browsing entries count towards the quota; downloaded entries and pack
-manifests count towards free disk space instead. Expired entries are removed
-first, then least-recently-used unpinned entries. A pack cannot extend a provider's
+of browsing entries count towards the quota; downloaded entries count towards
+free disk space instead. Expired entries are removed first, then
+least-recently-used unpinned entries. A pack cannot extend a provider's
 retention ceiling.
 
-Place and POI caches reveal location history. Set `OFFLINE_CACHE_DIR=`
-to opt out of persistence, use the management API to clear an individual
-scope, or remove the cache directory while the server is stopped.
+The shared cache holds public data only and can be wiped while the server is
+stopped without losing anyone's downloads: pack manifests are private data and
+live with their owner under `DATA_DIR/owners/<owner>/packs/`, so a wiped cache
+makes their packs incomplete, and re-downloading fills it again. Place searches
+and exact elevation lookups describe the person making them; they are cached
+under `owners/<owner>/cache/` with their own quota (64 MiB, 4096 entries), so
+one user's cache headers never say what another searched for. POI searches by
+area and the fuel snapshot stay shared. Set `OFFLINE_CACHE_DIR=` to opt out of
+persistence altogether, use the management API to clear a scope, or remove the
+directories while the server is stopped; deleting an account removes its
+directory.
 
 ## Modes
 
@@ -215,7 +222,9 @@ browser storage. Its derived metrics use a temporary directory. Removing the
 profile or closing the browser session releases it; abandoned sessions expire
 after two hours and all sessions are released on server shutdown. A region switch
 requires uploading again. Uploads are limited to 128 KiB and eight live profiles
-per server. This does not change the built-in profiles or saved GPX contents.
+per server, two per signed-in account; a profile routes and releases only for
+the account that uploaded it. This does not change the built-in profiles or
+saved GPX contents.
 
 ## Trip Packs
 
@@ -282,8 +291,21 @@ raster basemaps. Cancellation or process restart leaves a pack incomplete;
 completed shared cache entries remain valid. A failed provider marks its own
 resource unavailable while preparation continues for unrelated resources.
 
-Pack summaries expose only their validated bbox, never the manifest's route,
-cache keys or request data. The Downloads view lists every pack, including
+A pack belongs to the account that created it: only that account lists,
+inspects, stops or removes it, and `/offline/status` counts only the caller's
+jobs. Two accounts downloading the same area get a pack each; the cached
+objects are shared and stay pinned until the last pack referring to them is
+removed. Waiting packs start from the account with the fewest running, and a
+signed-in account may have at most 16 packs active or queued out of the
+server's 50. `OWNER_DOWNLOAD_MAX_BYTES` caps what one account's packs may
+store (the bytes they admitted, in every state); an estimate over the
+remainder is refused with the figures, `/offline/status` reports `downloads`
+with the account's use, and removing a pack gives the space back. Outbound
+provider requests are shared fairly: while the queue is under half full
+nobody is limited, and once it is contended one account may hold at most a
+quarter of it. The local owner, alone on its server, has none of these
+shares. Pack summaries expose only their validated bbox, never the
+manifest's route, cache keys or request data. The Downloads view lists every pack, including
 route packs created by older versions, and can stop active work, resume partial
 map downloads and delete packs with confirmation.
 
@@ -316,6 +338,14 @@ reverse proxy.
 This boundary covers `PUT /offline/mode`, pack creation/cancellation/deletion
 and cache clearing. Read-only status and public pack summaries expose aggregate
 state only.
+
+With `serve --auth` the auth origin is the trusted UI origin by default, and
+the boundary splits in two. A signed-in account manages its own data: its
+packs, its uploaded profiles, its owner-scoped cache scopes. Server-wide
+state — the offline mode, preparing, pinning or pruning routing regions, and
+clearing the shared cache — needs an account named with `--auth-operator`
+(`AUTH_OPERATORS`) or `OFFLINE_ADMIN_TOKEN`. `/config` reports `operator`
+so the UI can hide those controls; the server refuses them regardless.
 
 Traffic-generating read endpoints use a related relay guard. Loopback clients
 may use loopback origins; every remote browser host must be named explicitly in

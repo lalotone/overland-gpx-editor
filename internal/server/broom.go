@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -129,21 +130,25 @@ type broomRoutingStatus struct {
 }
 
 type broomRoutingService struct {
-	inspectCache  func(context.Context) (broom.CacheInventory, error)
-	inventoryMu   sync.Mutex
-	inventory     broomCacheUsage // guarded by mu
-	sessions      map[string]*sessionBroomProfile
-	uploads       chan struct{}
-	selectionPath string
-	manager       *broom.Manager
-	profiles      map[string]broomProfileSpec
-	warmup        []*broom.Profile
-	modes         *offlineModeController
-	ctx           context.Context
-	wg            *sync.WaitGroup
-	jobs          int
-	timeout       time.Duration
-	slots         chan struct{}
+	inspectCache func(context.Context) (broom.CacheInventory, error)
+	inventoryMu  sync.Mutex
+	inventory    broomCacheUsage // guarded by mu
+	sessions     map[string]*sessionBroomProfile
+	uploads      chan struct{}
+	// ownerQueries counts one owner's route queries in flight, so a burst
+	// from one user cannot take every shared slot.
+	ownerQueries   map[Owner]int
+	ownerQueriesMu sync.Mutex
+	selectionPath  string
+	manager        *broom.Manager
+	profiles       map[string]broomProfileSpec
+	warmup         []*broom.Profile
+	modes          *offlineModeController
+	ctx            context.Context
+	wg             *sync.WaitGroup
+	jobs           int
+	timeout        time.Duration
+	slots          chan struct{}
 
 	mu      sync.RWMutex
 	current *broomDataset
@@ -255,7 +260,7 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 		if err != nil {
 			return nil, err
 		}
-		httpClient.Transport = broomIndexTransport{base: httpClient.Transport, outbound: cfg.IndexCache, policy: newProviderPolicy("routing-index", "routing-index", indexURL, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json", "application/geo+json"}, newRateGroup(0), true)}
+		httpClient.Transport = broomIndexTransport{base: httpClient.Transport, outbound: cfg.IndexCache, policy: newProviderPolicy("routing-index", "routing-index", sharedProviderData, indexURL, 24*time.Hour, 30*24*time.Hour, 90*24*time.Hour, true, 32<<20, []string{"application/json", "application/geo+json"}, newRateGroup(0), true)}
 	}
 	zeroDistance := 0.0
 	manager, err := broom.New(broom.Options{
@@ -277,7 +282,7 @@ func newBroomRoutingService(ctx context.Context, wg *sync.WaitGroup, modes *offl
 	}
 	service := &broomRoutingService{
 		inspectCache: manager.CacheInfo,
-		sessions:     make(map[string]*sessionBroomProfile), uploads: make(chan struct{}, 1),
+		sessions:     make(map[string]*sessionBroomProfile), uploads: make(chan struct{}, 1), ownerQueries: make(map[Owner]int),
 		selectionPath: filepath.Join(cfg.CacheDir, "overland-active-region"),
 		manager:       manager, profiles: profiles, warmup: warmup, modes: modes,
 		ctx: ctx, wg: wg, jobs: cfg.Jobs, timeout: cfg.Timeout,
@@ -695,12 +700,12 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 		}
 		waypoints[i] = broom.Waypoint{Point: broom.Point{Lon: point.Lon, Lat: point.Lat}, Type: broom.WaypointBreak}
 	}
-	select {
-	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
-	default:
+	owner, _ := OwnerFrom(ctx)
+	release, ok := s.acquireSlot(owner)
+	if !ok {
 		return broomRouteResponse{}, &routingBusyError{}
 	}
+	defer release()
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	stopRootCancel := context.AfterFunc(s.ctx, cancel)
@@ -708,8 +713,8 @@ func (s *broomRoutingService) route(ctx context.Context, request broomRouteReque
 	s.mu.RLock()
 	dataset := s.current
 	if request.Profile == "custom" {
-		session := s.sessions[request.SessionProfile]
-		if session == nil || time.Now().After(session.expires) || dataset == nil || session.graph != dataset.router.Path() {
+		session := s.session(owner, request.SessionProfile)
+		if session == nil || dataset == nil || session.graph != dataset.router.Path() {
 			s.mu.RUnlock()
 			return broomRouteResponse{}, errors.New("session profile expired or routing region changed; upload the BRF again")
 		}
@@ -771,6 +776,46 @@ func broomResponse(route *broom.Route, profile, regionID, generationID string) (
 		}
 	}
 	return response, nil
+}
+
+// maxOwnerRouteQueries is one signed-in owner's share of the query slots.
+// The local owner, alone on its server, may use them all.
+const maxOwnerRouteQueries = 2
+
+func ownerRouteQueryLimit(owner Owner) int {
+	if owner == LocalOwner {
+		return math.MaxInt
+	}
+	return maxOwnerRouteQueries
+}
+
+// acquireSlot takes a shared query slot on the owner's behalf, refusing when
+// either the server or that owner is at its limit.
+func (s *broomRoutingService) acquireSlot(owner Owner) (func(), bool) {
+	s.ownerQueriesMu.Lock()
+	if s.ownerQueries[owner] >= ownerRouteQueryLimit(owner) {
+		s.ownerQueriesMu.Unlock()
+		return nil, false
+	}
+	s.ownerQueries[owner]++
+	s.ownerQueriesMu.Unlock()
+	releaseOwner := func() {
+		s.ownerQueriesMu.Lock()
+		if s.ownerQueries[owner]--; s.ownerQueries[owner] <= 0 {
+			delete(s.ownerQueries, owner)
+		}
+		s.ownerQueriesMu.Unlock()
+	}
+	select {
+	case s.slots <- struct{}{}:
+	default:
+		releaseOwner()
+		return nil, false
+	}
+	return func() {
+		<-s.slots
+		releaseOwner()
+	}, true
 }
 
 type routingBusyError struct{}

@@ -104,6 +104,20 @@ func (s *Server) requireOfflineControl(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireOperator guards server-wide changes. With sign-in on, an ordinary
+// user is refused even though they are trusted for their own data: the mark
+// comes from the wrapper, the admin token from the operator's own hand.
+// Without sign-in there is one owner, who is the operator.
+func (s *Server) requireOperator(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.requireOwner && !IsOperator(r.Context()) && !s.validAdminToken(r) {
+			writeError(w, http.StatusForbidden, "Operator access required")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) requireOfflineRead(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorizedOfflineControl(r, false) {
@@ -129,7 +143,8 @@ func noStoreJSON(w http.ResponseWriter, status int, payload any) {
 	writeJSON(w, status, payload)
 }
 
-func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleOfflineStatus(w http.ResponseWriter, r *http.Request) {
+	owner, _ := ownerOf(r)
 	legacyBytes, legacyMaxBytes, legacyEntries := int64(0), int64(0), 0
 	if s.elevation.tiles != nil {
 		legacyBytes, legacyEntries = s.elevation.tiles.diskStats()
@@ -146,7 +161,7 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	active := jobAggregate{ID: "active", State: "queued"}
 	if s.packs != nil {
-		for _, job := range s.packs.summaries() {
+		for _, job := range s.packs.summaries(owner) {
 			if job.State == "queued" || job.State == "running" {
 				active.Active++
 				active.Done += job.Done
@@ -164,6 +179,11 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 		jobs = append(jobs, active)
 	}
 	cache := s.cache.stats()
+	// The caller's private scopes sit beside the shared ones. They never
+	// overlap: a scope is either shared or owner-scoped.
+	for scope, stat := range s.ownerCaches.stats(owner).Scopes {
+		cache.Scopes[scope] = stat
+	}
 	noStoreJSON(w, http.StatusOK, struct {
 		Enabled    bool                      `json:"enabled"`
 		Mode       offlineMode               `json:"mode"`
@@ -182,6 +202,8 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 		Providers  map[string]providerHealth `json:"providers"`
 		Jobs       []jobAggregate            `json:"jobs"`
 		ActiveJobs int                       `json:"activeJobs"`
+		// Downloads is the caller's trip-pack allowance, when the server has one.
+		Downloads *downloadAllowance `json:"downloads,omitempty"`
 	}{
 		Enabled: true, Mode: s.modes.mode(), Writable: cache.Writable, Bytes: cache.Bytes,
 		MaxBytes: cache.Quota, Entries: cache.Entries, MaxEntries: s.cache.maxEntries,
@@ -192,7 +214,23 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, _ *http.Request) {
 			Entries  int   `json:"entries"`
 		}{legacyBytes, legacyMaxBytes, legacyEntries},
 		Providers: s.outbound.healthSnapshot(), Jobs: jobs, ActiveJobs: active.Active,
+		Downloads: s.packs.allowance(owner),
 	})
+}
+
+type downloadAllowance struct {
+	Bytes    int64 `json:"bytes"`
+	MaxBytes int64 `json:"maxBytes"`
+}
+
+// allowance reports the owner's download allowance, or nil without one.
+func (m *packManager) allowance(owner Owner) *downloadAllowance {
+	if m.server.ownerDownloadMaxBytes <= 0 || owner == LocalOwner {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &downloadAllowance{Bytes: m.ownerDownloadedLocked(owner), MaxBytes: m.server.ownerDownloadMaxBytes}
 }
 
 func (s *Server) handleOfflineMode(w http.ResponseWriter, r *http.Request) {
@@ -231,10 +269,27 @@ func (s *Server) handleOfflineMode(w http.ResponseWriter, r *http.Request) {
 	}{Mode: s.modes.mode(), Changed: changed})
 }
 
+// handleClearCache clears one scope, or everything. An owner-scoped scope is
+// the caller's own cache and needs no more than that; the shared scopes, and
+// "everything", are the operator's, and clear the caller's own cache too.
 func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
 	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
 	if scope != "" && !validScope(scope) {
 		writeError(w, http.StatusBadRequest, "invalid cache scope")
+		return
+	}
+	owner, _ := ownerOf(r)
+	if scope != "" && s.ownerScopes[scope] {
+		removed, err := s.ownerCaches.clear(owner, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Cache deletion failed")
+			return
+		}
+		noStoreJSON(w, http.StatusOK, map[string]int{"removed": removed})
+		return
+	}
+	if s.requireOwner && !IsOperator(r.Context()) && !s.validAdminToken(r) {
+		writeError(w, http.StatusForbidden, "Operator access required")
 		return
 	}
 	removed, err := s.cache.clear(scope)
@@ -242,10 +297,25 @@ func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Cache deletion failed")
 		return
 	}
+	if scope == "" {
+		own, err := s.ownerCaches.clear(owner, "")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Cache deletion failed")
+			return
+		}
+		removed += own
+	}
 	noStoreJSON(w, http.StatusOK, map[string]int{"removed": removed})
 }
 
-func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+// isOperator reports whether the caller may change server-wide state. Every
+// request is an operator's on a server without sign-in; with it, only those
+// the wrapper marked.
+func (s *Server) isOperator(r *http.Request) bool {
+	return !s.requireOwner || IsOperator(r.Context()) || s.validAdminToken(r)
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	type openFreeMapCapability struct {
 		Style     string `json:"style"`
@@ -260,6 +330,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 			Packs       string      `json:"packs"`
 			ModeControl string      `json:"modeControl,omitempty"`
 			Routing     string      `json:"routing,omitempty"`
+			// Operator says whether the caller may change the offline mode,
+			// prepare routing regions or clear the shared cache. A hint for
+			// the UI; the server enforces it regardless.
+			Operator bool `json:"operator"`
 		} `json:"offline"`
 		Services map[string]string `json:"services"`
 		Maps     struct {
@@ -273,7 +347,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	response.Offline.Mode = s.modes.mode()
 	response.Offline.Status = "/offline/status"
 	response.Offline.Packs = "/offline/packs"
-	if s.modes.canToggle() {
+	response.Offline.Operator = s.isOperator(r)
+	if s.modes.canToggle() && response.Offline.Operator {
 		response.Offline.ModeControl = "/offline/mode"
 	}
 	response.Services = map[string]string{"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search"}

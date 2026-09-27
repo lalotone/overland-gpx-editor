@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lalotone/overland-gpx-editor/cmd/overland/identity"
+	"github.com/lalotone/overland-gpx-editor/internal/passkeyauth"
+	"github.com/lalotone/overland-gpx-editor/internal/server"
 )
 
 func TestImportFile(t *testing.T) {
@@ -102,5 +106,46 @@ func TestImportFileRejectsHiddenName(t *testing.T) {
 
 	if _, err := importFile(root, sourcePath); err == nil {
 		t.Fatal("importFile accepted a hidden filename")
+	}
+}
+
+func TestResolveOwnerNeedsTheAccountAndTheOwnerKey(t *testing.T) {
+	dir := t.TempDir()
+	authDB := filepath.Join(dir, "accounts.db")
+	store, err := passkeyauth.OpenStore(authDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := store.CreateUser("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUser("mallory"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDisabled("mallory", true); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	if owner, err := resolveOwner("", authDB); err != nil || owner != server.LocalOwner {
+		t.Fatalf("no user = %q, %v", owner, err)
+	}
+	if _, err := resolveOwner("alice", authDB); err == nil || !strings.Contains(err.Error(), "owner key") {
+		t.Fatalf("missing key error = %v", err)
+	}
+	secret, err := identity.LoadOrCreate(identity.KeyPath(authDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := secret.Owner(alice)
+	if owner, err := resolveOwner("alice", authDB); err != nil || owner != want {
+		t.Fatalf("alice = %q, %v; want %q", owner, err, want)
+	}
+	if _, err := resolveOwner("nobody", authDB); err == nil {
+		t.Fatal("unknown user resolved to an owner")
+	}
+	if _, err := resolveOwner("mallory", authDB); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled user error = %v", err)
 	}
 }

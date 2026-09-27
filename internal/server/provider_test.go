@@ -31,7 +31,7 @@ func testPolicy(t *testing.T, rawURL string) *providerPolicy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newProviderPolicy("test", "places", base, time.Hour, 24*time.Hour, 7*24*time.Hour, true, 1<<20, []string{"application/json"}, nil, false)
+	return newProviderPolicy("test", "places", sharedProviderData, base, time.Hour, 24*time.Hour, 7*24*time.Hour, true, 1<<20, []string{"application/json"}, nil, false)
 }
 
 func TestOfflineModeTransitionCancelsAndDrainsGeneration(t *testing.T) {
@@ -364,7 +364,7 @@ func TestProviderPolicyCanExtendFetchDeadline(t *testing.T) {
 
 func TestServerUsesContextDeadlinesForOutboundProviders(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
-	srv, err := New(Config{GPXDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
+	srv, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", HTTPClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}

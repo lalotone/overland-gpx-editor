@@ -50,12 +50,12 @@ func TestImportCommand(t *testing.T) {
 	cmd.Writer = io.Discard
 	cmd.ErrWriter = io.Discard
 	if err := cmd.Run(context.Background(), []string{
-		"overland", "import", "--gpx-dir", library, sources[0], sources[1],
+		"overland", "import", "--data-dir", library, sources[0], sources[1],
 	}); err != nil {
 		t.Fatal(err)
 	}
 	for _, source := range sources {
-		content, err := os.ReadFile(filepath.Join(library, filepath.Base(source)))
+		content, err := os.ReadFile(filepath.Join(library, "owners", "local", "tracks", filepath.Base(source)))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -12,6 +12,10 @@ process.env.APP_NAME ??= 'Overland'
 const work = (process.env.APP_WORK ??= mkdtempSync(join(tmpdir(), 'overland-auth-e2e-')))
 process.env.APP_BIN ??= join(work, 'overland')
 process.env.APP_DB ??= join(work, 'accounts.db')
+process.env.APP_DATA ??= join(work, 'data')
+// `user delete` removes the account's directory, so the CLI must look where
+// the server writes.
+process.env.DATA_DIR ??= process.env.APP_DATA
 
 export default defineConfig({
   testDir: './e2e/auth',
@@ -26,7 +30,7 @@ export default defineConfig({
       'npm run build',
       `go build -o ${process.env.APP_BIN} ./cmd/overland`,
       `${process.env.APP_BIN} serve --auth --addr 127.0.0.1:${port} --auth-db ${process.env.APP_DB}` +
-        ` --gpx-dir ${join(work, 'gpx')} --routing-cache-dir '' --offline-cache-dir '' --elevation-tile-cache ''` +
+        ` --data-dir ${process.env.APP_DATA} --auth-operator operator --routing-cache-dir '' --offline-cache-dir '' --elevation-tile-cache ''` +
         ' --stats-log-interval 0',
     ].join(' && '),
     url: `http://127.0.0.1:${port}/healthz`,

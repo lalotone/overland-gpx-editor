@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -216,7 +217,7 @@ func TestBroomResponseKeepsAlignedDetails(t *testing.T) {
 }
 
 func TestBroomEndpointsReportUnpreparedData(t *testing.T) {
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir()})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +277,7 @@ func TestBroomEndpointRoutesOnBuiltGraph(t *testing.T) {
 	if err := broom.Build(t.Context(), pbf, graph, broom.BuildOptions{Jobs: 1}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +373,7 @@ func TestEnduroAccessAndPreference(t *testing.T) {
 
 func TestBroomManagementRequiresPrivilege(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(),
+		DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(),
 		TrustedUIOrigin: "https://planner.example.test", OfflineAdminToken: "secret",
 	})
 	if err != nil {
@@ -404,5 +405,59 @@ func TestBroomManagementRequiresPrivilege(t *testing.T) {
 	s.ServeHTTP(adminResponse, admin)
 	if adminResponse.Code != http.StatusOK {
 		t.Fatalf("admin client = %d %s", adminResponse.Code, adminResponse.Body)
+	}
+}
+
+// An uploaded profile belongs to the owner who uploaded it. Another owner's
+// request with its token is refused like an unknown token, and cannot
+// release it either.
+func TestSessionProfilesBelongToTheirOwner(t *testing.T) {
+	pbf, points := writeBroomPBF(t)
+	graph := filepath.Join(t.TempDir(), "route.broom")
+	if err := broom.Build(t.Context(), pbf, graph, broom.BuildOptions{Jobs: 1}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), RoutingGraph: graph, RequireOwner: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	header := map[string]string{"Content-Type": "application/json", "X-GPX-Editor": "1"}
+	profileBody, _ := json.Marshal(map[string]string{"source": broomProfileSource})
+	upload := doAs(t, s, ownerA, http.MethodPost, "/offline/routing/profile", bytes.NewReader(profileBody), header)
+	if upload.Code != http.StatusCreated {
+		t.Fatalf("profile upload = %d %s", upload.Code, upload.Body)
+	}
+	var uploaded struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(upload.Body.Bytes(), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"waypoints":[{"lat":42,"lon":` + fmt.Sprint(points[1][0]) + `},{"lat":42,"lon":` + fmt.Sprint(points[len(points)-2][0]) + `}],"profile":"custom","sessionProfile":"` + uploaded.ID + `"}`
+	if rec := doAs(t, s, ownerA, http.MethodPost, "/routing/broom/route", strings.NewReader(body), header); rec.Code != http.StatusOK {
+		t.Fatalf("A's custom route = %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, s, ownerB, http.MethodPost, "/routing/broom/route", strings.NewReader(body), header); rec.Code != http.StatusBadRequest {
+		t.Fatalf("B routed with A's profile: %d %s", rec.Code, rec.Body)
+	}
+	release := doAs(t, s, ownerB, http.MethodPost, "/offline/routing/profile/release", strings.NewReader(`{"id":"`+uploaded.ID+`"}`), header)
+	if release.Code != http.StatusNoContent {
+		t.Fatalf("release = %d", release.Code)
+	}
+	if rec := doAs(t, s, ownerA, http.MethodPost, "/routing/broom/route", strings.NewReader(body), header); rec.Code != http.StatusOK {
+		t.Fatalf("B's release removed A's profile: %d %s", rec.Code, rec.Body)
+	}
+	// A signed-in owner may hold a bounded number of live profiles.
+	for i := 1; i < maxOwnerSessionProfiles; i++ {
+		if rec := doAs(t, s, ownerA, http.MethodPost, "/offline/routing/profile", bytes.NewReader(profileBody), header); rec.Code != http.StatusCreated {
+			t.Fatalf("profile %d = %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	if rec := doAs(t, s, ownerA, http.MethodPost, "/offline/routing/profile", bytes.NewReader(profileBody), header); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("over the owner's share = %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, s, ownerB, http.MethodPost, "/offline/routing/profile", bytes.NewReader(profileBody), header); rec.Code != http.StatusCreated {
+		t.Fatalf("B refused by A's share: %d %s", rec.Code, rec.Body)
 	}
 }

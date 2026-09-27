@@ -27,7 +27,9 @@ const (
 	maxPackResources  = 10000
 	maxActivePackJobs = 2
 	// Further packs wait their turn, so a country can be queued region by region.
-	maxQueuedPackJobs       = 48
+	maxQueuedPackJobs = 48
+	// One signed-in owner's share of the queue; the local owner has it all.
+	maxOwnerPackJobs        = 16
 	maxPackManifestBytes    = 1 << 20
 	maxMapGenerationBytes   = 4 << 20
 	maxElevationPackEntries = 2048
@@ -131,9 +133,12 @@ type packEstimate struct {
 	MapTiles       map[string][]tileKey      `json:"-"`
 	RasterMapTiles map[string][]tileKey      `json:"-"`
 	ExistingKeys   []existingPackResource    `json:"-"`
-	GenericBytes   int64                     `json:"genericBytes"`
-	Glyphs         []glyphPackResource       `json:"-"`
-	POIRequests    []poiPackResource         `json:"-"`
+	// OwnerRemaining is what the owner's download allowance still permits,
+	// or a negative value when there is no allowance.
+	OwnerRemaining int64               `json:"-"`
+	GenericBytes   int64               `json:"genericBytes"`
+	Glyphs         []glyphPackResource `json:"-"`
+	POIRequests    []poiPackResource   `json:"-"`
 }
 
 type glyphPackResource struct {
@@ -184,6 +189,9 @@ type packManifest struct {
 	ErrorCode     string                          `json:"errorCode,omitempty"`
 	ErrorDetail   string                          `json:"errorDetail,omitempty"`
 
+	// owner comes from the directory the manifest lives in, never from the
+	// file: a manifest under owners/<a>/packs/ is a's whatever it says.
+	owner          Owner              `json:"-"`
 	cancel         context.CancelFunc `json:"-"`
 	deleted        bool               `json:"-"`
 	cacheKeySet    map[string]struct{}
@@ -217,14 +225,11 @@ type packSummary struct {
 }
 
 type packManager struct {
-	server       *Server
-	mu           sync.Mutex
-	packs        map[string]*packManifest
-	jobTimeout   time.Duration
-	controlMu    sync.Mutex
-	controlAlloc map[string]int64
-	controlBytes int64
-	queueSeq     uint64
+	server     *Server
+	mu         sync.Mutex
+	packs      map[string]*packManifest
+	jobTimeout time.Duration
+	queueSeq   uint64
 }
 
 type packBudgetError struct{}
@@ -254,7 +259,7 @@ func (b *packAdmissionBudget) admit(bytes int64) error {
 }
 
 func newPackManager(server *Server) (*packManager, error) {
-	m := &packManager{server: server, packs: make(map[string]*packManifest), controlAlloc: make(map[string]int64), jobTimeout: defaultPackJobTimeout}
+	m := &packManager{server: server, packs: make(map[string]*packManifest), jobTimeout: defaultPackJobTimeout}
 	if !server.cache.writable {
 		if server.elevation.tiles != nil {
 			if err := server.elevation.tiles.finishPackRestore(); err != nil {
@@ -265,9 +270,6 @@ func newPackManager(server *Server) (*packManager, error) {
 	}
 	changed, err := m.loadStoredPacks()
 	if err != nil {
-		return nil, err
-	}
-	if err := server.cache.setReservedBytes(m.controlReserve()); err != nil {
 		return nil, err
 	}
 	if err := m.restoreElevationPins(changed); err != nil {
@@ -290,22 +292,39 @@ func newPackManager(server *Server) (*packManager, error) {
 	return m, nil
 }
 
+// loadStoredPacks reads every owner's manifests. The pin set the shared cache
+// needs is rebuilt from all of them, so one owner's tiles are never evicted
+// because another owner's pack was the one that finished.
 func (m *packManager) loadStoredPacks() (map[string]bool, error) {
-	entries, err := fs.ReadDir(m.server.cache.root.FS(), filepath.ToSlash(m.server.cache.packsRel))
+	owners, err := m.server.spaces.list()
 	if err != nil {
 		return nil, err
 	}
 	changed := make(map[string]bool)
+	for _, owner := range owners {
+		if err := m.loadOwnerPacks(owner, changed); err != nil {
+			return nil, err
+		}
+	}
+	return changed, nil
+}
+
+func (m *packManager) loadOwnerPacks(owner Owner, changed map[string]bool) error {
+	root, err := m.server.spaces.open(owner)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	entries, err := fs.ReadDir(root.FS(), ownerPacksDir)
+	if err != nil {
+		return err
+	}
 	for _, entry := range entries {
 		filenameID := strings.TrimSuffix(entry.Name(), ".json")
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !validPackID(filenameID) {
 			continue
 		}
-		if info, err := entry.Info(); err == nil {
-			m.controlAlloc[filenameID] = info.Size()
-			m.controlBytes += info.Size()
-		}
-		raw, err := readFileLimitAt(m.server.cache.root, filepath.Join(m.server.cache.packsRel, entry.Name()), maxRegionalManifestBytes)
+		raw, err := readFileLimitAt(root, filepath.Join(ownerPacksDir, entry.Name()), maxRegionalManifestBytes)
 		if err != nil {
 			continue
 		}
@@ -313,6 +332,13 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		if json.Unmarshal(raw, &manifest) != nil || manifest.ID != filenameID || len(raw) > packManifestLimit(manifest.Input) {
 			continue
 		}
+		if _, duplicate := m.packs[manifest.ID]; duplicate {
+			// IDs are random; the same one under two owners is a copied file.
+			// Neither copy can be trusted to own the pins, so both are skipped.
+			delete(m.packs, manifest.ID)
+			continue
+		}
+		manifest.owner = owner
 		if manifest.State == "running" || manifest.State == "queued" {
 			manifest.State = "incomplete"
 			manifest.ErrorCode = "interrupted"
@@ -327,7 +353,7 @@ func (m *packManager) loadStoredPacks() (map[string]bool, error) {
 		copyManifest := manifest
 		m.packs[manifest.ID] = &copyManifest
 	}
-	return changed, nil
+	return nil
 }
 
 func (m *packManager) desiredStoredPins() (map[string][]string, map[string]struct{}) {
@@ -387,9 +413,15 @@ func newPackID() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
+// persistLocked writes the manifest into its owner's directory. Manifests
+// are private data, so they live with the owner's tracks rather than in the
+// shared cache, which can be wiped without losing what a user downloaded.
 func (m *packManager) persistLocked(manifest *packManifest) error {
 	if !m.server.cache.writable {
 		return nil
+	}
+	if !manifest.owner.Valid() {
+		return errNoOwner
 	}
 	raw, err := json.Marshal(manifest)
 	if err != nil {
@@ -398,46 +430,34 @@ func (m *packManager) persistLocked(manifest *packManifest) error {
 	if len(raw) > packManifestLimit(manifest.Input) {
 		return errors.New("pack manifest exceeds storage limit")
 	}
-	m.controlMu.Lock()
-	defer m.controlMu.Unlock()
-	allocation := int64(len(raw))
-	if manifest.State == "running" || manifest.State == "queued" && manifest.working {
-		allocation = int64(packManifestLimit(manifest.Input))
-	}
-	previous := m.controlBaseReserve() + m.controlBytes
-	next := previous - m.controlAlloc[manifest.ID] + allocation
-	if err := m.server.cache.reserveControlStorage(next); err != nil {
+	root, err := m.server.spaces.open(manifest.owner)
+	if err != nil {
 		return err
 	}
-	if err := requirePackDiskSpace(m.server.cache.dir, int64(len(raw))); err != nil {
-		_ = m.server.cache.setReservedBytes(previous)
+	defer root.Close()
+	if err := requirePackDiskSpace(m.server.spaces.absolute(manifest.owner), int64(len(raw))); err != nil {
 		return err
 	}
-	if err := atomicWriteFileAt(m.server.cache.root, m.server.cache.tmpRel, filepath.Join(m.server.cache.packsRel, manifest.ID+".json"), raw); err != nil {
-		_ = m.server.cache.setReservedBytes(previous)
+	if err := atomicWriteFileAt(root, ownerTmpDir, filepath.Join(ownerPacksDir, manifest.ID+".json"), raw); err != nil {
 		return err
 	}
-	m.controlBytes += allocation - m.controlAlloc[manifest.ID]
-	m.controlAlloc[manifest.ID] = allocation
 	manifest.lastCheckpoint, manifest.checkpointDone = time.Now(), manifest.Done
 	return nil
 }
 
-func (m *packManager) removeManifestFile(id string) error {
+func (m *packManager) removeManifestFile(owner Owner, id string) error {
 	if !m.server.cache.writable {
 		return nil
 	}
-	m.controlMu.Lock()
-	defer m.controlMu.Unlock()
-	if err := m.server.cache.root.Remove(filepath.Join(m.server.cache.packsRel, id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+	root, err := m.server.spaces.open(owner)
+	if err != nil {
 		return err
 	}
-	if err := syncRootDir(m.server.cache.root, m.server.cache.packsRel); err != nil {
+	defer root.Close()
+	if err := root.Remove(filepath.Join(ownerPacksDir, id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	m.controlBytes -= m.controlAlloc[id]
-	delete(m.controlAlloc, id)
-	return m.server.cache.setReservedBytes(m.controlBaseReserve() + m.controlBytes)
+	return syncRootDir(root, ownerPacksDir)
 }
 
 func validatePackInput(input packInput) (bbox, error) {
@@ -464,7 +484,7 @@ func validatePackInput(input packInput) (bbox, error) {
 	}
 	for _, scope := range input.Scopes {
 		switch scope {
-		case "elevation", "pois", "fuel", "places":
+		case "elevation", "pois", "fuel":
 		default:
 			return bbox{}, fmt.Errorf("unknown data scope %q", scope)
 		}
@@ -1109,28 +1129,19 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 			estimate.Scopes["pois"] = cacheScopeStat{Bytes: poiBytes, Entries: len(estimate.POIRequests)}
 		}
 	}
-	for _, scope := range []string{"pois", "places"} {
-		if !containsString(input.Scopes, scope) {
-			continue
-		}
-		if scope == "pois" && len(estimate.POIRequests) != 0 {
-			continue
-		}
-		keys, bytes := m.server.cache.retainedKeys(scope, time.Now().UTC())
-		category := map[string]string{"pois": packResourcePOIs, "places": packResourcePlaces}[scope]
+	// Place searches are owner-scoped and never packed: a pack pins shared
+	// cache objects only.
+	if containsString(input.Scopes, "pois") && len(estimate.POIRequests) == 0 {
+		keys, bytes := m.server.cache.retainedKeys("pois", time.Now().UTC())
 		for _, key := range keys {
-			estimate.ExistingKeys = append(estimate.ExistingKeys, existingPackResource{Category: category, Key: key})
+			estimate.ExistingKeys = append(estimate.ExistingKeys, existingPackResource{Category: packResourcePOIs, Key: key})
 		}
-		estimate.Counts[scope] = len(keys)
-		estimate.Scopes[scope] = cacheScopeStat{Bytes: bytes, Entries: len(keys)}
+		estimate.Counts["pois"] = len(keys)
+		estimate.Scopes["pois"] = cacheScopeStat{Bytes: bytes, Entries: len(keys)}
 		estimate.Resources += len(keys)
 		estimate.Reused += len(keys)
 		estimate.ReusedBytes += bytes
-		detail := map[string]string{
-			"pois":   "POIs protect exact searches already in the cache; the pack does not run new POI queries for this area",
-			"places": "Places protect exact searches already in the cache; the pack does not search for new places",
-		}[scope]
-		estimate.Dynamic = append(estimate.Dynamic, detail)
+		estimate.Dynamic = append(estimate.Dynamic, "POIs protect exact searches already in the cache; the pack does not run new POI queries for this area")
 	}
 	if estimate.Resources > packResourceLimit(input) {
 		return packEstimate{}, packTooLargeError(fmt.Sprintf("pack exceeds %d resources", packResourceLimit(input)))
@@ -1140,36 +1151,51 @@ func (m *packManager) estimateContext(ctx context.Context, input packInput) (pac
 		// Downloads are bounded by free disk, less room for this pack's manifest.
 		estimate.RemainingQuota = max(0, m.server.cache.downloadRoom()-int64(packManifestLimit(input)))
 	} else {
-		reserved := m.controlReserve() + int64(packManifestLimit(input))
-		estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-reserved)
+		estimate.RemainingQuota = max(0, stats.Quota-stats.Bytes-m.controlReserve())
 	}
 	estimate.FinalBytes = stats.Bytes + estimate.GenericBytes
 	estimate.Detail = strings.Join(estimate.Dynamic, "; ")
 	return estimate, nil
 }
 
-func (m *packManager) start(input packInput) (*packManifest, packEstimate, error) {
-	return m.startContext(context.Background(), input)
+func (m *packManager) start(owner Owner, input packInput) (*packManifest, packEstimate, error) {
+	return m.startContext(context.Background(), owner, input)
 }
 
-func (m *packManager) startContext(ctx context.Context, input packInput) (*packManifest, packEstimate, error) {
+// ownerPackJobLimit bounds one owner's running and waiting packs so a single
+// user cannot fill the queue for everyone. The local owner is the only user
+// of its server, so the shared limit is its limit.
+func ownerPackJobLimit(owner Owner) int {
+	if owner == LocalOwner {
+		return maxActivePackJobs + maxQueuedPackJobs
+	}
+	return maxOwnerPackJobs
+}
+
+func (m *packManager) startContext(ctx context.Context, owner Owner, input packInput) (*packManifest, packEstimate, error) {
 	if !m.server.cache.writable {
 		return nil, packEstimate{}, errors.New("persistent offline cache is disabled")
 	}
+	if !owner.Valid() {
+		return nil, packEstimate{}, errNoOwner
+	}
 	input.Name = strings.TrimSpace(input.Name)
 	m.mu.Lock()
-	if existing := m.matchingPackLocked(input); existing != nil {
+	if existing := m.matchingPackLocked(owner, input); existing != nil {
 		copyManifest := m.publicCopyLocked(existing)
 		m.mu.Unlock()
 		estimate, err := m.estimateContext(ctx, input)
 		return &copyManifest, estimate, err
 	}
-	pending := m.activeLocked()
+	pending, ownerPending := m.activeLocked(), m.activeOwnerLocked(owner)
 	m.mu.Unlock()
 	if pending >= maxActivePackJobs+maxQueuedPackJobs {
 		return nil, packEstimate{}, fmt.Errorf("at most %d pack jobs may be active or queued", maxActivePackJobs+maxQueuedPackJobs)
 	}
-	estimate, err := m.admissibleEstimate(ctx, input)
+	if ownerPending >= ownerPackJobLimit(owner) {
+		return nil, packEstimate{}, fmt.Errorf("at most %d of your pack jobs may be active or queued", ownerPackJobLimit(owner))
+	}
+	estimate, err := m.admissibleEstimate(ctx, owner, input)
 	if err != nil {
 		return nil, estimate, err
 	}
@@ -1178,21 +1204,21 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 		return nil, estimate, err
 	}
 	now := time.Now().UTC()
-	manifest := &packManifest{ID: id, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input, Unavailable: estimate.Blocked}
+	manifest := &packManifest{ID: id, owner: owner, Name: input.Name, State: "queued", CreatedAt: now, UpdatedAt: now, Total: estimate.Resources, Resources: packProgressFromEstimate(estimate), Input: input, Unavailable: estimate.Blocked}
 	for _, key := range estimate.ElevationTiles {
 		manifest.ElevationKeys = append(manifest.ElevationKeys, key.path())
 	}
 	m.mu.Lock()
-	if existing := m.matchingPackLocked(input); existing != nil {
+	if existing := m.matchingPackLocked(owner, input); existing != nil {
 		copyManifest := m.publicCopyLocked(existing)
 		m.mu.Unlock()
 		return &copyManifest, estimate, nil
 	}
-	if m.activeLocked() >= maxActivePackJobs+maxQueuedPackJobs {
+	if m.activeLocked() >= maxActivePackJobs+maxQueuedPackJobs || m.activeOwnerLocked(owner) >= ownerPackJobLimit(owner) {
 		m.mu.Unlock()
 		return nil, estimate, errors.New("pack queue was filled while estimating")
 	}
-	if previous := m.retryPackLocked(input); previous != nil {
+	if previous := m.retryPackLocked(owner, input); previous != nil {
 		if previous.working {
 			m.mu.Unlock()
 			return nil, estimate, errors.New("previous download attempt is still stopping; try again shortly")
@@ -1236,16 +1262,50 @@ func (m *packManager) startContext(ctx context.Context, input packInput) (*packM
 	return &copyManifest, estimate, nil
 }
 
-// admissibleEstimate estimates a pack and checks that quota and disk space can
-// hold it. It runs again when a queued pack starts, since earlier packs change
-// both the remaining quota and what is already cached.
-func (m *packManager) admissibleEstimate(ctx context.Context, input packInput) (packEstimate, error) {
+// ownerDownloadedLocked is what the owner's packs have stored so far: the
+// bytes each admitted, in every state, since an incomplete pack keeps its
+// pins. Objects two packs share are counted for whichever downloaded them.
+func (m *packManager) ownerDownloadedLocked(owner Owner) int64 {
+	var used int64
+	for _, pack := range m.packs {
+		if pack.owner == owner {
+			used += pack.Bytes
+		}
+	}
+	return used
+}
+
+// ownerDownloadRemaining is the owner's remaining download allowance, or -1
+// when there is none: the server has no allowance configured, or the owner
+// is the local one, alone on its server.
+func (m *packManager) ownerDownloadRemaining(owner Owner) int64 {
+	limit := m.server.ownerDownloadMaxBytes
+	if limit <= 0 || owner == LocalOwner {
+		return -1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return max(0, limit-m.ownerDownloadedLocked(owner))
+}
+
+// admissibleEstimate estimates a pack and checks that quota, disk space and
+// the owner's allowance can hold it. It runs again when a queued pack
+// starts, since earlier packs change both the remaining quota and what is
+// already cached.
+func (m *packManager) admissibleEstimate(ctx context.Context, owner Owner, input packInput) (packEstimate, error) {
 	estimate, err := m.estimateContext(ctx, input)
 	if err != nil {
 		return packEstimate{}, err
 	}
 	if estimate.Resources == 0 {
 		return estimate, errors.New("pack has no provider-permitted resources to prepare")
+	}
+	estimate.OwnerRemaining = m.ownerDownloadRemaining(owner)
+	if estimate.OwnerRemaining >= 0 {
+		if estimate.EstimatedBytes > estimate.OwnerRemaining {
+			return estimate, fmt.Errorf("pack needs about %s but your download allowance has %s left; remove a download first", formatBytes(estimate.EstimatedBytes), formatBytes(estimate.OwnerRemaining))
+		}
+		estimate.RemainingQuota = min(estimate.RemainingQuota, estimate.OwnerRemaining)
 	}
 	if estimate.GenericBytes > estimate.RemainingQuota {
 		return estimate, errors.New("pack would exceed the generic cache quota")
@@ -1275,7 +1335,9 @@ func (m *packManager) launchLocked(manifest *packManifest, estimate packEstimate
 	if manifest.Input.Regional {
 		timeout = regionalJobTimeout
 	}
-	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
+	// The job's fetches are the owner's: they take the owner's share of the
+	// outbound queue, not a share of nobody's.
+	jobCtx, cancel := context.WithTimeout(WithOwner(m.server.ctx, manifest.owner), timeout)
 	manifest.cancel = cancel
 	manifest.working = true
 	if m.server.elevation.tiles != nil {
@@ -1294,21 +1356,16 @@ func (m *packManager) startQueued() {
 			m.mu.Unlock()
 			return
 		}
-		var next *packManifest
-		for _, pack := range m.packs {
-			if pack.State == "queued" && !pack.working && (next == nil || pack.queueSeq < next.queueSeq) {
-				next = pack
-			}
-		}
+		next := m.nextQueuedLocked()
 		if next == nil {
 			m.mu.Unlock()
 			return
 		}
 		next.working = true
-		input := next.Input
+		input, owner := next.Input, next.owner
 		m.mu.Unlock()
 
-		estimate, err := m.admissibleEstimate(m.server.ctx, input)
+		estimate, err := m.admissibleEstimate(m.server.ctx, owner, input)
 
 		m.mu.Lock()
 		switch {
@@ -1342,8 +1399,33 @@ func (m *packManager) startQueued() {
 	}
 }
 
-func (m *packManager) matchingPackLocked(input packInput) *packManifest {
+// nextQueuedLocked picks the waiting pack to start: the oldest one from the
+// owner with the fewest packs already running, so one user queueing a whole
+// country does not hold every slot while another waits for a single city.
+func (m *packManager) nextQueuedLocked() *packManifest {
+	running := make(map[Owner]int)
 	for _, pack := range m.packs {
+		if pack.working || pack.State == "running" {
+			running[pack.owner]++
+		}
+	}
+	var next *packManifest
+	for _, pack := range m.packs {
+		if pack.State != "queued" || pack.working {
+			continue
+		}
+		if next == nil || running[pack.owner] < running[next.owner] || (running[pack.owner] == running[next.owner] && pack.queueSeq < next.queueSeq) {
+			next = pack
+		}
+	}
+	return next
+}
+
+func (m *packManager) matchingPackLocked(owner Owner, input packInput) *packManifest {
+	for _, pack := range m.packs {
+		if pack.owner != owner {
+			continue
+		}
 		candidate := pack.Input
 		requested := input
 		if requested.Automatic && !candidate.Automatic {
@@ -1358,10 +1440,10 @@ func (m *packManager) matchingPackLocked(input packInput) *packManifest {
 	return nil
 }
 
-func (m *packManager) retryPackLocked(input packInput) *packManifest {
+func (m *packManager) retryPackLocked(owner Owner, input packInput) *packManifest {
 	var newest *packManifest
 	for _, pack := range m.packs {
-		if pack.State != "incomplete" {
+		if pack.State != "incomplete" || pack.owner != owner {
 			continue
 		}
 		candidate, requested := pack.Input, input
@@ -1392,6 +1474,17 @@ func (m *packManager) activeLocked() int {
 	active := 0
 	for _, manifest := range m.packs {
 		if manifest.working || manifest.State == "queued" || manifest.State == "running" {
+			active++
+		}
+	}
+	return active
+}
+
+// activeOwnerLocked counts one owner's running and waiting packs.
+func (m *packManager) activeOwnerLocked(owner Owner) int {
+	active := 0
+	for _, manifest := range m.packs {
+		if manifest.owner == owner && (manifest.working || manifest.State == "queued" || manifest.State == "running") {
 			active++
 		}
 	}
@@ -1473,6 +1566,12 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		return true
 	}
 	budget := &packAdmissionBudget{limit: estimate.RemainingQuota}
+	// One allowance covers both stores; each side keeps room for the other's
+	// estimate, which is as exact as the estimate itself.
+	elevationAllowance := int64(math.MaxInt64)
+	if estimate.OwnerRemaining >= 0 {
+		elevationAllowance = max(0, estimate.OwnerRemaining-estimate.GenericBytes)
+	}
 	acceptResponse := func(category string, response cachedResponse, fetchErr error) bool {
 		if fetchErr != nil {
 			return recordFailure(category, fetchErr)
@@ -1514,7 +1613,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 				limit = min(limit, m.server.elevation.tiles.downloadCapacity())
 			}
 		}
-		elevationBudget := &packAdmissionBudget{limit: limit}
+		elevationBudget := &packAdmissionBudget{limit: min(limit, elevationAllowance)}
 		// Leave slots for interactive elevation lookups. The tile store also
 		// applies its global six-request bound across packs and other callers.
 		return runTileBatchesWithWorkers(ctx, estimate.ElevationTiles, 4, func(workCtx context.Context, key tileKey) bool {
@@ -1709,11 +1808,17 @@ func (m *packManager) update(manifest *packManifest, change func(*packManifest))
 	return true
 }
 
-func (m *packManager) summaries() []packSummary {
+// summaries lists one owner's packs. Every lookup below takes the owner
+// too, and another owner's pack is simply not found: the response never
+// says whether the ID exists.
+func (m *packManager) summaries(owner Owner) []packSummary {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]packSummary, 0, len(m.packs))
 	for _, p := range m.packs {
+		if p.owner != owner {
+			continue
+		}
 		out = append(out, m.summaryLocked(p))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAfter(out[j]) })
@@ -1722,14 +1827,23 @@ func (m *packManager) summaries() []packSummary {
 
 func (p packSummary) CreatedAfter(other packSummary) bool { return p.UpdatedAt.After(other.UpdatedAt) }
 
-func (m *packManager) publicManifest(id string) (packSummary, bool) {
+func (m *packManager) publicManifest(owner Owner, id string) (packSummary, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	p := m.packs[id]
+	p := m.ownedLocked(owner, id)
 	if p == nil {
 		return packSummary{}, false
 	}
 	return m.summaryLocked(p), true
+}
+
+// ownedLocked returns the pack only when it belongs to owner.
+func (m *packManager) ownedLocked(owner Owner, id string) *packManifest {
+	p := m.packs[id]
+	if p == nil || p.owner != owner {
+		return nil
+	}
+	return p
 }
 
 func clonePackResources(resources map[string]packResourceProgress) map[string]packResourceProgress {
@@ -1771,10 +1885,10 @@ func (m *packManager) publicCopyLocked(p *packManifest) packManifest {
 	return copyManifest
 }
 
-func (m *packManager) cancel(id string) bool {
+func (m *packManager) cancel(owner Owner, id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	p := m.packs[id]
+	p := m.ownedLocked(owner, id)
 	if p == nil {
 		return false
 	}
@@ -1790,9 +1904,9 @@ func (m *packManager) cancel(id string) bool {
 	return true
 }
 
-func (m *packManager) delete(id string) (bool, error) {
+func (m *packManager) delete(owner Owner, id string) (bool, error) {
 	m.mu.Lock()
-	p := m.packs[id]
+	p := m.ownedLocked(owner, id)
 	if p == nil {
 		m.mu.Unlock()
 		return false, nil
@@ -1814,12 +1928,13 @@ func (m *packManager) cleanupPack(p *packManifest) error {
 	for _, key := range p.CacheKeys {
 		persistenceErr = errors.Join(persistenceErr, m.server.cache.pin(key, p.ID, false))
 	}
-	persistenceErr = errors.Join(persistenceErr, m.removeManifestFile(p.ID))
+	persistenceErr = errors.Join(persistenceErr, m.removeManifestFile(p.owner, p.ID))
 	return persistenceErr
 }
 
-func (s *Server) handleListPacks(w http.ResponseWriter, _ *http.Request) {
-	noStoreJSON(w, http.StatusOK, s.packs.summaries())
+func (s *Server) handleListPacks(w http.ResponseWriter, r *http.Request) {
+	owner, _ := ownerOf(r)
+	noStoreJSON(w, http.StatusOK, s.packs.summaries(owner))
 }
 
 func (s *Server) handleEstimatePack(w http.ResponseWriter, r *http.Request) {
@@ -1842,12 +1957,13 @@ func (s *Server) handleCreatePack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	manifest, _, err := s.packs.startContext(r.Context(), input)
+	owner, _ := ownerOf(r)
+	manifest, _, err := s.packs.startContext(r.Context(), owner, input)
 	if err != nil {
 		writePackError(w, err)
 		return
 	}
-	summary, _ := s.packs.publicManifest(manifest.ID)
+	summary, _ := s.packs.publicManifest(owner, manifest.ID)
 	noStoreJSON(w, http.StatusAccepted, summary)
 }
 
@@ -1866,7 +1982,8 @@ func (s *Server) handleGetPack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid pack ID")
 		return
 	}
-	manifest, ok := s.packs.publicManifest(id)
+	owner, _ := ownerOf(r)
+	manifest, ok := s.packs.publicManifest(owner, id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "Pack not found")
 		return
@@ -1876,7 +1993,8 @@ func (s *Server) handleGetPack(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCancelPack(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !validPackID(id) || !s.packs.cancel(id) {
+	owner, _ := ownerOf(r)
+	if !validPackID(id) || !s.packs.cancel(owner, id) {
 		writeError(w, http.StatusNotFound, "Pack not found")
 		return
 	}
@@ -1889,7 +2007,8 @@ func (s *Server) handleDeletePack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Pack not found")
 		return
 	}
-	deleted, err := s.packs.delete(id)
+	owner, _ := ownerOf(r)
+	deleted, err := s.packs.delete(owner, id)
 	if !deleted {
 		writeError(w, http.StatusNotFound, "Pack not found")
 		return

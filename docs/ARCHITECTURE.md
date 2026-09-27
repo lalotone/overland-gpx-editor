@@ -65,14 +65,19 @@ src/
 cmd/overland/
 ├── main.go                     Minimal urfave/cli entry point
 ├── serve/                      HTTP server flags and graceful shutdown
-│   └── auth.go                 Optional passkey guard around the whole handler
-├── import/                     Create-only GPX library import
+│   └── auth.go                 Optional passkey guard; derives the opaque owner
+├── identity/                   Account handle + owner.key → owner key
+├── import/                     Create-only GPX library import, per account
 ├── user/                       Passkey account management for serve --auth
 └── util/                       Shared CLI flags
 internal/passkeyauth/           WebAuthn sign-in, SQLite accounts/sessions, CLI
 internal/server/
-├── server.go                   Chi routes, middleware, embedded-frontend handler
-├── files.go                    Track library: list/read/write/upload/delete
+├── server.go                   Construction, middleware, embedded-frontend handler
+├── routes.go                   Every route registered with its data class
+├── owner.go                    Opaque owner and operator marks on a request
+├── spaces.go                   owners/<owner>/ directories behind os.Root
+├── files.go                    Track library keyed by (owner, filename)
+├── owner_cache.go              Per-owner response caches for private lookups
 ├── elevation.go                DEM proxy with upstream-sized chunking
 ├── elevation_tiles.go          Terrain-RGB tile reader, cache, interpolation
 ├── cache_store.go              Hashed response bodies, metadata, quota and LRU
@@ -126,6 +131,34 @@ traversal-resistant `os.Root` file APIs, while Broom owns routing graph and
 metric access. Keep dependencies beyond Chi, MCP and Broom out of
 `internal/server` unless there is a concrete reason to add one.
 
+**Whose data.** The backend never learns who is asking. Every request
+carries an opaque `Owner` (`owner.go`): with `serve --auth` the wrapper
+derives it from the account's random WebAuthn handle under a secret in
+`owner.key` beside the account database (`cmd/overland/identity`), so no
+username, account ID or handle reaches `internal/server`, and a data
+directory alone cannot be linked back to accounts. Without sign-in, and on
+the mobile host, everything belongs to `LocalOwner`. Private data lives under
+`DATA_DIR/owners/<owner>/` (`spaces.go`): `tracks/`, `packs/` manifests, a
+`cache/` for place searches and exact elevation points, each behind that
+owner's own `os.Root`. Ownership comes from the location, not a field a
+handler could forget to filter on; removing an account is removing one
+directory. Shared caches — map tiles, terrain tiles, routing data, the fuel
+snapshot, POIs by area — stay in their own directories and belong to nobody.
+
+Every route is registered in `routes.go` with a class: `publicRoute` for
+shared data, `ownerRoute` for the caller's own, `operatorRoute` for
+server-wide state (offline mode, routing regions, the shared cache). A test
+walks the router and fails on an unclassified route. With `RequireOwner`,
+which `serve --auth` sets, an owner route reached without an owner returns
+500 rather than serving the local library, so a handler mounted without the
+wrapper fails closed; operator routes additionally need the operator mark
+(`--auth-operator` accounts) or the admin token. Another owner's object is a
+404, never a 403: no response confirms it exists. Every provider policy
+declares whose data it returns; a request through an unclassified one is
+refused. Shared limits are taken on the owner's behalf with a per-owner
+share — pack queue slots, route queries, live BRF profiles — so one user
+cannot starve the rest.
+
 The listener defaults to `127.0.0.1:8000`, limits header size and read time, and
 has bounded idle and header-read deadlines. Browser-originated writes are
 accepted only from an exact configured origin, or from matching loopback origins
@@ -136,7 +169,11 @@ clients, so these checks are not authentication; public deployments need
 **Passkey sign-in** (`serve --auth`) is deliberately not part of
 `internal/server`. `cmd/overland/serve/auth.go` wraps the finished handler: an
 outer `http.ServeMux` sends `/auth/` to `internal/passkeyauth` and everything
-else to the chi router, and `Protect` guards the lot. The mobile host embeds
+else, through the owner resolver, to the chi router, and `Protect` guards the
+lot. The resolver reads the account `Protect` accepted, derives the owner and
+the operator mark, and remembers them per session token — a token belongs to
+one account for life, and a revoked one never gets past `Protect` — so tile
+requests cost no second database lookup. The mobile host embeds
 `internal/server` behind its own capability cookie, so keeping auth outside it
 means the Android app neither changes behaviour nor links WebAuthn or SQLite.
 Signed out, a top-level navigation gets the generic sign-in page and every
@@ -160,13 +197,18 @@ A restart invalidates tokens in flight, which costs a retry. The guard marks its
 on those, so the MCP bridge's capability 401 after a restart cannot reload the
 page over unsaved edits.
 
-**`files.go`** is a track library over a directory. Every filename arriving from
-the network goes through `safeGPXFilename`, which requires a bare `*.gpx` with no
-directory component; a name such as `../../etc/passwd` is refused with a 400.
-Every filesystem operation then goes through `os.Root`, so a symlink inside the
-library cannot escape it. Saves use a rooted temp file and rename, so an
-interrupted save cannot leave a truncated track behind. Uploads use exclusive
-creation and return 409 rather than replacing an existing filename.
+**`files.go`** is the track library. A track is identified by (owner,
+filename), and handlers only reach tracks through the `library` type, so
+sharing between owners can later be added inside it without touching them or
+the layout on disk. Every filename arriving from the network goes through
+`safeGPXFilename`, which requires a bare `*.gpx` with no directory component;
+a name such as `../../etc/passwd` is refused with a 400. Every filesystem
+operation then goes through the owner's `os.Root`, so a symlink inside a
+library cannot escape it, into another owner's least of all. Saves use a
+rooted temp file and rename, so an interrupted save cannot leave a truncated
+track behind. Uploads use exclusive creation and return 409 rather than
+replacing an existing filename; the 409 only ever reflects the caller's own
+library.
 
 **`elevation.go`** proxies to one of three DEM providers and normalises them
 all to the same response shape, so the frontend cannot tell them apart:
@@ -252,16 +294,16 @@ back in order. A point the service has no value for comes back `null`, never
 
 | Route | Purpose |
 | --- | --- |
-| `GET /files` | Track library listing |
-| `GET /gpx/{name}` | Read a track |
+| `GET /files` | The caller's track library |
+| `GET /gpx/{name}` | Read one of the caller's tracks; another owner's is a 404 |
 | `PUT` / `POST /gpx/{name}` | Write a track (atomic replace) |
-| `POST /upload` | Create-only multipart upload, field `file`; returns 409 when the filename exists |
+| `POST /upload` | Create-only multipart upload, field `file`; returns 409 when the caller already has that filename |
 | `DELETE /gpx/{name}` | Delete a track |
 | `GET /elevation?lat=&lon=&dataset=` | Single-point DEM lookup |
 | `POST /elevation/batch` | `{locations: "lat,lon\|lat,lon…", dataset}` — chunked and stitched |
 | `POST /elevation/prefetch` | `{bbox: [s,w,n,e]}` — warm the tile cache for an area, in the background |
 | `GET /elevation/prefetch` | Progress of the running prefetch, polled by the UI |
-| `GET /config` | Runtime public-service configuration, currently the Nominatim-compatible search URL |
+| `GET /config` | Runtime public-service configuration: the Nominatim-compatible search URL, offline capabilities, and whether the caller is an operator |
 | `GET /fuel` | Persisted Spanish national fuel snapshot |
 | `GET /places/search` | Validated, server-rate-limited Nominatim search |
 | `POST /pois/search` | Allowlisted POI kind and bounded bbox |
@@ -276,11 +318,11 @@ back in order. A point the service has no value for comes back `null`, never
 | `POST /offline/routing/plan` | Broom acquisition estimate; no PBF or terrain downloads |
 | `POST /offline/routing/profile` | Compile and warm a session-only BRF; returns a capability token |
 | `POST /offline/routing/profile/release` | Release a session BRF and its temporary metrics |
-| `POST /offline/routing/prepare` / `cancel` | Protected routing-data preparation lifecycle |
+| `POST /offline/routing/prepare` / `cancel` | Protected routing-data preparation lifecycle; operator only under `--auth` |
 | `POST /offline/routing/pin` / `prune` | Protected Broom generation retention and cache cleanup |
-| `PUT /offline/mode` | Protected runtime transition between `auto` and `cache-only` when startup policy permits |
-| `/offline/packs` | Estimate, create, inspect, cancel and delete trip packs |
-| `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope |
+| `PUT /offline/mode` | Protected runtime transition between `auto` and `cache-only` when startup policy permits; operator only under `--auth` |
+| `/offline/packs` | Estimate, create, inspect, cancel and delete the caller's own trip packs |
+| `DELETE /offline/cache?scope=…` | Clear unpinned entries in one scope: the caller's own for owner-scoped scopes (`places`, `elevation`), the operator's for shared ones and for everything |
 | `GET /healthz` | Lightweight liveness check; returns 204. The only route open under `--auth` |
 | `/auth/*` | With `--auth` only: enrollment page, sign-in assets and `/auth/api/{login,enroll}/{begin,finish}`, `enroll/check`, `logout`, `me` |
 | `/mcp/browser/*` | Private browser broker, mounted only with `--mcp`. The agent-facing `/mcp` endpoint is **not** here: it is served by a separate loopback listener so a reverse proxy in front of this one cannot reach it |

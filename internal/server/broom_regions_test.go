@@ -26,7 +26,7 @@ func TestRealRoutingCatalogue(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	t.Cleanup(upstream.Close)
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), OfflineCacheDir: t.TempDir(), RoutingIndexURL: upstream.URL + "/index.json"})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), OfflineCacheDir: t.TempDir(), RoutingIndexURL: upstream.URL + "/index.json"})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	for _, tt := range []struct {
@@ -57,7 +57,7 @@ func TestRoutingSuggestionCachesOnlyCatalogue(t *testing.T) {
 		_, _ = w.Write([]byte(`{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"id":"test-region","name":"Test Region","urls":{"pbf":"https://example.test/test.osm.pbf"}},"geometry":{"type":"Polygon","coordinates":[[[0,0],[10,0],[10,10],[0,10],[0,0]]]}}]}`))
 	}))
 	t.Cleanup(upstream.Close)
-	s, err := New(Config{GPXDir: t.TempDir(), RoutingCacheDir: t.TempDir(), OfflineCacheDir: t.TempDir(), RoutingIndexURL: upstream.URL + "/index.json"})
+	s, err := New(Config{DataDir: t.TempDir(), RoutingCacheDir: t.TempDir(), OfflineCacheDir: t.TempDir(), RoutingIndexURL: upstream.URL + "/index.json"})
 	require.NoError(t, err)
 	cleanupTestServer(t, s)
 	request := `{"bbox":{"south":2,"west":2,"north":3,"east":3}}`

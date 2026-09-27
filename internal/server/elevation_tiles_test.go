@@ -365,7 +365,7 @@ func TestTerrariumDiskQuotaRefusesOversizedTileAndDoesNotDoubleCount(t *testing.
 
 func TestOfflineStatusReportsTerrariumQuota(t *testing.T) {
 	s, err := New(Config{
-		GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(),
+		DataDir: t.TempDir(), ElevationTiles: true, ElevationTileCache: t.TempDir(),
 		ElevationTileCacheMaxBytes: 123456,
 	})
 	if err != nil {
@@ -422,7 +422,7 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 	ts.ele = func(x, y int) float64 { return 1234 }
 
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationTiles:   true,
 		ElevationTileURL: ts.url(),
 		ElevationDataset: "srtm30m",
@@ -455,7 +455,7 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 func waitForPrefetch(t *testing.T, s *tileStore) prefetchProgress {
 	t.Helper()
 	for i := 0; i < 1000; i++ {
-		p := s.progress()
+		p := s.progress(LocalOwner)
 		if !p.Running {
 			return p
 		}
@@ -470,7 +470,7 @@ func TestPrefetchWarmsTheAreaAhead(t *testing.T) {
 	s := newTileServerStore(t, ts, "")
 
 	// A small box around Zaragoza.
-	started := s.startPrefetch(41.60, -0.95, 41.70, -0.82)
+	started := s.startPrefetch(LocalOwner, 41.60, -0.95, 41.70, -0.82)
 	if !started.Running || started.Total == 0 {
 		t.Fatalf("prefetch did not start: %+v", started)
 	}
@@ -501,7 +501,7 @@ func TestPrefetchClampsATooWideArea(t *testing.T) {
 	s := newTileServerStore(t, ts, "")
 
 	// Roughly Zaragoza to Teruel and well beyond, at z13.
-	got := s.startPrefetch(39.5, -2.5, 42.5, 0.5)
+	got := s.startPrefetch(LocalOwner, 39.5, -2.5, 42.5, 0.5)
 	if !got.Clamped {
 		t.Fatalf("expected the area to be clamped, got %+v", got)
 	}
@@ -526,7 +526,7 @@ func TestConfiguredHostWinsOverTiles(t *testing.T) {
 	tiles := newTileServer(t)
 
 	s, err := New(Config{
-		GPXDir:           t.TempDir(),
+		DataDir:          t.TempDir(),
 		ElevationTiles:   true,
 		ElevationTileURL: tiles.url(),
 		ElevationHost:    dem.URL,
@@ -557,8 +557,8 @@ func TestPrefetchReplacesThePreviousArea(t *testing.T) {
 	ts := newTileServer(t)
 	s := newTileServerStore(t, ts, "")
 
-	s.startPrefetch(41.60, -0.95, 41.70, -0.82)
-	second := s.startPrefetch(40.30, -1.20, 40.40, -1.05)
+	s.startPrefetch(LocalOwner, 41.60, -0.95, 41.70, -0.82)
+	second := s.startPrefetch(LocalOwner, 40.30, -1.20, 40.40, -1.05)
 	if !second.Running {
 		t.Fatalf("second prefetch did not start: %+v", second)
 	}
@@ -585,7 +585,7 @@ func TestPrefetchEndpointsReportDisabledWithoutTiles(t *testing.T) {
 
 func TestPrefetchEndpointValidatesBbox(t *testing.T) {
 	ts := newTileServer(t)
-	s, err := New(Config{GPXDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: ts.url()})
+	s, err := New(Config{DataDir: t.TempDir(), ElevationTiles: true, ElevationTileURL: ts.url()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,5 +595,41 @@ func TestPrefetchEndpointValidatesBbox(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("body %q: status = %d, want 400", body, rec.Code)
 		}
+	}
+}
+
+// Each owner's prefetch is its own: one user panning their map does not
+// cancel another's warm-up, and each sees only their own progress.
+func TestPrefetchIsPerOwner(t *testing.T) {
+	ts := newTileServer(t)
+	s := newTileServerStore(t, ts, "")
+	first := s.startPrefetch(ownerA, 41.60, -0.95, 41.70, -0.82)
+	second := s.startPrefetch(ownerB, 40.30, -1.20, 40.40, -1.05)
+	if !first.Running || !second.Running {
+		t.Fatalf("prefetches did not start: %+v %+v", first, second)
+	}
+	for _, owner := range []Owner{ownerA, ownerB} {
+		for i := 0; i < 1000 && s.progress(owner).Running; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if a := s.progress(ownerA); a.Done != first.Total || a.Total != first.Total {
+		t.Errorf("A's prefetch was disturbed: %+v", a)
+	}
+	if b := s.progress(ownerB); b.Done != second.Total {
+		t.Errorf("B's prefetch = %+v", b)
+	}
+	if unknown := s.progress(Owner("cccccccccccccccccccccccccccccccccccccccccccccccccccc")); unknown.Running || unknown.Total != 0 {
+		t.Errorf("a stranger sees progress: %+v", unknown)
+	}
+	// States are bounded: past the cap the oldest idle one goes.
+	for i := range maxPrefetchOwners + 2 {
+		s.prefetchFor(testOwner(i))
+	}
+	s.prefetchMu.Lock()
+	open := len(s.prefetches)
+	s.prefetchMu.Unlock()
+	if open != maxPrefetchOwners {
+		t.Fatalf("prefetch states = %d, want %d", open, maxPrefetchOwners)
 	}
 }

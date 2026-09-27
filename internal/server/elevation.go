@@ -524,9 +524,10 @@ func (s *Server) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	owner, _ := ownerOf(r)
 	writeJSON(w, http.StatusOK, prefetchResponse{
 		Enabled:          true,
-		prefetchProgress: s.elevation.tiles.startPrefetch(south, west, north, east),
+		prefetchProgress: s.elevation.tiles.startPrefetch(owner, south, west, north, east),
 	})
 }
 
@@ -536,8 +537,9 @@ func (s *Server) handlePrefetchStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefetchResponse{Enabled: false})
 		return
 	}
+	owner, _ := ownerOf(r)
 	writeJSON(w, http.StatusOK, prefetchResponse{
 		Enabled:          true,
-		prefetchProgress: s.elevation.tiles.progress(),
+		prefetchProgress: s.elevation.tiles.progress(owner),
 	})
 }

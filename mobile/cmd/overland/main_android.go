@@ -47,6 +47,9 @@ func main() {
 			log.Print("Android storage is unavailable")
 			return
 		}
+		if err := host.UsePrivateTempDir(filepath.Join(data, "tmp")); err != nil {
+			log.Printf("mobile temp dir: %v", err)
+		}
 		var locationMu sync.Mutex
 		h, err := host.Start(filepath.Join(data, "overland"), "127.0.0.1:0", frontend.Assets(), host.Native{
 			Background: func(active bool) {

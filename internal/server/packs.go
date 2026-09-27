@@ -133,9 +133,12 @@ type packEstimate struct {
 	MapTiles       map[string][]tileKey      `json:"-"`
 	RasterMapTiles map[string][]tileKey      `json:"-"`
 	ExistingKeys   []existingPackResource    `json:"-"`
-	GenericBytes   int64                     `json:"genericBytes"`
-	Glyphs         []glyphPackResource       `json:"-"`
-	POIRequests    []poiPackResource         `json:"-"`
+	// OwnerRemaining is what the owner's download allowance still permits,
+	// or a negative value when there is no allowance.
+	OwnerRemaining int64               `json:"-"`
+	GenericBytes   int64               `json:"genericBytes"`
+	Glyphs         []glyphPackResource `json:"-"`
+	POIRequests    []poiPackResource   `json:"-"`
 }
 
 type glyphPackResource struct {
@@ -1192,7 +1195,7 @@ func (m *packManager) startContext(ctx context.Context, owner Owner, input packI
 	if ownerPending >= ownerPackJobLimit(owner) {
 		return nil, packEstimate{}, fmt.Errorf("at most %d of your pack jobs may be active or queued", ownerPackJobLimit(owner))
 	}
-	estimate, err := m.admissibleEstimate(ctx, input)
+	estimate, err := m.admissibleEstimate(ctx, owner, input)
 	if err != nil {
 		return nil, estimate, err
 	}
@@ -1259,16 +1262,50 @@ func (m *packManager) startContext(ctx context.Context, owner Owner, input packI
 	return &copyManifest, estimate, nil
 }
 
-// admissibleEstimate estimates a pack and checks that quota and disk space can
-// hold it. It runs again when a queued pack starts, since earlier packs change
-// both the remaining quota and what is already cached.
-func (m *packManager) admissibleEstimate(ctx context.Context, input packInput) (packEstimate, error) {
+// ownerDownloadedLocked is what the owner's packs have stored so far: the
+// bytes each admitted, in every state, since an incomplete pack keeps its
+// pins. Objects two packs share are counted for whichever downloaded them.
+func (m *packManager) ownerDownloadedLocked(owner Owner) int64 {
+	var used int64
+	for _, pack := range m.packs {
+		if pack.owner == owner {
+			used += pack.Bytes
+		}
+	}
+	return used
+}
+
+// ownerDownloadRemaining is the owner's remaining download allowance, or -1
+// when there is none: the server has no allowance configured, or the owner
+// is the local one, alone on its server.
+func (m *packManager) ownerDownloadRemaining(owner Owner) int64 {
+	limit := m.server.ownerDownloadMaxBytes
+	if limit <= 0 || owner == LocalOwner {
+		return -1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return max(0, limit-m.ownerDownloadedLocked(owner))
+}
+
+// admissibleEstimate estimates a pack and checks that quota, disk space and
+// the owner's allowance can hold it. It runs again when a queued pack
+// starts, since earlier packs change both the remaining quota and what is
+// already cached.
+func (m *packManager) admissibleEstimate(ctx context.Context, owner Owner, input packInput) (packEstimate, error) {
 	estimate, err := m.estimateContext(ctx, input)
 	if err != nil {
 		return packEstimate{}, err
 	}
 	if estimate.Resources == 0 {
 		return estimate, errors.New("pack has no provider-permitted resources to prepare")
+	}
+	estimate.OwnerRemaining = m.ownerDownloadRemaining(owner)
+	if estimate.OwnerRemaining >= 0 {
+		if estimate.EstimatedBytes > estimate.OwnerRemaining {
+			return estimate, fmt.Errorf("pack needs about %s but your download allowance has %s left; remove a download first", formatBytes(estimate.EstimatedBytes), formatBytes(estimate.OwnerRemaining))
+		}
+		estimate.RemainingQuota = min(estimate.RemainingQuota, estimate.OwnerRemaining)
 	}
 	if estimate.GenericBytes > estimate.RemainingQuota {
 		return estimate, errors.New("pack would exceed the generic cache quota")
@@ -1298,7 +1335,9 @@ func (m *packManager) launchLocked(manifest *packManifest, estimate packEstimate
 	if manifest.Input.Regional {
 		timeout = regionalJobTimeout
 	}
-	jobCtx, cancel := context.WithTimeout(m.server.ctx, timeout)
+	// The job's fetches are the owner's: they take the owner's share of the
+	// outbound queue, not a share of nobody's.
+	jobCtx, cancel := context.WithTimeout(WithOwner(m.server.ctx, manifest.owner), timeout)
 	manifest.cancel = cancel
 	manifest.working = true
 	if m.server.elevation.tiles != nil {
@@ -1323,10 +1362,10 @@ func (m *packManager) startQueued() {
 			return
 		}
 		next.working = true
-		input := next.Input
+		input, owner := next.Input, next.owner
 		m.mu.Unlock()
 
-		estimate, err := m.admissibleEstimate(m.server.ctx, input)
+		estimate, err := m.admissibleEstimate(m.server.ctx, owner, input)
 
 		m.mu.Lock()
 		switch {
@@ -1527,6 +1566,12 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 		return true
 	}
 	budget := &packAdmissionBudget{limit: estimate.RemainingQuota}
+	// One allowance covers both stores; each side keeps room for the other's
+	// estimate, which is as exact as the estimate itself.
+	elevationAllowance := int64(math.MaxInt64)
+	if estimate.OwnerRemaining >= 0 {
+		elevationAllowance = max(0, estimate.OwnerRemaining-estimate.GenericBytes)
+	}
 	acceptResponse := func(category string, response cachedResponse, fetchErr error) bool {
 		if fetchErr != nil {
 			return recordFailure(category, fetchErr)
@@ -1568,7 +1613,7 @@ func (m *packManager) run(ctx context.Context, cancel context.CancelFunc, manife
 				limit = min(limit, m.server.elevation.tiles.downloadCapacity())
 			}
 		}
-		elevationBudget := &packAdmissionBudget{limit: limit}
+		elevationBudget := &packAdmissionBudget{limit: min(limit, elevationAllowance)}
 		// Leave slots for interactive elevation lookups. The tile store also
 		// applies its global six-request bound across packs and other callers.
 		return runTileBatchesWithWorkers(ctx, estimate.ElevationTiles, 4, func(workCtx context.Context, key tileKey) bool {

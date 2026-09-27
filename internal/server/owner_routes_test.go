@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -346,5 +347,105 @@ func TestRemoveOwnerCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, ownersDir, string(ownerA))); !os.IsNotExist(err) {
 		t.Fatalf("owner directory remains: %v", err)
+	}
+}
+
+func TestOwnerDownloadAllowanceCapsPacks(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Fecha":"today","ListaEESSPrecio":[]}`)
+	}))
+	defer upstream.Close()
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), FuelURL: upstream.URL, RequireOwner: true, OwnerDownloadMaxBytes: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	// The fuel snapshot is estimated at 8 MiB, over a 4 MiB allowance.
+	input := packInput{Name: "fuel", BBox: &bbox{South: 40, West: -1, North: 41, East: 0}, Scopes: []string{"fuel"}}
+	if _, _, err := s.packs.start(ownerA, input); err == nil || !strings.Contains(err.Error(), "allowance") {
+		t.Fatalf("over allowance = %v", err)
+	}
+	if _, _, err := s.packs.start(LocalOwner, input); err != nil {
+		t.Fatalf("the local owner has no allowance: %v", err)
+	}
+	if rec := doAs(t, s, ownerA, http.MethodGet, "/offline/status", nil, nil); !strings.Contains(rec.Body.String(), `"downloads":{"bytes":0,"maxBytes":4194304}`) {
+		t.Fatalf("status lacks the allowance: %s", rec.Body)
+	}
+	if rec := doAs(t, s, LocalOwner, http.MethodGet, "/offline/status", nil, nil); strings.Contains(rec.Body.String(), `"downloads"`) {
+		t.Fatalf("local owner shows an allowance: %s", rec.Body)
+	}
+	// Bytes already stored count against it, in every state.
+	s.packs.mu.Lock()
+	s.packs.packs["ffffffffffffffffffffffffffffffff"] = &packManifest{ID: "ffffffffffffffffffffffffffffffff", owner: ownerA, State: "incomplete", Bytes: 3 << 20}
+	s.packs.mu.Unlock()
+	if remaining := s.packs.ownerDownloadRemaining(ownerA); remaining != 1<<20 {
+		t.Fatalf("remaining = %d", remaining)
+	}
+	if remaining := s.packs.ownerDownloadRemaining(ownerB); remaining != 4<<20 {
+		t.Fatalf("B remaining = %d", remaining)
+	}
+}
+
+// Once the outbound queue is contended, one signed-in owner holds at most a
+// quarter of it; under light load nobody is limited.
+func TestOutboundQueueIsSharedFairlyBetweenOwners(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"elements":[{"type":"node","id":1,"lat":1,"lon":1,"tags":{}}]}`)
+	}))
+	defer upstream.Close()
+	defer close(release)
+	s, err := New(Config{DataDir: t.TempDir(), ElevationHost: "http://elevation.invalid", OfflineCacheDir: t.TempDir(), OverpassURL: upstream.URL, RequireOwner: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestServer(t, s)
+	s.outbound.maxPending, s.outbound.maxPendingPerProvider = 8, 8
+	s.providers["pois"].group = newConcurrentRateGroup(0, 8)
+	policy := s.providers["pois"]
+	start := func(owner Owner, i int) {
+		bounds := bbox{South: 40 + float64(i), West: -1, North: 40.1 + float64(i), East: -0.9}
+		request, err := buildPOIRequest(policy, "fuel", bounds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go s.outbound.do(WithOwner(context.Background(), owner), request)
+	}
+	pending := func(owner Owner) int {
+		s.outbound.mu.Lock()
+		defer s.outbound.mu.Unlock()
+		return s.outbound.pendingOwner[owner]
+	}
+	for i := range 4 {
+		start(ownerA, i)
+	}
+	for i := 0; i < 1000 && pending(ownerA) < 4; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if pending(ownerA) != 4 {
+		t.Fatalf("A holds %d under light load, want 4", pending(ownerA))
+	}
+	// The queue is now half full: A is at its quarter and refused; B is not.
+	request, _ := buildPOIRequest(policy, "water", bbox{South: 10, West: -1, North: 10.1, East: -0.9})
+	if _, err := s.outbound.do(WithOwner(context.Background(), ownerA), request); err == nil || !strings.Contains(err.Error(), "queue is full") {
+		t.Fatalf("A's fifth request = %v, want busy", err)
+	}
+	start(ownerB, 20)
+	for i := 0; i < 1000 && pending(ownerB) < 1; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if pending(ownerB) != 1 {
+		t.Fatalf("B was refused by A's share")
+	}
+	// The local owner is never limited.
+	start(LocalOwner, 30)
+	for i := 0; i < 1000 && pending(LocalOwner) < 1; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if pending(LocalOwner) != 1 {
+		t.Fatal("the local owner was refused")
 	}
 }

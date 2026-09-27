@@ -70,6 +70,10 @@ type Config struct {
 	// the owner's data directory. Zero uses 64 MiB and 4096 entries.
 	OwnerCacheMaxBytes   int64
 	OwnerCacheMaxEntries int
+	// OwnerDownloadMaxBytes caps what one signed-in owner's trip packs may
+	// store, so a shared disk is not one user's alone. Zero is no cap; the
+	// local owner never has one.
+	OwnerDownloadMaxBytes int64
 	// OfflineMode is "auto" or "cache-only". Cache-only never uses an
 	// outbound transport, including for elevation tile misses.
 	OfflineMode string
@@ -136,35 +140,37 @@ const (
 
 // Server is an http.Handler exposing the whole app.
 type Server struct {
-	dataDir         string
-	spaces          *ownerSpaces
-	library         *library
-	requireOwner    bool
-	routeClasses    map[string]routeClass
-	elevation       *elevationProxy
-	nominatimURL    string
-	modes           *offlineModeController
-	cache           *cacheStore
-	ownerCaches     *ownerCaches
-	ownerScopes     map[string]bool
-	outbound        *outboundClient
-	providers       map[string]*providerPolicy
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	trustedUIOrigin string
-	adminToken      string
-	openFreeMap     *openFreeMapManager
-	rasterMaps      map[string]*rasterAdapter
-	packs           *packManager
-	broom           *broomRoutingService
-	allowedOrigins  map[string]struct{}
-	mcpBrowser      http.Handler
-	behindProxy     bool
-	assets          fs.FS
-	handler         http.Handler
-	statsInterval   time.Duration
-	statsLogger     *log.Logger
+	dataDir      string
+	spaces       *ownerSpaces
+	library      *library
+	requireOwner bool
+	routeClasses map[string]routeClass
+	elevation    *elevationProxy
+	nominatimURL string
+	modes        *offlineModeController
+	cache        *cacheStore
+	ownerCaches  *ownerCaches
+	ownerScopes  map[string]bool
+	// ownerDownloadMaxBytes is Config.OwnerDownloadMaxBytes.
+	ownerDownloadMaxBytes int64
+	outbound              *outboundClient
+	providers             map[string]*providerPolicy
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	trustedUIOrigin       string
+	adminToken            string
+	openFreeMap           *openFreeMapManager
+	rasterMaps            map[string]*rasterAdapter
+	packs                 *packManager
+	broom                 *broomRoutingService
+	allowedOrigins        map[string]struct{}
+	mcpBrowser            http.Handler
+	behindProxy           bool
+	assets                fs.FS
+	handler               http.Handler
+	statsInterval         time.Duration
+	statsLogger           *log.Logger
 }
 
 // New validates cfg, creates the GPX directory and returns the handler.
@@ -341,17 +347,18 @@ func New(cfg Config) (*Server, error) {
 	nominatimURL := strings.TrimRight(parsedURLs["nominatim"].String(), "/")
 
 	s := &Server{
-		dataDir:         cfg.DataDir,
-		spaces:          spaces,
-		library:         &library{spaces: spaces},
-		requireOwner:    cfg.RequireOwner,
-		modes:           modes,
-		cache:           cache,
-		providers:       providers,
-		ctx:             rootCtx,
-		cancel:          cancel,
-		trustedUIOrigin: trustedUIOrigin,
-		adminToken:      cfg.OfflineAdminToken,
+		dataDir:               cfg.DataDir,
+		spaces:                spaces,
+		library:               &library{spaces: spaces},
+		requireOwner:          cfg.RequireOwner,
+		ownerDownloadMaxBytes: cfg.OwnerDownloadMaxBytes,
+		modes:                 modes,
+		cache:                 cache,
+		providers:             providers,
+		ctx:                   rootCtx,
+		cancel:                cancel,
+		trustedUIOrigin:       trustedUIOrigin,
+		adminToken:            cfg.OfflineAdminToken,
 		elevation: &elevationProxy{
 			tiles:          tiles,
 			host:           strings.TrimSpace(cfg.ElevationHost),

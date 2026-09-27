@@ -120,6 +120,7 @@ func Flags() []cli.Flag {
 		// country's maps need several hundred thousand entries.
 		&cli.IntFlag{Name: "offline-cache-max-entries", Usage: "response-cache entry limit (about 0.9 KB of memory each when used)", Value: 1000000, Sources: util.IntEnv("OFFLINE_CACHE_MAX_ENTRIES")},
 		&cli.StringFlag{Name: "offline-mode", Usage: "outbound mode: auto or cache-only", Value: "auto", Sources: util.NonEmptyEnv("OFFLINE_MODE")},
+		&cli.StringFlag{Name: "owner-download-max-bytes", Usage: `cap on one signed-in account's trip-pack storage (for example 20GiB); 0 is no cap`, Value: "0", Sources: util.NonEmptyEnv("OWNER_DOWNLOAD_MAX_BYTES")},
 		&cli.DurationFlag{Name: "stats-log-interval", Usage: "interval for privacy-safe aggregate cache and outbound stats (0 disables)", Value: time.Minute, Sources: util.NonEmptyEnv("STATS_LOG_INTERVAL")},
 		&cli.StringFlag{Name: "upstream-contact", Usage: "operator contact included in outbound User-Agent", Value: "https://github.com/lalotone/overland-gpx-editor", Sources: util.NonEmptyEnv("UPSTREAM_CONTACT")},
 		&cli.StringFlag{Name: "trusted-ui-origin", Usage: "exact remote UI origin allowed to manage offline data", Sources: util.NonEmptyEnv("TRUSTED_UI_ORIGIN")},
@@ -165,6 +166,10 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 	tileCacheBytes, availableTiles, err := parseCacheQuota(cmd.String("elevation-tile-cache-max-bytes"))
 	if err != nil {
 		return fmt.Errorf("elevation-tile-cache-max-bytes: %w", err)
+	}
+	ownerDownloadBytes, err := parseOptionalByteSize(cmd.String("owner-download-max-bytes"))
+	if err != nil {
+		return fmt.Errorf("owner-download-max-bytes: %w", err)
 	}
 	if (cmd.Bool("routing-prepare") || cmd.Bool("routing-update")) && strings.TrimSpace(cmd.String("routing-region")) == "" {
 		return errors.New("--routing-prepare and --routing-update require --routing-region")
@@ -224,6 +229,7 @@ func Run(ctx context.Context, cmd *cli.Command) error {
 		OfflineCacheDir:            cmd.String("offline-cache-dir"),
 		OfflineCacheMaxBytes:       cacheBytes,
 		OfflineCacheMaxEntries:     cmd.Int("offline-cache-max-entries"),
+		OwnerDownloadMaxBytes:      ownerDownloadBytes,
 		OfflineMode:                cmd.String("offline-mode"),
 		StatsLogInterval:           cmd.Duration("stats-log-interval"),
 		UpstreamContact:            cmd.String("upstream-contact"),
@@ -435,6 +441,14 @@ func parseCacheQuota(value string) (int64, bool, error) {
 	}
 	bytes, err := parseByteSize(value)
 	return bytes, false, err
+}
+
+// parseOptionalByteSize reads a byte size where "0" or empty means none.
+func parseOptionalByteSize(value string) (int64, error) {
+	if trimmed := strings.TrimSpace(value); trimmed == "" || trimmed == "0" {
+		return 0, nil
+	}
+	return parseByteSize(value)
 }
 
 func parseByteSize(value string) (int64, error) {

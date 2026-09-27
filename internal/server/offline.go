@@ -202,6 +202,8 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, r *http.Request) {
 		Providers  map[string]providerHealth `json:"providers"`
 		Jobs       []jobAggregate            `json:"jobs"`
 		ActiveJobs int                       `json:"activeJobs"`
+		// Downloads is the caller's trip-pack allowance, when the server has one.
+		Downloads *downloadAllowance `json:"downloads,omitempty"`
 	}{
 		Enabled: true, Mode: s.modes.mode(), Writable: cache.Writable, Bytes: cache.Bytes,
 		MaxBytes: cache.Quota, Entries: cache.Entries, MaxEntries: s.cache.maxEntries,
@@ -212,7 +214,23 @@ func (s *Server) handleOfflineStatus(w http.ResponseWriter, r *http.Request) {
 			Entries  int   `json:"entries"`
 		}{legacyBytes, legacyMaxBytes, legacyEntries},
 		Providers: s.outbound.healthSnapshot(), Jobs: jobs, ActiveJobs: active.Active,
+		Downloads: s.packs.allowance(owner),
 	})
+}
+
+type downloadAllowance struct {
+	Bytes    int64 `json:"bytes"`
+	MaxBytes int64 `json:"maxBytes"`
+}
+
+// allowance reports the owner's download allowance, or nil without one.
+func (m *packManager) allowance(owner Owner) *downloadAllowance {
+	if m.server.ownerDownloadMaxBytes <= 0 || owner == LocalOwner {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &downloadAllowance{Bytes: m.ownerDownloadedLocked(owner), MaxBytes: m.server.ownerDownloadMaxBytes}
 }
 
 func (s *Server) handleOfflineMode(w http.ResponseWriter, r *http.Request) {

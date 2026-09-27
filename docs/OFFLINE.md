@@ -297,7 +297,14 @@ jobs. Two accounts downloading the same area get a pack each; the cached
 objects are shared and stay pinned until the last pack referring to them is
 removed. Waiting packs start from the account with the fewest running, and a
 signed-in account may have at most 16 packs active or queued out of the
-server's 50. Pack summaries expose only their validated bbox, never the
+server's 50. `OWNER_DOWNLOAD_MAX_BYTES` caps what one account's packs may
+store (the bytes they admitted, in every state); an estimate over the
+remainder is refused with the figures, `/offline/status` reports `downloads`
+with the account's use, and removing a pack gives the space back. Outbound
+provider requests are shared fairly: while the queue is under half full
+nobody is limited, and once it is contended one account may hold at most a
+quarter of it. The local owner, alone on its server, has none of these
+shares. Pack summaries expose only their validated bbox, never the
 manifest's route, cache keys or request data. The Downloads view lists every pack, including
 route packs created by older versions, and can stop active work, resume partial
 map downloads and delete packs with confirmation.

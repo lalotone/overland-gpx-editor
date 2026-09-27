@@ -407,6 +407,7 @@ bundle at build time.
 | `OFFLINE_CACHE_MAX_BYTES` | backend | `1GiB` | Quota for responses cached while browsing; least-recently-used entries are evicted past it. Downloaded regions are not counted: they are limited only by free disk space, less a 64 MiB margin. `available` lets browsing use free space too |
 | `OFFLINE_CACHE_MAX_ENTRIES` | backend | `1000000` | Generic cache entry/inode guard; the index costs about 0.9 KB of memory per entry in use, and a large country needs several hundred thousand |
 | `OFFLINE_MODE` | backend | `auto` | `auto` or strict no-outbound `cache-only` |
+| `OWNER_DOWNLOAD_MAX_BYTES` | backend | `0` (no cap) | With `AUTH`, the most one account's trip packs may store, for example `20GiB` |
 | `STATS_LOG_INTERVAL` | backend | `1m` | Privacy-safe aggregate cache/outbound log interval; `0` disables it |
 | `UPSTREAM_CONTACT` | backend | project URL | Contact included in the outbound User-Agent |
 | `TRUSTED_UI_ORIGIN` | backend | *(loopback UI only)* | Exact non-loopback UI origin allowed to manage offline data |

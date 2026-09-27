@@ -333,6 +333,20 @@ func TestParseCacheQuota(t *testing.T) {
 	}
 }
 
+func TestParseOptionalByteSize(t *testing.T) {
+	for _, none := range []string{"", "0", " 0 "} {
+		if bytes, err := parseOptionalByteSize(none); err != nil || bytes != 0 {
+			t.Fatalf("parseOptionalByteSize(%q) = %d, %v", none, bytes, err)
+		}
+	}
+	if bytes, err := parseOptionalByteSize("20GiB"); err != nil || bytes != 20<<30 {
+		t.Fatalf("explicit = %d, %v", bytes, err)
+	}
+	if _, err := parseOptionalByteSize("lots"); err == nil {
+		t.Fatal("invalid size was accepted")
+	}
+}
+
 func TestParseByteSize(t *testing.T) {
 	tests := map[string]int64{"1": 1, "1KiB": 1 << 10, "2MiB": 2 << 20, "1GiB": 1 << 30, "2MB": 2_000_000}
 	for input, want := range tests {

@@ -247,7 +247,10 @@ type outboundClient struct {
 	inflight map[string]*inflightFetch
 	health   map[string]*healthState
 	pending  map[string]int
-	stats    outboundStats
+	// pendingOwner counts each owner's fetches in flight, for the fair
+	// share applied once the queue is contended.
+	pendingOwner map[Owner]int
+	stats        outboundStats
 
 	maxPending            int
 	maxPendingPerProvider int
@@ -262,7 +265,7 @@ func newOutboundClientWithModes(modes *offlineModeController, store *cacheStore,
 	return &outboundClient{
 		modes: modes, store: store, client: client, ctx: ctx, wg: wg, userAgent: userAgent,
 		referer: "https://github.com/lalotone/overland-gpx-editor", now: time.Now,
-		inflight: make(map[string]*inflightFetch), health: make(map[string]*healthState), pending: make(map[string]int),
+		inflight: make(map[string]*inflightFetch), health: make(map[string]*healthState), pending: make(map[string]int), pendingOwner: make(map[Owner]int),
 		maxPending: defaultMaxPendingOutbound, maxPendingPerProvider: defaultMaxPendingOutboundPerProvider,
 		fetchTimeout: defaultOutboundFetchTimeout,
 	}
@@ -327,13 +330,15 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 		o.mu.Unlock()
 		return cachedResponse{}, err
 	}
-	if len(o.inflight) >= o.maxPending || o.pending[p.name] >= o.maxPendingPerProvider {
+	owner, _ := OwnerFrom(ctx)
+	if len(o.inflight) >= o.maxPending || o.pending[p.name] >= o.maxPendingPerProvider || !o.ownerMayQueueLocked(owner) {
 		o.mu.Unlock()
 		return cachedResponse{}, &outboundBusyError{Scope: p.scope}
 	}
 	fetch := &inflightFetch{done: make(chan struct{})}
 	o.inflight[inflightKey] = fetch
 	o.pending[p.name]++
+	o.pendingOwner[owner]++
 	if len(o.inflight) > o.stats.PeakInFlight {
 		o.stats.PeakInFlight = len(o.inflight)
 	}
@@ -366,6 +371,9 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 		o.mu.Lock()
 		delete(o.inflight, inflightKey)
 		o.pending[p.name]--
+		if o.pendingOwner[owner]--; o.pendingOwner[owner] <= 0 {
+			delete(o.pendingOwner, owner)
+		}
 		close(fetch.done)
 		o.mu.Unlock()
 	}()
@@ -377,6 +385,18 @@ func (o *outboundClient) do(ctx context.Context, request cachedRequest) (respons
 	case <-ctx.Done():
 		return cachedResponse{}, ctx.Err()
 	}
+}
+
+// ownerMayQueueLocked applies the fair share. While the queue is under half
+// full nobody is limited, so a lone user browsing a map is never refused;
+// once it is contended, one signed-in owner may hold at most a quarter of
+// it, leaving the rest for everyone else. The local owner, alone on its
+// server, is never limited.
+func (o *outboundClient) ownerMayQueueLocked(owner Owner) bool {
+	if owner == LocalOwner || !owner.Valid() || len(o.inflight) < o.maxPending/2 {
+		return true
+	}
+	return o.pendingOwner[owner] < max(1, o.maxPending/4)
 }
 
 // storeFor picks the cache a request reads and writes: the shared store, or

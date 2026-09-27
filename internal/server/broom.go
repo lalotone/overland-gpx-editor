@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	broomVersion        = "0.13.2"
+	broomVersion        = "0.16.1"
 	broomProfileName    = "overland-motorcycle"
 	maxBroomRouteBody   = 64 << 10
 	defaultRouteJobs    = 2

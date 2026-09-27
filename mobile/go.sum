@@ -1,5 +1,5 @@
-code.rbel.co/rubiojr/broom v0.16.1 h1:l+y/08tLNv5OiBjayoOY5ER6Wyj5FDAKp94wdembELE=
-code.rbel.co/rubiojr/broom v0.16.1/go.mod h1:KP2r/tB0tqk3r01w9FxsIOowlIaE6FX530c+u/91Yls=
+code.rbel.co/rubiojr/broom v0.16.2 h1:TS5xYUr573uWw2sUnoTKmnaFmqw8opfoR61i64YDAV8=
+code.rbel.co/rubiojr/broom v0.16.2/go.mod h1:KP2r/tB0tqk3r01w9FxsIOowlIaE6FX530c+u/91Yls=
 github.com/DataDog/czlib v0.0.0-20240814115052-86a9592b3985 h1:0nepyu+UcpcOt3rrr0G4PvNDuoEW2aoqtbh2NK0AQ3w=
 github.com/DataDog/czlib v0.0.0-20240814115052-86a9592b3985/go.mod h1:ROY4muaTWpoeQAx/oUkvxe9zKCmgU5xDGXsfEbA+omc=
 github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=

@@ -597,3 +597,39 @@ func TestPrefetchEndpointValidatesBbox(t *testing.T) {
 		}
 	}
 }
+
+// Each owner's prefetch is its own: one user panning their map does not
+// cancel another's warm-up, and each sees only their own progress.
+func TestPrefetchIsPerOwner(t *testing.T) {
+	ts := newTileServer(t)
+	s := newTileServerStore(t, ts, "")
+	first := s.startPrefetch(ownerA, 41.60, -0.95, 41.70, -0.82)
+	second := s.startPrefetch(ownerB, 40.30, -1.20, 40.40, -1.05)
+	if !first.Running || !second.Running {
+		t.Fatalf("prefetches did not start: %+v %+v", first, second)
+	}
+	for _, owner := range []Owner{ownerA, ownerB} {
+		for i := 0; i < 1000 && s.progress(owner).Running; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if a := s.progress(ownerA); a.Done != first.Total || a.Total != first.Total {
+		t.Errorf("A's prefetch was disturbed: %+v", a)
+	}
+	if b := s.progress(ownerB); b.Done != second.Total {
+		t.Errorf("B's prefetch = %+v", b)
+	}
+	if unknown := s.progress(Owner("cccccccccccccccccccccccccccccccccccccccccccccccccccc")); unknown.Running || unknown.Total != 0 {
+		t.Errorf("a stranger sees progress: %+v", unknown)
+	}
+	// States are bounded: past the cap the oldest idle one goes.
+	for i := range maxPrefetchOwners + 2 {
+		s.prefetchFor(testOwner(i))
+	}
+	s.prefetchMu.Lock()
+	open := len(s.prefetches)
+	s.prefetchMu.Unlock()
+	if open != maxPrefetchOwners {
+		t.Fatalf("prefetch states = %d, want %d", open, maxPrefetchOwners)
+	}
+}

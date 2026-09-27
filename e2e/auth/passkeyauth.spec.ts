@@ -4,6 +4,8 @@
 import { expect, test } from '@playwright/test'
 import type { CDPSession, Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
+import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
 
 const origin = process.env.APP_ORIGIN!
 const appName = process.env.APP_NAME!
@@ -116,4 +118,48 @@ test("a deleted account's passkey is refused", async ({ page }) => {
   execFileSync(bin, ['user', 'delete', name, '--yes', '--db', db])
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page.locator('#auth-status')).toHaveText('passkey sign-in failed')
+})
+
+// Each account has its own library and its own say over server-wide state.
+test('accounts see only their own tracks, and only operators manage the server', async ({ page }) => {
+  await virtualAuthenticator(page)
+  const alice = unique('alice')
+  await enroll(page, alice)
+  await page.goto(`${origin}/`)
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  const gpx = '<gpx version="1.1" creator="e2e"><trk><name>Private</name></trk></gpx>'
+  expect(await page.evaluate(body => fetch('/gpx/private.gpx', { method: 'PUT', body, headers: { 'Content-Type': 'application/xml' } }).then(r => r.status), gpx)).toBe(200)
+  expect(await page.evaluate(() => fetch('/files').then(r => r.json()))).toEqual({ files: ['private.gpx'] })
+  // A signed-in user is not an operator unless named with --auth-operator.
+  const config = await page.evaluate(() => fetch('/config').then(r => r.json())) as { offline: { operator: boolean; modeControl?: string } }
+  expect(config.offline.operator).toBe(false)
+  expect(config.offline.modeControl).toBeUndefined()
+  expect(await page.evaluate(() => fetch('/offline/mode', { method: 'PUT', body: '{"mode":"cache-only"}', headers: { 'Content-Type': 'application/json', 'X-GPX-Editor': '1' } }).then(r => r.status))).toBe(403)
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  await expectSignedOut(page)
+
+  await enroll(page, unique('bob'))
+  await page.goto(`${origin}/`)
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  expect(await page.evaluate(() => fetch('/files').then(r => r.json()))).toEqual({ files: [] })
+  expect(await page.evaluate(() => fetch('/gpx/private.gpx').then(r => r.status))).toBe(404)
+  expect(await page.evaluate(() => fetch('/gpx/private.gpx', { method: 'DELETE' }).then(r => r.status))).toBe(404)
+  // Same name, different library: no conflict with alice's file.
+  expect(await page.evaluate(body => fetch('/gpx/private.gpx', { method: 'PUT', body, headers: { 'Content-Type': 'application/xml' } }).then(r => r.status), gpx)).toBe(200)
+  await page.getByRole('button', { name: 'Sign out' }).click()
+
+  // The operator named on the command line may change the offline mode.
+  await enroll(page, 'operator')
+  await page.goto(`${origin}/`)
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  const operatorConfig = await page.evaluate(() => fetch('/config').then(r => r.json())) as { offline: { operator: boolean; modeControl?: string } }
+  expect(operatorConfig.offline.operator).toBe(true)
+  expect(operatorConfig.offline.modeControl).toBe('/offline/mode')
+  expect(await page.evaluate(() => fetch('/files').then(r => r.json()))).toEqual({ files: [] })
+
+  // Deleting an account removes its library; nobody else's is touched.
+  execFileSync(bin, ['user', 'delete', alice, '--yes', '--db', db, '--data-dir', process.env.APP_DATA!])
+  const owners = readdirSync(join(process.env.APP_DATA!, 'owners'))
+  expect(owners.length).toBe(2)
+  for (const owner of owners) expect(owner).toMatch(/^[a-z2-7]{52}$/)
 })

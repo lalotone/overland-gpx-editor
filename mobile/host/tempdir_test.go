@@ -12,7 +12,7 @@ func TestUsePrivateTempDirClearsLeftoversAndRedirectsTempDir(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(dir, "broom-hgt-1.hgt")
+	stale := filepath.Join(dir, "overland-session-profile-1")
 	if err := os.WriteFile(stale, []byte("scratch"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -20,17 +20,16 @@ func TestUsePrivateTempDirClearsLeftoversAndRedirectsTempDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatalf("stale scratch file survived: %v", err)
+		t.Fatalf("stale temporary file survived: %v", err)
 	}
 	if got := os.TempDir(); got != dir {
 		t.Fatalf("os.TempDir() = %q, want %q", got, dir)
 	}
-	scratch, err := os.CreateTemp("", "broom-hgt-*.hgt")
+	created, err := os.MkdirTemp("", "overland-session-profile-*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	scratch.Close()
-	if filepath.Dir(scratch.Name()) != dir {
-		t.Fatalf("scratch file created in %q, want %q", filepath.Dir(scratch.Name()), dir)
+	if filepath.Dir(created) != dir {
+		t.Fatalf("temporary directory created in %q, want %q", filepath.Dir(created), dir)
 	}
 }

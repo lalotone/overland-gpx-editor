@@ -14,10 +14,37 @@ import (
 )
 
 type sessionBroomProfile struct {
+	// owner uploaded the profile; only their requests may route with it or
+	// release it. Another owner's token is treated as unknown.
+	owner   Owner
 	profile *broom.Profile
 	dataset *broomDataset
 	graph   string
 	expires time.Time
+}
+
+const (
+	maxSessionProfiles = 8
+	// One signed-in owner's share of the live profiles; the local owner,
+	// alone on its server, has them all.
+	maxOwnerSessionProfiles = 2
+)
+
+func ownerSessionProfileLimit(owner Owner) int {
+	if owner == LocalOwner {
+		return maxSessionProfiles
+	}
+	return maxOwnerSessionProfiles
+}
+
+// session returns the owner's live profile for a token, or nil. Expired
+// tokens and other owners' tokens are the same nil. Callers hold s.mu.
+func (s *broomRoutingService) session(owner Owner, id string) *sessionBroomProfile {
+	session := s.sessions[id]
+	if session == nil || session.owner != owner || time.Now().After(session.expires) {
+		return nil
+	}
+	return session
 }
 
 func (s *broomRoutingService) reapSessions() {
@@ -45,6 +72,7 @@ func (s *broomRoutingService) reapSessions() {
 }
 
 func (s *Server) handleSessionProfile(w http.ResponseWriter, r *http.Request) {
+	owner, _ := ownerOf(r)
 	var request struct {
 		Source string `json:"source"`
 	}
@@ -66,10 +94,15 @@ func (s *Server) handleSessionProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service.mu.Lock()
+	owned := 0
 	for id, session := range service.sessions {
 		if time.Now().After(session.expires) {
 			delete(service.sessions, id)
 			_ = session.dataset.close()
+			continue
+		}
+		if session.owner == owner {
+			owned++
 		}
 	}
 	current := service.current
@@ -78,7 +111,7 @@ func (s *Server) handleSessionProfile(w http.ResponseWriter, r *http.Request) {
 		writeBroomError(w, errRoutingNotReady)
 		return
 	}
-	if len(service.sessions) >= 8 {
+	if len(service.sessions) >= maxSessionProfiles || owned >= ownerSessionProfileLimit(owner) {
 		service.mu.Unlock()
 		writeError(w, http.StatusTooManyRequests, "Too many session profiles; remove an uploaded profile first")
 		return
@@ -123,7 +156,7 @@ func (s *Server) handleSessionProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Routing region changed; upload the profile again")
 		return
 	}
-	service.sessions[id] = &sessionBroomProfile{profile: profile, dataset: dataset, graph: router.Path(), expires: time.Now().Add(2 * time.Hour)}
+	service.sessions[id] = &sessionBroomProfile{owner: owner, profile: profile, dataset: dataset, graph: router.Path(), expires: time.Now().Add(2 * time.Hour)}
 	service.mu.Unlock()
 	messages := []string{}
 	for _, warning := range warnings {
@@ -140,9 +173,12 @@ func (s *Server) handleReleaseSessionProfile(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	owner, _ := ownerOf(r)
 	s.broom.mu.Lock()
-	session := s.broom.sessions[request.ID]
-	delete(s.broom.sessions, request.ID)
+	session := s.broom.session(owner, request.ID)
+	if session != nil {
+		delete(s.broom.sessions, request.ID)
+	}
 	s.broom.mu.Unlock()
 	if session != nil {
 		_ = session.dataset.close()

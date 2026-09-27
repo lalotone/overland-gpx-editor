@@ -290,7 +290,14 @@ func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
 	noStoreJSON(w, http.StatusOK, map[string]int{"removed": removed})
 }
 
-func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+// isOperator reports whether the caller may change server-wide state. Every
+// request is an operator's on a server without sign-in; with it, only those
+// the wrapper marked.
+func (s *Server) isOperator(r *http.Request) bool {
+	return !s.requireOwner || IsOperator(r.Context()) || s.validAdminToken(r)
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	type openFreeMapCapability struct {
 		Style     string `json:"style"`
@@ -305,6 +312,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 			Packs       string      `json:"packs"`
 			ModeControl string      `json:"modeControl,omitempty"`
 			Routing     string      `json:"routing,omitempty"`
+			// Operator says whether the caller may change the offline mode,
+			// prepare routing regions or clear the shared cache. A hint for
+			// the UI; the server enforces it regardless.
+			Operator bool `json:"operator"`
 		} `json:"offline"`
 		Services map[string]string `json:"services"`
 		Maps     struct {
@@ -318,7 +329,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	response.Offline.Mode = s.modes.mode()
 	response.Offline.Status = "/offline/status"
 	response.Offline.Packs = "/offline/packs"
-	if s.modes.canToggle() {
+	response.Offline.Operator = s.isOperator(r)
+	if s.modes.canToggle() && response.Offline.Operator {
 		response.Offline.ModeControl = "/offline/mode"
 	}
 	response.Services = map[string]string{"fuel": "/fuel", "places": "/places/search", "pois": "/pois/search"}

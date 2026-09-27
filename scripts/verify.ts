@@ -1541,6 +1541,17 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       const routingResult = await startRegionDownload(runtime, region, {}, ['routing'])
       check('routing alone prepares routing and starts no packs',
         calls.join(' | ') === 'POST /routing/prepare' && routingResult.packs.length === 0, calls.join(' | '))
+      // A signed-in user who is not an operator downloads maps for the
+      // region but never chooses the server's routing region.
+      calls.length = 0
+      const user = decodeRuntimeConfig({ offline: { enabled: true, routing: '/offline/routing', operator: false } })
+      const userResult = await startRegionDownload(user, region)
+      check('a non-operator gets maps and a note, and routing is never prepared',
+        !calls.some(call => call.includes('/routing/prepare')) && userResult.packs.length === 1 &&
+          userResult.skipped.some(item => item.includes('operator')), calls.join(' | ') + ' ' + userResult.skipped.join(' | '))
+      const refused = await startRegionDownload(user, region, {}, ['routing']).catch((reason: Error) => reason)
+      check('a non-operator asking for routing alone is told why', refused instanceof Error && refused.message.includes('operator'))
+      check('the operator flag defaults to true', runtime.offline?.operator === true && user.offline?.operator === false)
     } finally {
       globalThis.fetch = originalFetch
     }

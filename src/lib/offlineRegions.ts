@@ -65,6 +65,9 @@ export const RESOURCE_GROUPS: Record<ResourceGroup, { label: string; kinds: stri
 export const PACK_GROUPS: ResourceGroup[] = ['maps', 'terrain', 'places']
 export const ALL_RESOURCES: DownloadResource[] = ['routing', ...PACK_GROUPS]
 
+/** Shown to users who may not choose the server's routing region. */
+export const ROUTING_OPERATOR_ONLY = 'Routing regions are managed by the server operator.'
+
 export function isPackGroup(resource: DownloadResource): resource is ResourceGroup {
   return resource !== 'routing'
 }
@@ -751,10 +754,18 @@ export async function startRegionDownload(
   hooks: RegionDownloadHooks = {},
   resources: DownloadResource[] = ALL_RESOURCES,
 ): Promise<{ area: DownloadArea; regionId?: string; pack?: PackSummary; packs: PackSummary[]; skipped: string[]; warning?: string }> {
-  const routing = resources.includes('routing')
+  let routing = resources.includes('routing')
   const groups = PACK_GROUPS.filter(group => resources.includes(group))
   if (!routing && !groups.length) throw new Error('Choose something to download.')
   if (routing && !runtime.offline?.routing) throw new Error('The local routing backend is unavailable.')
+  // One routing region serves the whole server, so choosing it is the
+  // operator's call. Everyone can still download their own maps for it.
+  const routingSkipped: string[] = []
+  if (routing && runtime.offline && !runtime.offline.operator) {
+    if (!groups.length) throw new Error(ROUTING_OPERATOR_ONLY)
+    routing = false
+    routingSkipped.push(`Routing: ${ROUTING_OPERATOR_ONLY}`)
+  }
   const bounds = normalizePackBounds(
     { lat: area.bounds.south, lon: area.bounds.west },
     { lat: area.bounds.north, lon: area.bounds.east },
@@ -794,7 +805,7 @@ export async function startRegionDownload(
     await prepareRegionRouting(runtime, regionId)
   }
   const packs: PackSummary[] = []
-  const skipped = [...plan.skipped]
+  const skipped = [...routingSkipped, ...plan.skipped]
   for (const [index, part] of plan.requests.entries()) {
     if (plan.requests.length > 1) hooks.phase?.(`Queueing downloads ${index + 1} of ${plan.requests.length}…`)
     try {

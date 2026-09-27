@@ -455,7 +455,7 @@ func TestServerUsesTilesWhenEnabled(t *testing.T) {
 func waitForPrefetch(t *testing.T, s *tileStore) prefetchProgress {
 	t.Helper()
 	for i := 0; i < 1000; i++ {
-		p := s.progress()
+		p := s.progress(LocalOwner)
 		if !p.Running {
 			return p
 		}
@@ -470,7 +470,7 @@ func TestPrefetchWarmsTheAreaAhead(t *testing.T) {
 	s := newTileServerStore(t, ts, "")
 
 	// A small box around Zaragoza.
-	started := s.startPrefetch(41.60, -0.95, 41.70, -0.82)
+	started := s.startPrefetch(LocalOwner, 41.60, -0.95, 41.70, -0.82)
 	if !started.Running || started.Total == 0 {
 		t.Fatalf("prefetch did not start: %+v", started)
 	}
@@ -501,7 +501,7 @@ func TestPrefetchClampsATooWideArea(t *testing.T) {
 	s := newTileServerStore(t, ts, "")
 
 	// Roughly Zaragoza to Teruel and well beyond, at z13.
-	got := s.startPrefetch(39.5, -2.5, 42.5, 0.5)
+	got := s.startPrefetch(LocalOwner, 39.5, -2.5, 42.5, 0.5)
 	if !got.Clamped {
 		t.Fatalf("expected the area to be clamped, got %+v", got)
 	}
@@ -557,8 +557,8 @@ func TestPrefetchReplacesThePreviousArea(t *testing.T) {
 	ts := newTileServer(t)
 	s := newTileServerStore(t, ts, "")
 
-	s.startPrefetch(41.60, -0.95, 41.70, -0.82)
-	second := s.startPrefetch(40.30, -1.20, 40.40, -1.05)
+	s.startPrefetch(LocalOwner, 41.60, -0.95, 41.70, -0.82)
+	second := s.startPrefetch(LocalOwner, 40.30, -1.20, 40.40, -1.05)
 	if !second.Running {
 		t.Fatalf("second prefetch did not start: %+v", second)
 	}

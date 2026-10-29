@@ -394,6 +394,13 @@ func New(cfg Config) (*Server, error) {
 	if client.Timeout > 0 && client.Timeout < s.outbound.fetchTimeout {
 		s.outbound.fetchTimeout = client.Timeout
 	}
+	// Overpass queues requests under load: 40 s of waiting for a reply that
+	// takes one to compute is normal there, and giving up at 30 s throws away
+	// the work it already did. Allow its own [timeout:60] plus the queue,
+	// unless the caller supplied a client with a deliberately shorter ceiling.
+	if cfg.HTTPClient == nil || cfg.HTTPClient.Timeout == 0 || cfg.HTTPClient.Timeout >= overpassFetchTimeout {
+		providers["pois"].fetchTimeout = overpassFetchTimeout
+	}
 	s.rasterMaps, err = newRasterAdapters()
 	if err != nil {
 		cancel()

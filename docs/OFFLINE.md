@@ -86,7 +86,7 @@ before changing an adapter or release default.
 | Terrarium elevation, from the oms mirror by default (`ELEVATION_TILE_URL`) | Existing immutable tile cache | Bounded viewport/corridor prefetch |
 | Fuel snapshot | Explicit open-data snapshot, dated by source and cache | One bounded snapshot |
 | Nominatim | Exact user searches, one server-wide request/second | No autocomplete, grid or area sweep |
-| Overpass | Exact bounded user POI query | No tiled sweeps or harvesting |
+| Overpass | Exact bounded user POI query; the planner's nearby search is one union query per grid-snapped area (≤ 80 km), reused from the browser session where it can, with a 90 s fetch timeout because Overpass queues under load | No tiled sweeps or harvesting |
 | Broom routing data | Local OSM extract, DEM, graph and profile metrics, fetched from the oms mirror by default (`ROUTING_*_URL`) | Explicit region preparation; automatic migration of the active region after an engine upgrade |
 | API elevation | Exact source/dataset coordinates | Bounded requests subject to provider licence/quota |
 

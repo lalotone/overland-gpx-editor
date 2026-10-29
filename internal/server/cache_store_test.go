@@ -104,6 +104,52 @@ func TestCacheStorePersistsSecurelyAndRejectsCorruption(t *testing.T) {
 	}
 }
 
+// Startup checks body size only; content corruption that keeps the size must
+// still never be served, and must drop the pair and its quota on first read.
+func TestCacheStoreRestartDefersChecksumToRead(t *testing.T) {
+	dir := t.TempDir()
+	store, err := newCacheStore(dir, 1<<20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	sameSize := canonicalCacheKey("p", "s", "GET", "same size", "", nil)
+	truncated := canonicalCacheKey("p", "s", "GET", "truncated", "", nil)
+	for _, key := range []string{sameSize, truncated} {
+		if err := store.put(testMetadata(key, "places", now), []byte(`{"ok":true}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sameBody, sameMeta, _ := store.paths("places", sameSize)
+	shortBody, shortMeta, _ := store.paths("places", truncated)
+	if err := os.WriteFile(sameBody, []byte(`{"ok":fals}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shortBody, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := newCacheStore(dir, 1<<20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(shortMeta); !os.IsNotExist(err) {
+		t.Errorf("a body of the wrong size survived restart: %v", err)
+	}
+	if got := len(restarted.entries); got != 1 {
+		t.Fatalf("restart indexed %d entries, want only the same-size one", got)
+	}
+	if _, ok := restarted.get("places", sameSize); ok {
+		t.Fatal("a same-size corrupt body was served")
+	}
+	if _, err := os.Stat(sameMeta); !os.IsNotExist(err) {
+		t.Errorf("corrupt pair was not removed on read: %v", err)
+	}
+	if restarted.bytes != 0 || len(restarted.entries) != 0 {
+		t.Errorf("corrupt entry still charged: %d bytes, %d entries", restarted.bytes, len(restarted.entries))
+	}
+}
+
 func TestCacheStoreRecoversInterruptedReplacement(t *testing.T) {
 	dir := t.TempDir()
 	store, err := newCacheStore(dir, 1<<20, 100)

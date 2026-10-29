@@ -33,6 +33,36 @@ func TestTrackSurfacesKeepUncertainDistanceUnknown(t *testing.T) {
 	}, broomTrackSurfaces(annotation))
 }
 
+func TestTrackSpansMergeIdenticalTagsAndKeepUncertainUntagged(t *testing.T) {
+	at := func(index int, fraction float64) broom.TrackPosition {
+		return broom.TrackPosition{Index: index, Fraction: fraction}
+	}
+	forestry := broom.RoadAttributes{Highway: "track", MotorVehicle: "forestry"}
+	reversed := forestry
+	reversed.Reversed = true
+	annotation := &broom.TrackAnnotation{Spans: []broom.TrackSpan{
+		{Start: at(0, 0), End: at(0, 0.5), Distance: 50, Status: broom.TrackMatched, Match: &broom.TrackMatch{Surface: "gravel", Road: forestry}},
+		{Start: at(0, 0.5), End: at(1, 0), Distance: 50, Status: broom.TrackMatched, Match: &broom.TrackMatch{Surface: "gravel", Road: reversed}},
+		{Start: at(1, 0), End: at(2, 0), Distance: 80, Status: broom.TrackAmbiguous, Candidates: []broom.TrackMatch{{Surface: "asphalt", Road: forestry}}},
+		{Start: at(2, 0), End: at(3, 0), Distance: 70, Status: broom.TrackUnmatched},
+		{Start: at(3, 0), End: at(4, 0), Distance: 60, Status: broom.TrackMatched, Match: &broom.TrackMatch{Surface: "asphalt", Road: broom.RoadAttributes{Highway: "tertiary"}}},
+	}}
+	spans := broomTrackSpans(annotation)
+	require.Len(t, spans, 3)
+	assert.Equal(t, broomTrackSpan{
+		Start: broomTrackPosition{0, 0}, End: broomTrackPosition{1, 0}, DistanceMeters: 100,
+		Matched: true, Surface: "gravel", Road: &forestry,
+	}, spans[0])
+	// Candidates on an ambiguous span are not evidence for its tags.
+	assert.Equal(t, broomTrackSpan{Start: broomTrackPosition{1, 0}, End: broomTrackPosition{3, 0}, DistanceMeters: 150}, spans[1])
+	assert.Equal(t, "tertiary", spans[2].Road.Highway)
+	var total float64
+	for _, span := range spans {
+		total += span.DistanceMeters
+	}
+	assert.InDelta(t, 310, total, 1e-9)
+}
+
 func TestBroomAnnotateTrackOffline(t *testing.T) {
 	dir := t.TempDir()
 	var inputs []broom.UnionInput
@@ -72,6 +102,16 @@ func TestBroomAnnotateTrackOffline(t *testing.T) {
 	assert.Greater(t, bySurface["asphalt"], 50.0)
 	assert.Greater(t, bySurface["gravel"], 50.0)
 	assert.NotContains(t, response.Body.String(), "coordinates", "annotation must not return replacement geometry")
+	var spanTotal float64
+	for _, span := range result.Spans {
+		spanTotal += span.DistanceMeters
+		assert.True(t, span.Matched)
+		assert.Equal(t, "track", span.Road.Highway)
+	}
+	assert.InDelta(t, result.DistanceMeters, spanTotal, 1e-6)
+	require.Len(t, result.Spans, 2)
+	assert.Equal(t, broomTrackPosition{Index: 0}, result.Spans[0].Start)
+	assert.Equal(t, broomTrackPosition{Index: 2}, result.Spans[1].End)
 	config := do(t, s, http.MethodGet, "/config", nil)
 	assert.Contains(t, config.Body.String(), `"broomAnnotate":"/routing/broom/annotate"`)
 	// About 102k sampling intervals: Broom annotates this in consecutive chunks.

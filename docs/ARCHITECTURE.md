@@ -42,6 +42,7 @@ src/
 │   ├── ExploreScreen.tsx       Place search and POIs on a free map
 │   ├── MapLayers.tsx           Base tiles, hillshade pane, terrain controls
 │   ├── OfflineRegions.tsx      Region catalogue and download manager dialog
+│   ├── RideCheck.tsx           Surface, access and fuel-range panels and overlays
 │   ├── useRegionDownloads.ts   Pack polling and region download actions
 │   ├── SplashScreen.tsx        Generated topographic intro
 │   └── TrackCard.tsx           Library card with route thumbnail
@@ -57,6 +58,9 @@ src/
     ├── fuel.ts                 Spanish official fuel prices
     ├── routing.ts              Broom request and response contract
     ├── surface.ts              Broom annotation classification and summaries
+    ├── trackSurface.ts         Broom matching of loaded tracks, per-span tags
+    ├── access.ts               OSM access tags → motorcycle access warnings
+    ├── fuelRange.ts            Tank range and reserve against fuel stops
     ├── terrain.ts              Map layers and colour scales
     ├── poi.ts                  Overpass fuel / water / campsite lookups
     ├── mcp.ts                  MCP command decoding and validation
@@ -308,7 +312,7 @@ back in order. A point the service has no value for comes back `null`, never
 | `GET /places/search` | Validated, server-rate-limited Nominatim search |
 | `POST /pois/search` | Allowlisted POI kind and bounded bbox |
 | `POST /routing/broom/route` | Local Road/Dirt/Trail/Enduro route; optional `accessPermit` selects a prepared access-override metric; aligned elevations and OSM annotations |
-| `POST /routing/broom/annotate` | Advisory surface lookup for original GPX geometry using Broom `AnnotateTrack`; `{coordinates:[{lat,lon},…]}`, max 50,001 points / 4 MiB; returns original-distance totals by surface, with uncertain spans unknown; uses only the open graph |
+| `POST /routing/broom/annotate` | Advisory surface lookup for original GPX geometry using Broom `AnnotateTrack`; `{coordinates:[{lat,lon},…]}`, max 50,001 points / 4 MiB; returns original-distance totals by surface, with uncertain spans unknown, plus `spans` placing each matched stretch on the original points (`start`/`end` index and fraction) with its surface and lookup-normalized OSM road tags; identical neighbours are merged and unmatched spans carry no tags; uses only the open graph |
 | `GET /map/raster/{layer}/{z}/{x}/{y}.png` | Passive approved raster cache |
 | `/map/openfreemap/*` | Cached OpenFreeMap Liberty source graph, or a configured compatible source |
 | `GET /offline/status` | Aggregate cache, provider and job state |

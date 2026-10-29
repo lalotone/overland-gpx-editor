@@ -19,12 +19,30 @@ type broomSurfaceDistance struct {
 	DistanceMeters float64 `json:"distanceMeters"`
 }
 
+type broomTrackPosition struct {
+	Index    int     `json:"index"`
+	Fraction float64 `json:"fraction"`
+}
+
+// broomTrackSpan places one matched or uncertain stretch on the original
+// track, so the client can colour and flag the GPX it already has. Road holds
+// the lookup-normalized OSM tags only; it is not an access verdict.
+type broomTrackSpan struct {
+	Start          broomTrackPosition    `json:"start"`
+	End            broomTrackPosition    `json:"end"`
+	DistanceMeters float64               `json:"distanceMeters"`
+	Matched        bool                  `json:"matched"`
+	Surface        string                `json:"surface,omitempty"`
+	Road           *broom.RoadAttributes `json:"road,omitempty"`
+}
+
 type broomTrackResponse struct {
 	SchemaVersion  int                    `json:"schemaVersion"`
 	RegionID       string                 `json:"regionId,omitempty"`
 	GenerationID   string                 `json:"generationId,omitempty"`
 	DistanceMeters float64                `json:"distanceMeters"`
 	Surfaces       []broomSurfaceDistance `json:"surfaces"`
+	Spans          []broomTrackSpan       `json:"spans"`
 }
 
 // Keep original-track distance, including uncertain intervals, in the total.
@@ -44,6 +62,41 @@ func broomTrackSurfaces(annotation *broom.TrackAnnotation) []broomSurfaceDistanc
 	}
 	slices.SortFunc(result, func(a, b broomSurfaceDistance) int { return strings.Compare(a.Surface, b.Surface) })
 	return result
+}
+
+// broomTrackSpans keeps the same matched/uncertain split as the surface
+// totals and merges neighbours that carry identical tags, which is most of a
+// track: one way is usually many sampling intervals long.
+func broomTrackSpans(annotation *broom.TrackAnnotation) []broomTrackSpan {
+	result := make([]broomTrackSpan, 0, len(annotation.Spans))
+	for _, span := range annotation.Spans {
+		next := broomTrackSpan{
+			Start:          broomTrackPosition{Index: span.Start.Index, Fraction: span.Start.Fraction},
+			End:            broomTrackPosition{Index: span.End.Index, Fraction: span.End.Fraction},
+			DistanceMeters: span.Distance,
+		}
+		if span.Status == broom.TrackMatched && span.Match != nil {
+			road := span.Match.Road
+			// Direction relative to the OSM way says nothing about access and
+			// would stop otherwise identical neighbours merging.
+			road.Reversed = false
+			next.Matched, next.Surface, next.Road = true, span.Match.Surface, &road
+		}
+		if n := len(result); n > 0 && sameTrackTags(result[n-1], next) && result[n-1].End == next.Start {
+			result[n-1].End = next.End
+			result[n-1].DistanceMeters += next.DistanceMeters
+			continue
+		}
+		result = append(result, next)
+	}
+	return result
+}
+
+func sameTrackTags(a, b broomTrackSpan) bool {
+	if a.Matched != b.Matched || a.Surface != b.Surface || (a.Road == nil) != (b.Road == nil) {
+		return false
+	}
+	return a.Road == nil || *a.Road == *b.Road
 }
 
 func (s *broomRoutingService) annotateTrack(ctx context.Context, points []broom.Point) (broomTrackResponse, error) {
@@ -73,6 +126,7 @@ func (s *broomRoutingService) annotateTrack(ctx context.Context, points []broom.
 	return broomTrackResponse{
 		SchemaVersion: 1, RegionID: dataset.regionID, GenerationID: dataset.generationID,
 		DistanceMeters: annotation.Distance, Surfaces: broomTrackSurfaces(annotation),
+		Spans: broomTrackSpans(annotation),
 	}, nil
 }
 

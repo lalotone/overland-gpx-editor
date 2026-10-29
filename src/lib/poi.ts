@@ -167,7 +167,7 @@ export function boundingBoxSpanKm(bbox: BoundingBox): { widthKm: number; heightK
  */
 export const MAX_SEARCH_SPAN_KM = 250
 
-interface OverpassElement {
+export interface OverpassElement {
   type: string
   id: number
   lat?: number
@@ -191,10 +191,41 @@ async function fetchPoisWithMetadata(
   signal?: AbortSignal,
   context: RuntimeRequestContext = {},
 ): Promise<{ pois: Poi[]; cache?: CacheMetadata }> {
-  const area = `${bbox.south.toFixed(5)},${bbox.west.toFixed(5)},${bbox.north.toFixed(5)},${bbox.east.toFixed(5)}`
+  const area = overpassArea(bbox)
   const query = `[out:json][timeout:30];${SELECTORS[kind]}(${area});out center 400;`
+  const { elements, cache } = await fetchOverpassElements(kind, query, bbox, signal, context)
+  const pois: Poi[] = []
+  for (const el of elements) {
+    const lat = el.lat ?? el.center?.lat
+    const lon = el.lon ?? el.center?.lon
+    if (lat === undefined || lon === undefined) continue
+    pois.push({
+      id: `${el.type}/${el.id}`,
+      kind,
+      lat,
+      lon,
+      name: el.tags?.name ?? el.tags?.brand ?? el.tags?.operator,
+    })
+  }
+  return { pois, cache }
+}
 
-  const backendEndpoint = context.runtime?.services.pois
+/** Overpass's `south,west,north,east`, at the precision the backend uses. */
+export function overpassArea(bbox: BoundingBox): string {
+  return `${bbox.south.toFixed(5)},${bbox.west.toFixed(5)},${bbox.north.toFixed(5)},${bbox.east.toFixed(5)}`
+}
+
+/**
+ * One Overpass search, through the backend (which builds the query from
+ * `backendKind` and caches the reply) or directly when there is none.
+ */
+export async function fetchOverpassElements(
+  backendKind: string,
+  directQuery: string,
+  bbox: BoundingBox,
+  signal?: AbortSignal,
+  context: RuntimeRequestContext = {},
+): Promise<{ elements: OverpassElement[]; cache?: CacheMetadata }> {
   const { response: res, cache } = await fetchRuntimeService({
     ...context,
     service: 'pois',
@@ -202,19 +233,18 @@ async function fetchPoisWithMetadata(
     backendInit: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kind, bbox }),
+      body: JSON.stringify({ kind: backendKind, bbox }),
     },
     directInit: {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `data=${encodeURIComponent(query)}`,
+      body: `data=${encodeURIComponent(directQuery)}`,
     },
     signal,
-    fetcher: backendEndpoint ? fetch : undefined,
   })
   // Overpass is a free shared service and sheds load often enough that it is
-  // worth naming: 429/504 mean "come back later", not "your query is wrong".
-  if (res.status === 429 || res.status === 504) {
+  // worth naming: 429/502/503/504 mean "come back later", not "your query is wrong".
+  if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
     const error = await responseError(res, `Overpass returned ${res.status}`)
     if (error instanceof OfflineCacheMissError) throw error
     throw new Error('Overpass is busy right now — try again in a moment')
@@ -235,19 +265,5 @@ async function fetchPoisWithMetadata(
     )
   }
 
-  const elements: OverpassElement[] = data.elements ?? []
-  const pois: Poi[] = []
-  for (const el of elements) {
-    const lat = el.lat ?? el.center?.lat
-    const lon = el.lon ?? el.center?.lon
-    if (lat === undefined || lon === undefined) continue
-    pois.push({
-      id: `${el.type}/${el.id}`,
-      kind,
-      lat,
-      lon,
-      name: el.tags?.name ?? el.tags?.brand ?? el.tags?.operator,
-    })
-  }
-  return { pois, cache }
+  return { elements: Array.isArray(data.elements) ? data.elements : [], cache }
 }

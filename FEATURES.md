@@ -134,6 +134,23 @@ Views larger than 250 km across are refused with a prompt to zoom in: Overpass
 caps a reply at 400 results, and 400 points spread over half a country reads
 as "nothing here" in the gaps where really we just stopped counting.
 
+### What's around a route point
+
+- The magnifier on a planner point (or **What's around** in its popup) lists
+  water (fountains, water points, springs), huts and shelters, campsites,
+  fuel, motorcycle shops and viewpoints within **2–30 km**, nearest first.
+- Each result shows what OSM says about it and no more: whether a spring is
+  tagged drinkable, access, fee, season, opening hours, beds. Bus shelters
+  are left out.
+- Any result can be kept as a place in the GPX; nothing is added on its own
+  and nothing is ever routed through.
+- **Light on OpenStreetMap's servers**: one union query for every category,
+  only when asked; the area snaps to a ~5 km grid so nearby points reuse the
+  backend's shared cache, and a smaller radius or a point inside an area
+  already fetched is answered in the browser with no request at all. A reply
+  that hit the 1,500-result cap is flagged and never reused for another
+  search.
+
 ### Fuel prices in Spain
 
 Inside Spain the fuel layer comes from the **Ministerio de Industria** open

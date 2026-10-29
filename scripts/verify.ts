@@ -30,6 +30,7 @@ const { classifySurface, summarizeSurface } = await import('../src/lib/surface')
 const { annotateTrack, annotateTrackSurface, segmentSurfaces } = await import('../src/lib/trackSurface')
 const { accessReport, classifyAccess, locateSegmentRoads } = await import('../src/lib/access')
 const { fuelStopsAlong, normalizeFuelRange, planFuelRange } = await import('../src/lib/fuelRange')
+const { AroundAreaCache, aroundSearchArea, classifyAround, aroundFacts, searchAround } = await import('../src/lib/around')
 const { boundingBoxSpanKm, boundsAround, MAX_SEARCH_SPAN_KM } = await import('../src/lib/poi')
 const {
   parseFuelStations,
@@ -1786,6 +1787,69 @@ console.log(`\nAccess and fuel range checks\n${'='.repeat(78)}`)
     stops.length === 1 && stops[0].km === lineKm[2] && stops[0].offsetM < 200)
   check('an out-and-back passes a station twice',
     fuelStopsAlong(outAndBack, cumulativeDistanceKm(outAndBack), [station], 500).length === 2)
+}
+
+/* -- What's around a route point -------------------------------------- */
+
+console.log(`\nNearby search checks\n${'='.repeat(78)}`)
+
+{
+  const a = aroundSearchArea({ lat: 42.571, lon: -0.551 }, 10)
+  const b = aroundSearchArea({ lat: 42.574, lon: -0.548 }, 10)
+  check('nearby points snap to the identical search area, so the backend cache answers',
+    JSON.stringify(a) === JSON.stringify(b))
+  const r = 10 / 111.195
+  check('the snapped area still contains the whole circle',
+    a.south <= 42.571 - r && a.north >= 42.571 + r && a.west < -0.551 - r && a.east > -0.551 + r)
+  const big = aroundSearchArea({ lat: 42.57, lon: -0.55 }, 30)
+  check('a 30 km search stays inside the backend around limit',
+    (big.north - big.south) * 111.195 < 80 && (big.east - big.west) * 111.195 * Math.cos(42.57 * Math.PI / 180) < 80)
+
+  check('springs, water points and fountains are water', classifyAround({ natural: 'spring' }) === 'water' &&
+    classifyAround({ amenity: 'water_point' }) === 'water' && classifyAround({ amenity: 'drinking_water' }) === 'water')
+  check('bus shelters are not huts', classifyAround({ amenity: 'shelter', shelter_type: 'public_transport' }) === null &&
+    classifyAround({ amenity: 'shelter', shelter_type: 'basic_hut' }) === 'hut')
+  check('a spring is not called drinkable unless tagged',
+    aroundFacts({ natural: 'spring' }, 'water').find(f => f.label === 'Drinkable')?.value === 'not stated' &&
+      aroundFacts({ natural: 'spring', drinking_water: 'no' }, 'water').find(f => f.label === 'Drinkable')?.value === 'no')
+  check('hut access and season are surfaced',
+    aroundFacts({ tourism: 'wilderness_hut', access: 'private', seasonal: 'summer' }, 'hut').map(f => f.label).join(',') === 'Access,Seasonal')
+
+  const runtime = decodeRuntimeConfig({ services: { pois: '/pois/search' } }, 'https://backend.example.test')
+  const bodies: string[] = []
+  const element = (id: number, lat: number, lon: number, tags: Record<string, string>) => ({ type: 'node', id, lat, lon, tags })
+  const fetcher = async (_url: RequestInfo | URL, init?: RequestInit) => {
+    bodies.push(String(init?.body))
+    return new Response(JSON.stringify({ elements: [
+      element(1, 42.571, -0.551, { natural: 'spring', name: 'Fuente' }),
+      element(2, 42.62, -0.551, { tourism: 'alpine_hut' }),
+      element(3, 42.70, -0.551, { amenity: 'fuel' }),
+      element(4, 42.572, -0.551, { amenity: 'bench' }),
+    ] }), { headers: { 'Content-Type': 'application/json' } })
+  }
+  const cache = new AroundAreaCache()
+  const first = await searchAround({ lat: 42.57, lon: -0.551 }, 10, cache, undefined, { runtime, fetcher })
+  check('one union request goes to the backend as kind "around"',
+    bodies.length === 1 && JSON.parse(bodies[0]).kind === 'around')
+  check('results are filtered to the radius, classified and sorted by distance',
+    first.pois.map(p => p.id).join(',') === 'node/1,node/2' && first.pois[0].category === 'water')
+  const smaller = await searchAround({ lat: 42.57, lon: -0.551 }, 5, cache, undefined, { runtime, fetcher })
+  check('a smaller radius is answered from the session without a request',
+    bodies.length === 1 && smaller.reused && smaller.pois.map(p => p.id).join(',') === 'node/1')
+  await searchAround({ lat: 42.574, lon: -0.548 }, 10, cache, undefined, { runtime, fetcher })
+  check('a nearby point reuses the same area without a request', bodies.length === 1)
+  await searchAround({ lat: 42.57, lon: -0.551 }, 30, cache, undefined, { runtime, fetcher })
+  check('a larger radius fetches its larger area once', bodies.length === 2)
+
+  const truncatedCache = new AroundAreaCache()
+  let calls = 0
+  const full = async () => {
+    calls++
+    return new Response(JSON.stringify({ elements: Array.from({ length: 1500 }, (_, i) => element(i, 42.57, -0.551, { amenity: 'drinking_water' })) }))
+  }
+  const capped = await searchAround({ lat: 42.57, lon: -0.551 }, 30, truncatedCache, undefined, { runtime, fetcher: full })
+  await searchAround({ lat: 42.57, lon: -0.551 }, 5, truncatedCache, undefined, { runtime, fetcher: full })
+  check('a capped reply is flagged and never stands in for a smaller search', capped.truncated && calls === 2)
 }
 
 /* -- Surface classification and chunking ---------------------------- */

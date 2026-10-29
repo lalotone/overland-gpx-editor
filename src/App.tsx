@@ -9,6 +9,8 @@ import { ExploreScreen } from './components/ExploreScreen'
 import { MapTiles, TerrainControls, VectorMapDiagnostic } from './components/MapLayers'
 import type { VectorMapIssue } from './components/MapLayers'
 import { OfflineRegionsButton, OfflineRegionsDialog } from './components/OfflineRegions'
+import { AroundPanel, AroundRadius, formatDistance, osmLink } from './components/AroundPanel'
+import type { AroundState } from './components/AroundPanel'
 import {
   AccessOverlay,
   AccessWarnings,
@@ -68,6 +70,8 @@ import type { AccessStretch, RoadTags } from './lib/access'
 import { DEFAULT_FUEL_RANGE, fuelStopsAlong, normalizeFuelRange, planFuelRange } from './lib/fuelRange'
 import type { FuelRangeSettings } from './lib/fuelRange'
 import { segmentSurfaces } from './lib/trackSurface'
+import { AroundAreaCache, AROUND_RADII_KM, aroundCategory, DEFAULT_AROUND_RADIUS_KM, searchAround } from './lib/around'
+import type { AroundCategory, AroundPoi } from './lib/around'
 import { clearedRouteDerivedState, routeSequenceIsCurrent } from './lib/planner'
 import type { McpCommand, McpMapMarker } from './lib/mcp'
 import {
@@ -1759,6 +1763,59 @@ function App() {
       : pin))
   }, [])
 
+  /* -- What's around a route point ----------------------------------- */
+
+  const aroundCacheRef = useRef(new AroundAreaCache())
+  const aroundAbortRef = useRef<AbortController | null>(null)
+  const [around, setAround] = useState<(AroundState & { point: Coordinate }) | null>(null)
+  const [aroundHidden, setAroundHidden] = useState<ReadonlySet<AroundCategory>>(new Set())
+  const [aroundRadius, setAroundRadius] = useState(() => {
+    const stored = Number(localStorage.getItem('gpx-around-radius'))
+    return (AROUND_RADII_KM as readonly number[]).includes(stored) ? stored : DEFAULT_AROUND_RADIUS_KM
+  })
+  useEffect(() => { localStorage.setItem('gpx-around-radius', String(aroundRadius)) }, [aroundRadius])
+
+  /** Only ever user-triggered: one search at a time, a newer one replaces it. */
+  const searchAroundPoint = useCallback((point: Coordinate, pointNumber: number, radiusKm: number) => {
+    aroundAbortRef.current?.abort()
+    const controller = new AbortController()
+    aroundAbortRef.current = controller
+    setAround(prev => ({ point, pointNumber, radiusKm, loading: true, result: prev?.result }))
+    searchAround(point, radiusKm, aroundCacheRef.current, controller.signal, { runtime, onCacheMetadata: handleCacheMetadata })
+      .then(result => {
+        if (!controller.signal.aborted) setAround({ point, pointNumber, radiusKm, loading: false, result })
+      })
+      .catch(err => {
+        if (controller.signal.aborted || (err as Error).name === 'AbortError') return
+        setAround({ point, pointNumber, radiusKm, loading: false, error: (err as Error).message || 'Search failed' })
+      })
+  }, [handleCacheMetadata, runtime])
+
+  const closeAround = useCallback(() => {
+    aroundAbortRef.current?.abort()
+    setAround(null)
+  }, [])
+  useEffect(() => () => aroundAbortRef.current?.abort(), [])
+
+  const focusAroundPoi = useCallback((poi: AroundPoi) => {
+    const map = mapRef.current
+    if (map) map.setView([poi.lat, poi.lon], Math.max(map.getZoom(), 15))
+  }, [])
+
+  /** An explicit choice to keep a result: it becomes a saved place, never a route point. */
+  const keepAroundPoi = useCallback((poi: AroundPoi) => {
+    setCreationPins(prev => [
+      ...prev,
+      {
+        lat: poi.lat,
+        lon: poi.lon,
+        name: poi.name ?? poi.kind,
+        sym: waypointMarkerDefinition(aroundCategory(poi.category).marker).gpxSymbol,
+      },
+    ])
+    notify(`Added ${poi.name ?? poi.kind} as a place`, 'success')
+  }, [notify])
+
   const deleteWaypoint = useCallback((id: number) => {
     setCreationWaypoints(prev => prev.filter(w => w.id !== id))
   }, [])
@@ -2035,8 +2092,9 @@ function App() {
     setCreationPins([])
     setWaypointMode(false)
     clearRouteDerived()
+    closeAround()
     setSaveFileName('')
-  }, [clearRouteDerived])
+  }, [clearRouteDerived, closeAround])
 
   const resetCreation = useCallback(() => {
     setAccessPermit(false)
@@ -2047,12 +2105,13 @@ function App() {
     clearRouteDerived()
     setCreationPois({ fuel: [], water: [], camp: [] })
     setCreationPoiCache({})
+    closeAround()
     setPlaceCache(undefined)
     // Otherwise the next track starts with the panels hidden and no hint why.
     setMapOnly(false)
     loadSavedFiles()
     setViewMode('welcome')
-  }, [clearRouteDerived, loadSavedFiles])
+  }, [clearRouteDerived, closeAround, loadSavedFiles])
 
   const fitMcpPoints = (points: Coordinate[]) => {
     if (points.length === 0) return
@@ -2807,6 +2866,16 @@ function App() {
                         <span className="waypoint-coords">{w.lat.toFixed(4)}, {w.lon.toFixed(4)}</span>
                         {w.elevation !== undefined && <span className="waypoint-elev">{w.elevation.toFixed(0)}m</span>}
                       </span>
+                      <button
+                        className="waypoint-around"
+                        onClick={() => searchAroundPoint({ lat: w.lat, lon: w.lon }, index + 1, aroundRadius)}
+                        title={`What's around this point — water, huts, camps, fuel within ${aroundRadius} km`}
+                        aria-label={`What's around route point ${index + 1}`}
+                      >
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                          <path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+                        </svg>
+                      </button>
                       <button className="waypoint-delete" onClick={() => deleteWaypoint(w.id)} title="Remove waypoint">
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
                           <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
@@ -2934,7 +3003,7 @@ function App() {
                 />
                 <ZoomControl position="bottomright" />
                 <ViewportReporter onSettle={handleViewportSettle} />
-                {creationWaypoints.map(w => (
+                {creationWaypoints.map((w, index) => (
                   <Marker
                     key={w.id}
                     position={[w.lat, w.lon]}
@@ -2946,7 +3015,17 @@ function App() {
                       },
                     }}
                   >
-                    <Popup>Route point</Popup>
+                    <Popup>
+                      <strong>Route point #{index + 1}</strong>
+                      <span className="wpt-popup-actions">
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          onClick={() => searchAroundPoint({ lat: w.lat, lon: w.lon }, index + 1, aroundRadius)}
+                        >
+                          What's around ({aroundRadius} km)
+                        </button>
+                      </span>
+                    </Popup>
                   </Marker>
                 ))}
 
@@ -3004,11 +3083,56 @@ function App() {
                     </Marker>
                   )),
                 )}
+                {around?.result && <AroundRadius result={around.result} />}
+                {around?.result?.pois.filter(poi => !aroundHidden.has(poi.category)).map(poi => {
+                  const category = aroundCategory(poi.category)
+                  return (
+                    <Marker key={`around:${poi.id}`} position={[poi.lat, poi.lon]} icon={poiIcon(category.glyph, category.color)}>
+                      <Popup>
+                        <div className="poi-popup">
+                          <strong className="poi-popup-name">{poi.name ?? poi.kind}</strong>
+                          <ul className="poi-popup-prices">
+                            {poi.name && <li><span>Type</span><span className="poi-popup-value">{poi.kind}</span></li>}
+                            {poi.facts.map(fact => (
+                              <li key={fact.label}><span>{fact.label}</span><span className="poi-popup-value">{fact.value}</span></li>
+                            ))}
+                            <li><span>From point #{around.pointNumber}</span><span className="poi-popup-value">{formatDistance(poi.distanceM)}</span></li>
+                          </ul>
+                          <span className="wpt-popup-actions">
+                            <button className="btn btn-ghost btn-xs" onClick={() => keepAroundPoi(poi)}>Keep as place</button>
+                            <a className="btn btn-ghost btn-xs" href={osmLink(poi)} target="_blank" rel="noreferrer">OSM</a>
+                          </span>
+                        </div>
+                      </Popup>
+                    </Marker>
+                  )
+                })}
                 <SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />
 
                 <MapClickHandler onClick={handleMapClick} />
                 <MapMouseTracker onMove={setCursorPos} />
               </MapContainer>
+
+              {around && (
+                <AroundPanel
+                  state={around}
+                  hidden={aroundHidden}
+                  onToggleCategory={id => setAroundHidden(prev => {
+                    const next = new Set(prev)
+                    if (next.has(id)) next.delete(id)
+                    else next.add(id)
+                    return next
+                  })}
+                  onRadius={km => {
+                    setAroundRadius(km)
+                    searchAroundPoint(around.point, around.pointNumber, km)
+                  }}
+                  onRetry={() => searchAroundPoint(around.point, around.pointNumber, around.radiusKm)}
+                  onFocus={focusAroundPoi}
+                  onKeep={keepAroundPoi}
+                  onClose={closeAround}
+                />
+              )}
 
               <div className="creation-poi-strip">
                 <span className="creation-poi-label">In view</span>

@@ -1,6 +1,9 @@
 import type { Coordinate, Track } from '../../../src/lib/types'
 import type { RoutingProfile } from '../../../src/lib/routing'
 import { buildGPX } from '../../../src/lib/gpx'
+import { AROUND_RADII_KM } from '../../../src/lib/around'
+import { DEFAULT_FUEL_RANGE, normalizeFuelRange } from '../../../src/lib/fuelRange'
+import type { FuelRangeSettings } from '../../../src/lib/fuelRange'
 
 export type Tab = 'explore' | 'plan' | 'library' | 'offline'
 export interface Plan {
@@ -14,11 +17,47 @@ export interface Document {
   libraryFilename: string | null
   dirty: boolean
 }
+export type ThemePreference = 'system' | 'light' | 'dark'
+
+/**
+ * Preferences kept with the draft. The WebView's origin is a loopback port
+ * chosen at each launch, so localStorage does not survive a restart; the
+ * draft file does.
+ */
+export interface Settings {
+  theme: ThemePreference
+  fuelRange: FuelRangeSettings
+  aroundRadiusKm: number
+}
+export const defaultSettings = (): Settings => ({
+  theme: 'system',
+  fuelRange: DEFAULT_FUEL_RANGE,
+  aroundRadiusKm: 5,
+})
+
+/** Field by field, so one bad value never discards the others or the draft. */
+export function decodeSettings(raw: unknown): Settings {
+  const fallback = defaultSettings()
+  if (!raw || typeof raw !== 'object') return fallback
+  const value = raw as Partial<Settings>
+  return {
+    theme: value.theme === 'light' || value.theme === 'dark' || value.theme === 'system' ? value.theme : fallback.theme,
+    fuelRange: value.fuelRange && typeof value.fuelRange === 'object'
+      ? normalizeFuelRange(value.fuelRange)
+      : fallback.fuelRange,
+    aroundRadiusKm: (AROUND_RADII_KM as readonly number[]).includes(Number(value.aroundRadiusKm))
+      ? Number(value.aroundRadiusKm)
+      : fallback.aroundRadiusKm,
+  }
+}
+
 export interface Draft {
   version: 1
   plan: Plan
   document: Document | null
   tab: Tab
+  /** Absent in drafts written before settings existed. */
+  settings?: Settings
 }
 export const emptyPlan = (): Plan => ({
   name: 'New route',
@@ -91,5 +130,5 @@ export function decodeDraft(raw: unknown): Draft | null {
       typeof value.document.track.name !== 'string')
   )
     return null
-  return value
+  return { ...value, settings: decodeSettings(value.settings) }
 }

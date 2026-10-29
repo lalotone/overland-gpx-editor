@@ -97,11 +97,14 @@ Applies to any loaded track, with undo:
 
 ## Ride check (loaded tracks)
 
-A **Ride check** toggle next to Tools opens three panels for the loaded track.
+A **Ride check** toggle next to Tools opens a drawer docked beside the map
+(a bottom sheet on narrow screens), with tabs whose badges summarise each check
+before you open it, and the map re-frames the track beside it.
 
 - **Surface** — the track is matched to the open routing region (it must cover
   the track) and gets the same distance-weighted breakdown as a planned route.
-  The track can then be coloured by surface. The GPX itself is never changed.
+  The track and the elevation profile can then be coloured by surface. The GPX
+  itself is never changed.
 - **Access** — see below; read from the same road match.
 - **Fuel range** — set a full-tank range and a reserve; with the fuel layer
   loaded, every leg between stations that would put you on reserve or run you
@@ -114,11 +117,16 @@ A **Ride check** toggle next to Tools opens three panels for the loaded track.
   restricted use (forestry, agricultural, destination, permit…) and paths with
   no motor permission. The most specific tag wins: `motorcycle` over
   `motor_vehicle` over `vehicle` over `access`.
-- Each warning is listed with its tag and position and drawn as a dashed
-  stretch on the map; clicking it zooms there.
+- Warnings are grouped by restriction and kind of way ("Path without motor
+  permission · highway=path · 9 stretches"); a group expands to its stretches,
+  each drawn dashed on the map and zoomed to on click.
 - Ways with **no access tag** are counted separately, never as open, because
   the national default for their road class decides. Gates and seasonal or
   conditional closures are not covered. See [ACCURACY.md](docs/ACCURACY.md).
+
+The Android app has the same checks in its **Route details** sheet (planned
+routes and opened tracks) and the same nearby search around the map centre; see
+[mobile/README.md](mobile/README.md).
 
 ## POIs — fuel, drinking water, campsites
 
@@ -136,12 +144,15 @@ as "nothing here" in the gaps where really we just stopped counting.
 
 ### What's around a route point
 
-- The magnifier on a planner point (or **What's around** in its popup) lists
+- The magnifier on a planner point (or **What's around** in its popup) opens a
+  drawer beside the map that lists
   water (fountains, water points, springs), huts and shelters, campsites,
   fuel, motorcycle shops and viewpoints within **2–30 km**, nearest first.
 - Each result shows what OSM says about it and no more: whether a spring is
   tagged drinkable, access, fee, season, opening hours, beds. Bus shelters
   are left out.
+- With a planned route, each result says whether it is **on the route** or how
+  far off it, and at which km; **Along route** lists them in riding order.
 - Any result can be kept as a place in the GPX; nothing is added on its own
   and nothing is ever routed through.
 - **Light on OpenStreetMap's servers**: one union query for every category,

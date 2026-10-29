@@ -1487,166 +1487,6 @@ html.dark .elev-api-banner svg {
   color: var(--delete-color);
 }
 
-.waypoint-around {
-  padding: 4px 6px;
-  margin-left: auto;
-  background: transparent;
-  color: var(--text-muted);
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  transition: all var(--transition);
-}
-
-.waypoint-around:hover {
-  background: var(--bg-secondary);
-  color: var(--accent, #2563eb);
-}
-
-/* -- What's around a route point ------------------------------------- */
-
-.around-panel {
-  position: absolute;
-  top: 48px;
-  left: 10px;
-  z-index: 1000;
-  width: 320px;
-  max-width: calc(100% - 20px);
-  max-height: calc(100% - 130px);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  box-shadow: var(--shadow-md);
-  font-size: 0.78rem;
-  color: var(--text-secondary);
-}
-
-.around-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: var(--text-primary);
-}
-
-.around-radius,
-.around-categories {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.around-note {
-  margin: 0;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-}
-
-.around-error {
-  color: var(--warning-text, #b45309);
-}
-
-.around-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.around-list li {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.around-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  padding: 4px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.around-item:hover {
-  border-color: var(--border-subtle);
-  background: var(--bg-secondary);
-}
-
-.around-glyph {
-  width: 22px;
-  height: 22px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid;
-  border-radius: 50%;
-  background: var(--bg-card);
-  font-size: 0.7rem;
-}
-
-.around-item-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.around-item-name {
-  color: var(--text-primary);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.around-item-facts {
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.around-distance {
-  margin-left: auto;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
-}
-
-.around-keep {
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.around-keep:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-}
 
 /* Creation main area */
 
@@ -2016,6 +1856,18 @@ html.dark .elev-api-banner svg {
 .map-wrapper-with-elevation .leaflet-bottom.leaflet-right .leaflet-control-zoom {
   margin-bottom: calc(var(--viewer-profile-height) + 10px);
   transition: margin-bottom 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Bottom-left overlays ride above the profile, as the zoom control does,
+   keeping the legend stacked over the cursor readout as on the planner. */
+.map-wrapper-with-elevation .map-cursor-readout {
+  bottom: calc(var(--viewer-profile-height) + 10px);
+  transition: bottom 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.map-wrapper-with-elevation .fuel-legend {
+  bottom: calc(var(--viewer-profile-height) + 40px);
+  transition: bottom 0.32s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .map-wrapper-with-elevation > div:first-child {
@@ -2832,10 +2684,10 @@ html.dark .loading-overlay {
   height: 24px;
   border-radius: 50%;
   border: 2px solid;
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.97);
   font-size: 12px;
   line-height: 1;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.3);
 }
 
 .gpx-waypoint-inner {
@@ -3356,105 +3208,6 @@ html.dark .loading-overlay {
 .surface-mode-btn:disabled {
   opacity: 0.6;
   cursor: progress;
-}
-
-/* -- Ride check: surface, access and fuel range on a loaded track ---- */
-
-.ride-check {
-  align-items: stretch;
-  gap: 12px 22px;
-}
-
-.ride-check-cluster {
-  flex: 1 1 240px;
-  min-width: 0;
-  max-width: 420px;
-}
-
-.access-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.access-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 4px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 0.76rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.access-item:hover {
-  border-color: var(--border-subtle);
-  background: var(--bg-secondary);
-}
-
-.access-item-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.access-item-label {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.access-item-tag {
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fuel-range-inputs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
-
-.fuel-range-inputs label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.74rem;
-  color: var(--text-secondary);
-}
-
-.fuel-leg {
-  display: flex;
-  flex-direction: column;
-  padding: 4px 8px;
-  border-left: 3px solid #e67e22;
-  font-size: 0.76rem;
-}
-
-.fuel-leg--dry {
-  border-left-color: #c0392b;
-}
-
-.fuel-leg-status {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.fuel-leg .access-item-tag {
-  white-space: normal;
 }
 
 /* -- Elevation profile extras --------------------------------------- */
@@ -4217,4 +3970,325 @@ html.dark .leaflet-marker-shadow {
   .explore-search-results {
     animation: none;
   }
+}
+
+/* ================================================================== */
+/*  Map drawer — Ride check and What's around                          */
+/* ================================================================== */
+/*
+ * One docked panel for both screens. It sits beside the route instead of on
+ * it: the map keeps its full height, and the map's right-hand controls slide
+ * left to stay clear (.has-map-drawer). Tones are defined once so callouts,
+ * badges and metrics agree on what "warning" looks like in both themes.
+ */
+
+:root {
+  --drawer-w: 384px;
+}
+
+.map-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: var(--viewer-profile-height, 0px);
+  z-index: 900;
+  width: var(--drawer-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-subtle);
+  box-shadow: -8px 0 32px rgba(15, 23, 42, 0.12);
+  animation: drawerIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transition: bottom 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html.dark .map-drawer {
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
+}
+
+@keyframes drawerIn {
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+
+.map-drawer-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 16px 12px 18px;
+}
+
+.map-drawer-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.map-drawer-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.map-drawer-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.map-drawer-subtitle {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-drawer-close {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.map-drawer-close:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.map-drawer-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.map-drawer-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 10px 11px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--transition);
+}
+
+.map-drawer-tab::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background var(--transition);
+}
+
+.map-drawer-tab:hover { color: var(--text-primary); }
+.map-drawer-tab.active { color: var(--text-primary); }
+.map-drawer-tab.active::after { background: var(--accent); }
+
+.map-drawer-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--tone-neutral);
+  background: var(--tone-neutral-bg);
+}
+
+.map-drawer-badge.tone-ok { color: var(--tone-ok); background: var(--tone-ok-bg); }
+.map-drawer-badge.tone-warn { color: var(--tone-warn); background: var(--tone-warn-bg); }
+.map-drawer-badge.tone-danger { color: var(--tone-danger); background: var(--tone-danger-bg); }
+
+.map-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 22px;
+  overscroll-behavior: contain;
+}
+
+/* Keep the map's own controls clear of the drawer. */
+.has-map-drawer .map-control-stack,
+.has-map-drawer .restore-view-btn,
+.has-map-drawer .creation-poi-strip {
+  right: calc(var(--drawer-w) + 12px);
+  transition: right 0.22s ease;
+}
+
+.has-map-drawer .leaflet-right {
+  right: var(--drawer-w);
+}
+
+@media (max-width: 900px) {
+  .map-drawer {
+    top: auto;
+    left: 0;
+    width: auto;
+    max-height: 58%;
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.16);
+    animation-name: sheetIn;
+  }
+
+  @keyframes sheetIn {
+    from { transform: translateY(24px); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+  }
+
+  .has-map-drawer .map-control-stack,
+  .has-map-drawer .restore-view-btn,
+  .has-map-drawer .creation-poi-strip {
+    right: 10px;
+  }
+
+  .has-map-drawer .leaflet-right {
+    right: 0;
+  }
+}
+
+/* -- Route point rows ----------------------------------------------- */
+
+.waypoint-list li.waypoint-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 8px 8px 8px 10px;
+}
+
+.waypoint-row .waypoint-number {
+  width: 24px;
+  height: 24px;
+  font-size: 0.72rem;
+  color: #fff;
+  background: var(--accent-solid);
+  border: 2px solid var(--bg-secondary);
+  box-shadow: 0 0 0 1px var(--accent-solid);
+}
+
+.waypoint-row--start .waypoint-number { background: var(--tone-ok); box-shadow: 0 0 0 1px var(--tone-ok); }
+.waypoint-row--finish .waypoint-number { background: var(--tone-danger); box-shadow: 0 0 0 1px var(--tone-danger); }
+
+.waypoint-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.waypoint-role {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.waypoint-row .waypoint-coords {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.waypoint-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.waypoint-row .waypoint-elev {
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.waypoint-actions-row {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.waypoint-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.waypoint-icon-btn:hover,
+.waypoint-icon-btn.active {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.waypoint-icon-btn--danger:hover {
+  background: var(--delete-hover);
+  color: var(--delete-color);
+}
+
+/* -- Route point pins ----------------------------------------------- */
+
+.route-point-marker { background: none; border: none; }
+
+.route-point-pin {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: var(--accent-solid);
+  border: 2.5px solid #fff;
+  box-shadow: 0 3px 8px rgba(15, 23, 42, 0.35);
+}
+
+.route-point-pin > span {
+  transform: rotate(45deg);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.route-point-pin--start { background: var(--tone-ok); }
+.route-point-pin--finish { background: var(--tone-danger); }
+
+.route-point-pin.active {
+  box-shadow: 0 0 0 4px var(--accent-light), 0 0 0 6px var(--accent), 0 3px 8px rgba(15, 23, 42, 0.35);
 }

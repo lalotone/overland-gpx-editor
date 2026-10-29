@@ -44,6 +44,8 @@ src/
 │   ├── OfflineRegions.tsx      Region catalogue and download manager dialog
 │   ├── RideCheck.tsx           Surface, access and fuel-range panels and overlays
 │   ├── AroundPanel.tsx         Nearby water, huts and services around a route point
+│   ├── MapDrawer.tsx           Docked map drawer, tabs, metrics (Ride check, nearby)
+│   ├── mapIcons.tsx            Shared SVG icon set for panels and map pins
 │   ├── useRegionDownloads.ts   Pack polling and region download actions
 │   ├── SplashScreen.tsx        Generated topographic intro
 │   └── TrackCard.tsx           Library card with route thumbnail

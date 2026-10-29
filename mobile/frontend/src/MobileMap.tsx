@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from 'react'
+import type { ReactNode } from 'react'
 import {
   MapContainer,
   Marker,
@@ -70,10 +71,27 @@ function Events({
   )
 }
 
+/**
+ * Credits stay on screen as one line, which still names OpenStreetMap, and
+ * open to the full text on tap. Two lines of 8px text across every map were
+ * the first thing anyone noticed about the app.
+ */
 function CreditsPosition() {
   const map = useMap()
   useEffect(() => {
     map.attributionControl.setPrefix(false)
+    const container = map.attributionControl.getContainer()
+    if (!container) return
+    container.setAttribute('role', 'button')
+    container.setAttribute('tabindex', '0')
+    container.setAttribute('aria-label', 'Map data credits — tap to expand')
+    const toggle = (event: Event) => {
+      // Links inside the credits must still open.
+      if ((event.target as HTMLElement).closest('a')) return
+      container.classList.toggle('expanded')
+    }
+    container.addEventListener('click', toggle)
+    return () => container.removeEventListener('click', toggle)
   }, [map])
   return null
 }
@@ -92,6 +110,7 @@ export default function MobileMap({
   onMap,
   onMovePoint,
   onError,
+  children,
 }: {
   runtime: RuntimeConfig
   ready: boolean
@@ -106,6 +125,8 @@ export default function MobileMap({
   onMap: (map: L.Map) => void
   onMovePoint: (index: number, point: Coordinate) => void
   onError: (message: string) => void
+  /** Session overlays drawn above the track: access stretches, nearby places. */
+  children?: ReactNode
 }) {
   const layers = useMemo(() => runtimeTerrainLayers(runtime), [runtime])
   const vectorStatus = useCallback(
@@ -192,6 +213,7 @@ export default function MobileMap({
           </Popup>
         </CircleMarker>
       ))}
+      {children}
     </MapContainer>
   )
 }

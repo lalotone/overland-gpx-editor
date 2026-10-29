@@ -4,6 +4,7 @@ import {
   SLOPE_LABELS,
 } from '../lib/terrain'
 import type { ColorMode } from '../lib/terrain'
+import { SURFACE_CLASSES } from '../lib/surface'
 import type { ElevationStats } from '../lib/types'
 
 export interface ProfileBar {
@@ -188,7 +189,16 @@ export function ElevationProfile({
             })}
           </div>
 
-          {colorMode === 'slope' ? (
+          {colorMode === 'surface' ? (
+            <div className="elevation-legend">
+              {SURFACE_CLASSES.map(surface => (
+                <div key={surface.id} className="legend-item" title={surface.hint}>
+                  <span className="legend-color" style={{ backgroundColor: surface.color }} />
+                  <span className="legend-text">{surface.label}</span>
+                </div>
+              ))}
+            </div>
+          ) : colorMode === 'slope' ? (
             <div className="elevation-legend">
               {SLOPE_LABELS.map((label, i) => (
                 <div key={i} className="legend-item">

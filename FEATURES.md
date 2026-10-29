@@ -8,10 +8,11 @@ A route planner and track editor for offroad, overlanding and motorbike use.
 
 - **Base maps** — OpenFreeMap vector maps, OpenTopoMap (contour lines + relief),
   CyclOSM (renders track surface and grade clearly), Esri satellite imagery,
-  Esri shaded relief.
+  shaded relief drawn from the Terrarium elevation tiles.
 - **Hillshade overlay** with adjustable strength, drawn in its own map pane
   above the base tiles and below the track. Works over satellite, where
-  imagery alone flattens gullies and ridgelines out.
+  imagery alone flattens gullies and ridgelines out. Shaded in the browser by
+  MapLibre from the Terrarium elevation tiles, so it needs WebGL2.
 - **Live ground elevation under the cursor** — hover anywhere and the readout
   shows the terrain altitude at that point, sampled from the DEM and cached.
 - **Track colouring by gradient or by altitude.** Altitude mode uses a

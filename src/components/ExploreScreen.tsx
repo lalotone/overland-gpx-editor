@@ -10,7 +10,7 @@ import { searchPlaces } from '../lib/geocoding'
 import type { PlaceResult } from '../lib/geocoding'
 import { formatCacheContext } from '../lib/offline'
 import type { CacheMetadata, RuntimeConfig } from '../lib/offline'
-import type { BaseLayerDefinition, ThumbnailLayerDefinition } from '../lib/terrain'
+import type { BaseLayerDefinition, DemLayerDefinition } from '../lib/terrain'
 
 const DEFAULT_VIEW = { center: [41.65, -0.88] as [number, number], zoom: 7 }
 
@@ -223,7 +223,7 @@ export function ExploreScreen({
   hillshade: boolean
   hillshadeOpacity: number
   layers: BaseLayerDefinition[]
-  hillshadeLayer?: ThumbnailLayerDefinition
+  hillshadeLayer?: DemLayerDefinition
   terrainControls: ReactNode
   modeAction: ReactNode
   themeAction: ReactNode

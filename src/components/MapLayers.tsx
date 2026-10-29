@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { maplibreGL } from '@maplibre/maplibre-gl-leaflet'
 import type { StyleSpecification } from 'maplibre-gl'
-import { Pane, TileLayer, useMap } from 'react-leaflet'
+import { TileLayer, useMap } from 'react-leaflet'
 import { resolveMapStyleResources } from '../lib/mapStyle'
 import { SERVICE_ATTRIBUTIONS, getBaseLayerFrom } from '../lib/terrain'
-import type { BaseLayerDefinition, ColorMode, ThumbnailLayerDefinition } from '../lib/terrain'
+import type { BaseLayerDefinition, ColorMode, DemLayerDefinition } from '../lib/terrain'
 import { ESCAPE_PRIORITY, useEscapeDismiss } from './useEscapeDismiss'
 
 let webGL2Available: boolean | undefined
@@ -216,6 +216,105 @@ function VectorBaseLayer({
   return null
 }
 
+/** Paper tone under the relief base map, close to the vector map's land. */
+const RELIEF_BACKGROUND = '#f2efe9'
+
+/**
+ * Shaded relief computed by MapLibre from terrain-RGB tiles. As an overlay it
+ * draws only shading on a transparent canvas; as a base map it adds a paper
+ * background underneath. Without WebGL2 it draws nothing, and DEM tiles that
+ * fail to load leave the map as it was — relief is never worth a dead screen.
+ *
+ * A custom pane is created here and left in place rather than wrapped in
+ * react-leaflet's <Pane>: that removes its node before this layer's cleanup
+ * runs, and the plugin's removeChild then throws and takes the map down.
+ */
+function HillshadeLayer({
+  dem,
+  pane,
+  paneZIndex,
+  opacity = 1,
+  background,
+}: {
+  dem: DemLayerDefinition
+  pane: string
+  paneZIndex?: number
+  opacity?: number
+  background?: string
+}) {
+  const map = useMap()
+  const webGL2 = hasWebGL2()
+  const layerRef = useRef<ReturnType<typeof maplibreGL> | null>(null)
+
+  useEffect(() => {
+    if (!webGL2) return
+    if (!map.getPane(pane)) {
+      const element = map.createPane(pane)
+      if (paneZIndex !== undefined) element.style.zIndex = String(paneZIndex)
+    }
+    const style: StyleSpecification = {
+      version: 8,
+      sources: {
+        dem: {
+          type: 'raster-dem',
+          tiles: [dem.url],
+          encoding: dem.encoding,
+          tileSize: 256,
+          maxzoom: dem.maxZoom,
+        },
+      },
+      layers: [
+        ...(background ? [{ id: 'paper', type: 'background' as const, paint: { 'background-color': background } }] : []),
+        {
+          id: 'hillshade',
+          type: 'hillshade',
+          source: 'dem',
+          paint: {
+            'hillshade-exaggeration': background ? 0.7 : 0.6,
+            'hillshade-shadow-color': '#000000',
+            'hillshade-highlight-color': '#ffffff',
+            'hillshade-accent-color': '#000000',
+          },
+        },
+      ],
+    }
+    // `pane` is a plugin option the typings leave out.
+    const options = { style, attributionControl: false as const, pane }
+    let layer: ReturnType<typeof maplibreGL>
+    try {
+      layer = maplibreGL(options).addTo(map)
+    } catch (reason) {
+      console.warn(`[relief] could not start: ${safeText((reason as Error).message) ?? 'MapLibre initialization failed'}`)
+      return
+    }
+    layerRef.current = layer
+    let warned = false
+    const reportFailure = (event: unknown) => {
+      if (warned) return
+      warned = true
+      const issue = mapLibreIssue(event)
+      console.warn(`[relief] elevation ${issue.phase} failed${issue.status ? ` with HTTP ${issue.status}` : ''}`)
+    }
+    const libreMap = layer.getMaplibreMap()
+    libreMap.on('error', reportFailure)
+    map.attributionControl.addAttribution(dem.attribution)
+
+    return () => {
+      libreMap.off('error', reportFailure)
+      map.attributionControl.removeAttribution(dem.attribution)
+      if (map.hasLayer(layer)) map.removeLayer(layer)
+      layerRef.current = null
+    }
+  }, [background, dem, map, pane, paneZIndex, webGL2])
+
+  useEffect(() => {
+    const container = layerRef.current?.getContainer()
+    if (container) container.style.opacity = String(opacity)
+  })
+
+  return null
+}
+
 /**
  * Base tiles plus an optional hillshade relief overlay.
  *
@@ -236,9 +335,10 @@ export function MapTiles({
   hillshadeOpacity: number
   onVectorStatus?: (issue: VectorMapIssue | null) => void
   layers: BaseLayerDefinition[]
-  hillshadeLayer?: ThumbnailLayerDefinition
+  hillshadeLayer?: DemLayerDefinition
 }) {
   const base = getBaseLayerFrom(layers, baseLayerId)
+  const webGL2 = hasWebGL2()
 
   return (
     <>
@@ -250,6 +350,18 @@ export function MapTiles({
           attribution={base.attribution}
           onStatus={onVectorStatus}
         />
+      ) : base.kind === 'relief' ? (
+        webGL2 ? (
+          <HillshadeLayer key={base.id} dem={base.dem} pane="tilePane" background={RELIEF_BACKGROUND} />
+        ) : (
+          <TileLayer
+            key={base.id}
+            url={base.fallback.url}
+            attribution={base.fallback.attribution}
+            maxZoom={base.fallback.maxZoom}
+            maxNativeZoom={base.fallback.maxZoom}
+          />
+        )
       ) : (
         <TileLayer
           key={base.id}
@@ -259,16 +371,8 @@ export function MapTiles({
           maxNativeZoom={base.maxZoom}
         />
       )}
-      {hillshade && hillshadeLayer && (
-        <Pane name="hillshade-pane" style={{ zIndex: 250 }}>
-          <TileLayer
-            url={hillshadeLayer.url}
-            attribution={hillshadeLayer.attribution}
-            maxZoom={19}
-            maxNativeZoom={hillshadeLayer.maxZoom}
-            opacity={hillshadeOpacity}
-          />
-        </Pane>
+      {hillshade && hillshadeLayer && webGL2 && (
+        <HillshadeLayer dem={hillshadeLayer} pane="hillshade-pane" paneZIndex={250} opacity={hillshadeOpacity} />
       )}
     </>
   )
@@ -326,6 +430,8 @@ export function TerrainControls({
 }) {
   const [open, setOpen] = useState(false)
   const base = getBaseLayerFrom(layers, baseLayerId)
+  const reliefDrawable = hasWebGL2()
+  const reliefAvailable = hillshadeAvailable && reliefDrawable
   const activeVectorIssue = base.kind === 'vector' ? vectorIssue : null
   useEscapeDismiss(open, () => setOpen(false), ESCAPE_PRIORITY.panel)
 
@@ -343,7 +449,7 @@ export function TerrainControls({
           <path d="M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z" />
         </svg>
         <span className="terrain-fab-label">{base.label}</span>
-        {hillshade && hillshadeAvailable && <span className="terrain-fab-dot" title="Relief on" />}
+        {hillshade && reliefAvailable && <span className="terrain-fab-dot" title="Relief on" />}
       </button>
     )
   }
@@ -382,8 +488,8 @@ export function TerrainControls({
         >
           <input
             type="checkbox"
-            checked={hillshade && hillshadeAvailable}
-            disabled={!hillshadeAvailable}
+            checked={hillshade && reliefAvailable}
+            disabled={!reliefAvailable}
             onChange={e => onHillshade(e.target.checked)}
           />
           <span>Relief</span>
@@ -395,7 +501,7 @@ export function TerrainControls({
           max={1}
           step={0.05}
           value={hillshadeOpacity}
-          disabled={!hillshade || !hillshadeAvailable}
+          disabled={!hillshade || !reliefAvailable}
           onChange={e => onHillshadeOpacity(parseFloat(e.target.value))}
           title="Relief strength"
           aria-label="Relief strength"
@@ -403,6 +509,9 @@ export function TerrainControls({
       </div>
 
       {!hillshadeAvailable && <div className="terrain-row terrain-note">Relief is not cached</div>}
+      {hillshadeAvailable && !reliefDrawable && (
+        <div className="terrain-row terrain-note">Relief needs WebGL2</div>
+      )}
 
       {base.hasContours && <div className="terrain-row terrain-note">Contour lines included</div>}
       {base.kind === 'vector' && (

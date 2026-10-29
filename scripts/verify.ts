@@ -614,6 +614,18 @@ console.log(`\nPublic-service policy checks\n${'='.repeat(78)}`)
   check('Nominatim interval is at least one second', NOMINATIM_REQUEST_INTERVAL_MS >= 1000)
   check('OSM thumbnails use the policy hostname',
     getThumbnailLayer('openfreemap').url === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
+  {
+    // Esri's terms require an ArcGIS subscription for its basemaps outside
+    // Esri software; relief is shaded from the open Terrarium set instead.
+    const relief = getBaseLayerFrom(runtimeTerrainLayers(), 'relief')
+    const hillshade = runtimeHillshadeLayer()
+    check('relief base map is shaded from the Terrarium DEM, not Esri',
+      relief.kind === 'relief' && relief.dem.encoding === 'terrarium' && !relief.dem.url.includes('arcgis'))
+    check('hillshade overlay is shaded from the Terrarium DEM, not Esri',
+      hillshade?.encoding === 'terrarium' && !hillshade.url.includes('arcgis'))
+    check('relief thumbnails fall back to an image-tile layer',
+      getThumbnailLayer('relief').url === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
+  }
   check('service attribution links to fix-the-map',
     SERVICE_ATTRIBUTIONS.some(credit => credit.includes('openstreetmap.org/fixthemap')))
   check('service attribution names elevation sources',
@@ -870,7 +882,9 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       trails === undefined && !layers.some(layer => layer.id === 'satellite' || layer.id === 'relief'))
   const selectedUrls = layers.flatMap(layer => layer.kind === 'vector'
     ? [layer.styleUrl, layer.fallback.url]
-    : [layer.url])
+    : layer.kind === 'relief'
+      ? [layer.dem.url, layer.fallback.url]
+      : [layer.url])
   check('cache-only terrain selects no direct public URL',
     selectedUrls.every(url => url.startsWith('https://backend.example.test/api/') || url.startsWith('data:')),
     selectedUrls.join(', '))

@@ -79,7 +79,8 @@ before changing an adapter or release default.
 | OSM standard raster | Viewed tiles only; honor headers, seven-day fallback when unusable, no expired replay | Prohibited |
 | OpenTopoMap | Viewed tiles with attribution; dated stale replay | Prohibited without operator permission |
 | CyclOSM | Viewed tiles, at most 72 hours, no expired replay | Prohibited |
-| Esri live imagery/relief/hillshade | Disabled; remains browser-direct | Prohibited |
+| Esri live imagery | Disabled; remains browser-direct | Prohibited |
+| Relief shading (Terrarium from the oms mirror, shaded by MapLibre) | Disabled; browser-direct, hidden in cache-only mode | Not packed |
 | Project oms mirror of OpenFreeMap Liberty (default) | Enabled by default; honor mirror cache headers and OpenFreeMap attribution | Bounded trip-pack prefetch enabled by default |
 | Public OpenFreeMap live service or another compatible source | Set with `OPENFREEMAP_URL` | Controlled by `OPENFREEMAP_ALLOW_BULK`, which defaults to `true` |
 | Terrarium elevation, from the oms mirror by default (`ELEVATION_TILE_URL`) | Existing immutable tile cache | Bounded viewport/corridor prefetch |

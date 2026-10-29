@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { CircleMarker, Polyline, Tooltip } from 'react-leaflet'
 import { ACCESS_CLASSES, accessDefinition } from '../lib/access'
 import type { AccessReport, AccessStretch } from '../lib/access'
@@ -7,6 +7,8 @@ import type { RoutingDataStatus, RuntimeConfig } from '../lib/offline'
 import { surfaceDefinition } from '../lib/surface'
 import type { SurfaceSummary } from '../lib/surface'
 import { annotateTrack } from '../lib/trackSurface'
+import { Metric } from './MapDrawer'
+import { MapIcon } from './mapIcons'
 import type { TrackAnnotationResult } from '../lib/trackSurface'
 import type { Coordinate } from '../lib/types'
 
@@ -84,65 +86,53 @@ export function SurfaceBreakdown({
   matched?: boolean
 }) {
   return (
-    <div className="surface-panel">
-      <div className="surface-headline">
-        <span>
-          <strong>{(summary.unpavedFraction * 100).toFixed(0)}%</strong> unpaved
-        </span>
-        <span className="surface-headline-sub">
-          {summary.unpavedKm.toFixed(1)} of {summary.totalKm.toFixed(1)} km
-        </span>
+    <div className="insight">
+      <div className="drawer-metrics">
+        <Metric value={(summary.unpavedFraction * 100).toFixed(0)} unit="%" caption="unpaved" />
+        <Metric value={summary.unpavedKm.toFixed(1)} unit="km" caption={`of ${summary.totalKm.toFixed(1)} km`} />
+        {summary.unknownKm > 0.05 && (
+          <Metric value={summary.unknownKm.toFixed(1)} unit="km" caption="unknown" />
+        )}
       </div>
 
-      <div className="surface-bar" aria-hidden="true">
+      <div className="insight-bar" aria-hidden="true">
         {summary.shares.map(share => (
           <span
             key={share.id}
-            className="surface-bar-part"
-            style={{
-              width: `${(share.fraction * 100).toFixed(2)}%`,
-              background: surfaceDefinition(share.id).color,
-            }}
+            style={{ flexGrow: share.fraction, background: surfaceDefinition(share.id).color }}
             title={`${surfaceDefinition(share.id).label} — ${share.km.toFixed(1)} km`}
           />
         ))}
       </div>
 
-      <ul className="surface-legend">
+      <ul className="insight-legend">
         {summary.shares.map(share => {
           const def = surfaceDefinition(share.id)
           return (
             <li key={share.id} title={def.hint}>
-              <span className="surface-swatch" style={{ background: def.color }} />
-              <span className="surface-legend-label">{def.label}</span>
-              <span className="surface-legend-value">
-                {share.km.toFixed(1)} km · {(share.fraction * 100).toFixed(0)}%
-              </span>
+              <span className="insight-swatch" style={{ background: def.color }} />
+              <span className="insight-legend-label">{def.label}</span>
+              <span className="insight-legend-value">{share.km.toFixed(1)} km</span>
+              <span className="insight-legend-share">{(share.fraction * 100).toFixed(0)}%</span>
             </li>
           )
         })}
       </ul>
 
-      <button
-        className="surface-mode-btn"
-        onClick={onToggleColor}
-        title="Paint the route on the map with these colours"
-      >
-        {colorBySurface ? 'Back to gradient colours' : 'Colour route by surface'}
-      </button>
+      <label className="insight-switch">
+        <input type="checkbox" role="switch" checked={colorBySurface} onChange={onToggleColor} />
+        <span className="insight-switch-track" aria-hidden="true" />
+        <span>Colour the route by surface</span>
+      </label>
 
-      {summary.unknownKm > 0.05 && (
-        <p className="route-stat-note">
-          {summary.unknownKm.toFixed(1)} km {matched ? 'could not be matched to a road or ' : ''}carries
-          no surface tag in OpenStreetMap. It is shown as Unknown and left out of the unpaved share
-          rather than assumed sealed.
-        </p>
-      )}
-      {matched && (
-        <p className="route-stat-note">
-          Read by matching the track to the routing region; the GPX itself is unchanged.
-        </p>
-      )}
+      <p className="insight-note">
+        From OpenStreetMap surface tags.{' '}
+        {summary.unknownKm > 0.05 && (
+          <>Unknown distance {matched ? 'could not be matched to a road or ' : ''}has no supported tag; it is left
+          out of the unpaved share rather than assumed sealed. </>
+        )}
+        {matched && 'Read by matching the track to the routing region; the GPX itself is unchanged.'}
+      </p>
     </div>
   )
 }
@@ -158,6 +148,61 @@ function kmRange(stretch: AccessStretch): string {
   return `km ${stretch.startKm.toFixed(1)} · ${formatLength(stretch.endKm - stretch.startKm)}`
 }
 
+interface AccessGroup {
+  key: string
+  stretches: AccessStretch[]
+  km: number
+}
+
+/** Same restriction on the same kind of way, so eight path stretches read as one line. */
+function groupStretches(stretches: AccessStretch[]): AccessGroup[] {
+  const groups = new Map<string, AccessGroup>()
+  for (const stretch of stretches) {
+    const key = `${stretch.id}|${stretch.tag ?? ''}|${stretch.highway ?? ''}`
+    const group = groups.get(key) ?? { key, stretches: [], km: 0 }
+    group.stretches.push(stretch)
+    group.km += stretch.endKm - stretch.startKm
+    groups.set(key, group)
+  }
+  const severity = ACCESS_CLASSES.map(def => def.id)
+  return [...groups.values()].sort((a, b) =>
+    severity.indexOf(a.stretches[0].id) - severity.indexOf(b.stretches[0].id) || b.km - a.km)
+}
+
+function AccessGroupRow({ group, onFocus }: { group: AccessGroup; onFocus?: (stretch: AccessStretch) => void }) {
+  const [open, setOpen] = useState(false)
+  const first = group.stretches[0]
+  const def = accessDefinition(first.id)
+  const detail = [first.tag, first.highway && `highway=${first.highway}`].filter(Boolean).join(' · ')
+  return (
+    <li className={`access-group${open ? ' open' : ''}`}>
+      <button className="access-group-head" onClick={() => setOpen(v => !v)} aria-expanded={open} title={def.hint}>
+        <span className="insight-swatch" style={{ background: def.color }} />
+        <span className="access-group-text">
+          <span className="access-group-label">{def.label}</span>
+          <span className="access-group-detail">
+            {detail}{detail ? ' · ' : ''}{group.stretches.length} {group.stretches.length === 1 ? 'stretch' : 'stretches'}
+          </span>
+        </span>
+        <span className="access-group-km">{formatLength(group.km)}</span>
+        <MapIcon id="chevron" size={14} className="access-group-chevron" />
+      </button>
+      {open && (
+        <ol className="access-stretches">
+          {group.stretches.map((stretch, i) => (
+            <li key={i}>
+              <button onClick={() => onFocus?.(stretch)} title="Show on the map">
+                <span>km {stretch.startKm.toFixed(1)} – {stretch.endKm.toFixed(1)}</span>
+                <span className="access-stretch-length">{formatLength(stretch.endKm - stretch.startKm)}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+    </li>
+  )
+}
+
 export function AccessWarnings({
   report,
   onFocus,
@@ -166,76 +211,55 @@ export function AccessWarnings({
   onFocus?: (stretch: AccessStretch) => void
 }) {
   const breakdown = ACCESS_CLASSES.filter(def => (report.km[def.id] ?? 0) > 0.005)
+  const groups = useMemo(() => groupStretches(report.stretches), [report.stretches])
+  const untaggedKm = report.km.untagged ?? 0
   return (
-    <div className="surface-panel access-panel">
-      <div className="surface-headline">
-        {report.stretches.length > 0 ? (
+    <div className="insight">
+      {report.stretches.length > 0 ? (
+        <div className="drawer-callout tone-danger">
+          <MapIcon id="access" size={18} />
           <span>
-            <strong>{report.stretches.length}</strong> access {report.stretches.length === 1 ? 'warning' : 'warnings'}
+            <strong>{report.stretches.length} {report.stretches.length === 1 ? 'stretch' : 'stretches'} may not be legal on a motorcycle</strong>
+            <span>{formatLength(report.warnKm)} of {report.totalKm.toFixed(1)} km. Check them before you ride.</span>
           </span>
-        ) : (
-          <span>No access restrictions tagged</span>
-        )}
-        <span className="surface-headline-sub">
-          {report.warnKm.toFixed(1)} of {report.totalKm.toFixed(1)} km
-        </span>
-      </div>
+        </div>
+      ) : (
+        <div className="drawer-callout tone-ok">
+          <MapIcon id="shield" size={18} />
+          <span>
+            <strong>No restrictions tagged</strong>
+            <span>{untaggedKm > 0.05 ? `${untaggedKm.toFixed(1)} km has no access tag; local rules apply.` : 'Every way is tagged open.'}</span>
+          </span>
+        </div>
+      )}
 
-      <div className="surface-bar" aria-hidden="true">
+      <div className="insight-bar" aria-hidden="true">
         {breakdown.map(def => (
           <span
             key={def.id}
-            className="surface-bar-part"
-            style={{
-              width: `${(((report.km[def.id] ?? 0) / (report.totalKm || 1)) * 100).toFixed(2)}%`,
-              background: def.color,
-            }}
-            title={`${def.label} — ${(report.km[def.id] ?? 0).toFixed(1)} km`}
+            style={{ flexGrow: (report.km[def.id] ?? 0) / (report.totalKm || 1), background: def.color }}
+            title={`${def.label} — ${formatLength(report.km[def.id] ?? 0)}`}
           />
         ))}
       </div>
 
-      {report.stretches.length > 0 && (
-        <ul className="access-list">
-          {report.stretches.map((stretch, i) => {
-            const def = accessDefinition(stretch.id)
-            return (
-              <li key={i}>
-                <button
-                  type="button"
-                  className="access-item"
-                  onClick={() => onFocus?.(stretch)}
-                  title={`${def.hint}. Click to show it on the map.`}
-                >
-                  <span className="surface-swatch" style={{ background: def.color }} />
-                  <span className="access-item-text">
-                    <span className="access-item-label">{def.label}</span>
-                    <span className="access-item-tag">
-                      {[stretch.tag, stretch.highway && `highway=${stretch.highway}`].filter(Boolean).join(' · ')}
-                    </span>
-                  </span>
-                  <span className="surface-legend-value">{kmRange(stretch)}</span>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      )}
+      {groups.length > 0 && <ul className="access-groups">{groups.map(group => (
+        <AccessGroupRow key={group.key} group={group} onFocus={onFocus} />
+      ))}</ul>}
 
-      <ul className="surface-legend">
+      <ul className="insight-legend">
         {breakdown.filter(def => !def.warn).map(def => (
           <li key={def.id} title={def.hint}>
-            <span className="surface-swatch" style={{ background: def.color }} />
-            <span className="surface-legend-label">{def.label}</span>
-            <span className="surface-legend-value">{formatLength(report.km[def.id] ?? 0)}</span>
+            <span className="insight-swatch" style={{ background: def.color }} />
+            <span className="insight-legend-label">{def.label}</span>
+            <span className="insight-legend-value">{formatLength(report.km[def.id] ?? 0)}</span>
           </li>
         ))}
       </ul>
 
-      <p className="route-stat-note">
-        From OpenStreetMap access tags for motorcycles. Untagged ways follow the national default
-        for their road class, which varies by country and region — check local rules. Gates and
-        seasonal or conditional closures are not included.
+      <p className="insight-note">
+        From OpenStreetMap access tags for motorcycles. Untagged ways follow the national default for their road
+        class, which varies by country and region. Gates and seasonal or conditional closures are not included.
       </p>
     </div>
   )
@@ -246,7 +270,27 @@ export function AccessWarnings({
 function legText(leg: FuelLeg): string {
   const from = leg.from ? `${leg.from.station.name ?? 'fuel'} at km ${leg.from.km.toFixed(0)}` : 'the start'
   const to = leg.to ? `next fuel at km ${leg.to.km.toFixed(0)}` : 'no fuel before the end'
-  return `${(leg.toKm - leg.fromKm).toFixed(0)} km from ${from} — ${to}`
+  return `${(leg.toKm - leg.fromKm).toFixed(0)} km from ${from}, ${to}`
+}
+
+function NumberField({ label, unit, value, min, max, step, onChange }: {
+  label: string
+  unit: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="insight-field">
+      <span className="insight-field-label">{label}</span>
+      <span className="insight-field-input">
+        <input type="number" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} />
+        <span>{unit}</span>
+      </span>
+    </label>
+  )
 }
 
 export function FuelRangeView({
@@ -267,67 +311,46 @@ export function FuelRangeView({
   corridorKm: number
 }) {
   return (
-    <div className="surface-panel fuel-range-panel">
-      <div className="fuel-range-inputs">
-        <label>
-          <span>Full tank</span>
-          <input
-            className="edit-number"
-            type="number"
-            min={10}
-            max={5000}
-            step={10}
-            value={settings.rangeKm}
-            onChange={e => onSettings({ ...settings, rangeKm: Number(e.target.value) })}
-            aria-label="Range on a full tank in km"
-          />
-          <span className="edit-unit">km</span>
-        </label>
-        <label>
-          <span>Reserve</span>
-          <input
-            className="edit-number"
-            type="number"
-            min={0}
-            max={90}
-            step={5}
-            value={settings.reservePct}
-            onChange={e => onSettings({ ...settings, reservePct: Number(e.target.value) })}
-            aria-label="Reserve to keep, percent of the tank"
-          />
-          <span className="edit-unit">%</span>
-        </label>
+    <div className="insight">
+      <div className="insight-fields">
+        <NumberField label="Range on a full tank" unit="km" value={settings.rangeKm} min={10} max={5000} step={10}
+          onChange={rangeKm => onSettings({ ...settings, rangeKm })} />
+        <NumberField label="Keep in reserve" unit="%" value={settings.reservePct} min={0} max={90} step={5}
+          onChange={reservePct => onSettings({ ...settings, reservePct })} />
       </div>
 
       {!fuelLoaded ? (
-        <button className="surface-mode-btn" onClick={onLoadFuel} disabled={fuelLoading}>
-          {fuelLoading ? 'Loading fuel stations…' : 'Load fuel stations along the track'}
+        <button className="insight-action" onClick={onLoadFuel} disabled={fuelLoading}>
+          <MapIcon id="fuel" size={16} />
+          {fuelLoading ? 'Finding fuel stations…' : 'Find fuel stations along the track'}
         </button>
       ) : plan && (
         <>
-          <div className="surface-headline">
-            {plan.warnings.length === 0 ? (
-              <span>Every leg fits in <strong>{plan.usableKm.toFixed(0)}</strong> km</span>
-            ) : (
-              <span>
-                <strong>{plan.warnings.length}</strong> {plan.warnings.length === 1 ? 'leg' : 'legs'} beyond{' '}
-                {plan.usableKm.toFixed(0)} km
-              </span>
-            )}
-            <span className="surface-headline-sub">
-              {plan.stops.length} {plan.stops.length === 1 ? 'stop' : 'stops'} · longest {plan.longestLegKm.toFixed(0)} km
-            </span>
+          <div className="drawer-metrics">
+            <Metric value={plan.usableKm.toFixed(0)} unit="km" caption="usable range" />
+            <Metric value={plan.longestLegKm.toFixed(0)} unit="km" caption="longest leg"
+              tone={plan.longestLegKm > settings.rangeKm ? 'danger' : plan.longestLegKm > plan.usableKm ? 'warn' : 'ok'} />
+            <Metric value={String(plan.stops.length)} caption={plan.stops.length === 1 ? 'station' : 'stations'} />
           </div>
-          {plan.warnings.length > 0 && (
-            <ul className="access-list">
+          {plan.warnings.length === 0 ? (
+            <div className="drawer-callout tone-ok">
+              <MapIcon id="gauge" size={18} />
+              <span>
+                <strong>Every leg fits your range</strong>
+                <span>You never need the reserve between stations.</span>
+              </span>
+            </div>
+          ) : (
+            <ul className="fuel-legs">
               {plan.warnings.map((leg, i) => (
-                <li key={i} className={`fuel-leg fuel-leg--${leg.status}`}>
-                  <span className="fuel-leg-status">
-                    {leg.status === 'dry'
-                      ? `Runs dry at km ${leg.atKm?.toFixed(0)}`
-                      : `On reserve from km ${leg.atKm?.toFixed(0)}`}
+                <li key={i} className={`drawer-callout tone-${leg.status === 'dry' ? 'danger' : 'warn'}`}>
+                  <MapIcon id="fuel" size={18} />
+                  <span>
+                    <strong>
+                      {leg.status === 'dry' ? `Tank empty at km ${leg.atKm?.toFixed(0)}` : `On reserve from km ${leg.atKm?.toFixed(0)}`}
+                    </strong>
+                    <span>{legText(leg)}</span>
                   </span>
-                  <span className="access-item-tag">{legText(leg)}</span>
                 </li>
               ))}
             </ul>
@@ -335,9 +358,9 @@ export function FuelRangeView({
         </>
       )}
 
-      <p className="route-stat-note">
-        Assumes a full tank at the start. Stations count within {corridorKm} km of the track, without
-        the detour; opening hours and fuel types are not checked.
+      <p className="insight-note">
+        Assumes a full tank at the start. Stations count within {corridorKm} km of the track, without the detour;
+        opening hours and fuel types are not checked.
       </p>
     </div>
   )
@@ -426,5 +449,43 @@ export function FuelRangeMarkers({
         )
       })}
     </>
+  )
+}
+
+/* -- Lookup status ---------------------------------------------------- */
+
+/** What the Surface and Access tabs show until the road match is ready. */
+export function AnnotationStatus({ state }: { state: TrackAnnotationState | null }) {
+  if (state?.status === 'error') {
+    return (
+      <div className="drawer-callout tone-warn" role="status">
+        <MapIcon id="route" size={18} />
+        <span>
+          <strong>Could not match the track</strong>
+          <span>{state.message}</span>
+          <button className="insight-link" onClick={state.retry}>Try again</button>
+        </span>
+      </div>
+    )
+  }
+  if (state?.status === 'unavailable') {
+    return (
+      <div className="drawer-callout tone-neutral">
+        <MapIcon id="route" size={18} />
+        <span>
+          <strong>Needs local routing data</strong>
+          <span>{state.message}</span>
+        </span>
+      </div>
+    )
+  }
+  return (
+    <div className="drawer-loading" role="status">
+      <span className="drawer-spinner" aria-hidden="true" />
+      <span>
+        <strong>Matching the track to the road network</strong>
+        <span>Usually a few seconds, longer for very long tracks.</span>
+      </span>
+    </div>
   )
 }

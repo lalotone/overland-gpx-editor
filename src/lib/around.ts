@@ -254,3 +254,54 @@ export async function searchAround(
     cache: result.cache,
   }
 }
+
+export interface RouteOffset {
+  /** Shortest distance from the place to the route line, metres. */
+  offsetM: number
+  /** Where along the route that closest approach is, km from the start. */
+  atKm: number
+}
+
+/** Off-route distances up to this are "on the route" — a lay-by, a fountain on the verge. */
+export const ON_ROUTE_M = 250
+/** Beyond this a place is not a stop on the route, however close to the point. */
+export const NEAR_ROUTE_M = 2000
+
+/**
+ * Closest approach of each place to the route polyline. Each place gets a
+ * local flat projection, which is accurate to well under a metre at these
+ * distances; this is display, not a measurement anything else depends on.
+ */
+export function routeOffsets(
+  places: { id: string; lat: number; lon: number }[],
+  route: Coordinate[],
+  cumKm: number[],
+): Map<string, RouteOffset> {
+  const offsets = new Map<string, RouteOffset>()
+  if (route.length < 2 || cumKm.length !== route.length) return offsets
+  const metresPerDeg = 111_195
+  for (const place of places) {
+    const kx = metresPerDeg * Math.cos((place.lat * Math.PI) / 180)
+    let best = Infinity
+    let bestKm = 0
+    for (let i = 0; i + 1 < route.length; i++) {
+      const ax = (route[i].lon - place.lon) * kx
+      const ay = (route[i].lat - place.lat) * metresPerDeg
+      const bx = (route[i + 1].lon - place.lon) * kx
+      const by = (route[i + 1].lat - place.lat) * metresPerDeg
+      const dx = bx - ax
+      const dy = by - ay
+      const lengthSq = dx * dx + dy * dy
+      const t = lengthSq > 0 ? Math.min(1, Math.max(0, -(ax * dx + ay * dy) / lengthSq)) : 0
+      const px = ax + t * dx
+      const py = ay + t * dy
+      const distanceSq = px * px + py * py
+      if (distanceSq < best) {
+        best = distanceSq
+        bestKm = cumKm[i] + t * (cumKm[i + 1] - cumKm[i])
+      }
+    }
+    offsets.set(place.id, { offsetM: Math.sqrt(best), atKm: bestKm })
+  }
+  return offsets
+}

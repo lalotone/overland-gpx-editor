@@ -30,7 +30,7 @@ const { classifySurface, summarizeSurface } = await import('../src/lib/surface')
 const { annotateTrack, annotateTrackSurface, segmentSurfaces } = await import('../src/lib/trackSurface')
 const { accessReport, classifyAccess, locateSegmentRoads } = await import('../src/lib/access')
 const { fuelStopsAlong, normalizeFuelRange, planFuelRange } = await import('../src/lib/fuelRange')
-const { AroundAreaCache, aroundSearchArea, classifyAround, aroundFacts, searchAround } = await import('../src/lib/around')
+const { AroundAreaCache, aroundSearchArea, classifyAround, aroundFacts, routeOffsets, searchAround } = await import('../src/lib/around')
 const { boundingBoxSpanKm, boundsAround, MAX_SEARCH_SPAN_KM } = await import('../src/lib/poi')
 const {
   parseFuelStations,
@@ -1850,6 +1850,20 @@ console.log(`\nNearby search checks\n${'='.repeat(78)}`)
   const capped = await searchAround({ lat: 42.57, lon: -0.551 }, 30, truncatedCache, undefined, { runtime, fetcher: full })
   await searchAround({ lat: 42.57, lon: -0.551 }, 5, truncatedCache, undefined, { runtime, fetcher: full })
   check('a capped reply is flagged and never stands in for a smaller search', capped.truncated && calls === 2)
+
+  const route = [{ lat: 42, lon: 1 }, { lat: 42, lon: 1.02 }, { lat: 42.02, lon: 1.02 }]
+  const routeKm = cumulativeDistanceKm(route)
+  const offsets = routeOffsets([
+    { id: 'verge', lat: 42.0009, lon: 1.01 },
+    { id: 'corner', lat: 42.01, lon: 1.03 },
+  ], route, routeKm)
+  const verge = offsets.get('verge')!
+  const corner = offsets.get('corner')!
+  check('a place beside the first leg is ~100 m off route halfway along it',
+    Math.abs(verge.offsetM - 100) < 2 && Math.abs(verge.atKm - routeKm[1] / 2) < 0.01)
+  check('a place beside the second leg is placed on that leg',
+    Math.abs(corner.offsetM - 826) < 5 && Math.abs(corner.atKm - (routeKm[1] + (routeKm[2] - routeKm[1]) / 2)) < 0.01)
+  check('no route means no offsets', routeOffsets([{ id: 'x', lat: 42, lon: 1 }], [], []).size === 0)
 }
 
 /* -- Surface classification and chunking ---------------------------- */

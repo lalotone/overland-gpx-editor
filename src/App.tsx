@@ -9,11 +9,16 @@ import { ExploreScreen } from './components/ExploreScreen'
 import { MapTiles, TerrainControls, VectorMapDiagnostic } from './components/MapLayers'
 import type { VectorMapIssue } from './components/MapLayers'
 import { OfflineRegionsButton, OfflineRegionsDialog } from './components/OfflineRegions'
-import { AroundPanel, AroundRadius, formatDistance, osmLink } from './components/AroundPanel'
-import type { AroundState } from './components/AroundPanel'
+import { AroundRadius, AroundResults, aroundIcon, formatDistance, osmLink, RouteBadge } from './components/AroundPanel'
+import type { AroundSort, AroundState } from './components/AroundPanel'
+import { MapDrawer } from './components/MapDrawer'
+import type { DrawerTab } from './components/MapDrawer'
+import { MapIcon, mapIconMarkup } from './components/mapIcons'
+import type { MapIconId } from './components/mapIcons'
 import {
   AccessOverlay,
   AccessWarnings,
+  AnnotationStatus,
   FuelRangeMarkers,
   FuelRangeView,
   SurfaceBreakdown,
@@ -63,14 +68,14 @@ import type { BoundingBox, Poi, PoiKind } from './lib/poi'
 import { calculateRoute, formatDuration, ROUTING_PROFILES } from './lib/routing'
 import type { RoutingProfile } from './lib/routing'
 import { availableFuels, DEFAULT_FUEL_REFERENCE, fuelBandColors, FUEL_PRICE_BANDS } from './lib/fuel'
-import { summarizeSurface } from './lib/surface'
+import { summarizeSurface, surfaceColor } from './lib/surface'
 import type { SurfaceClass } from './lib/surface'
 import { accessReport, locateSegmentRoads } from './lib/access'
 import type { AccessStretch, RoadTags } from './lib/access'
 import { DEFAULT_FUEL_RANGE, fuelStopsAlong, normalizeFuelRange, planFuelRange } from './lib/fuelRange'
 import type { FuelRangeSettings } from './lib/fuelRange'
 import { segmentSurfaces } from './lib/trackSurface'
-import { AroundAreaCache, AROUND_RADII_KM, aroundCategory, DEFAULT_AROUND_RADIUS_KM, searchAround } from './lib/around'
+import { AroundAreaCache, AROUND_RADII_KM, aroundCategory, DEFAULT_AROUND_RADIUS_KM, ON_ROUTE_M, routeOffsets, searchAround } from './lib/around'
 import type { AroundCategory, AroundPoi } from './lib/around'
 import { clearedRouteDerivedState, routeSequenceIsCurrent } from './lib/planner'
 import type { McpCommand, McpMapMarker } from './lib/mcp'
@@ -308,13 +313,34 @@ function MapFitBounds({ coordinates }: { coordinates: Coordinate[] }) {
 // rather than handing Leaflet a fresh icon object every time.
 const iconCache = new Map<string, L.DivIcon>()
 
+/** Route points as numbered pins, coloured like their rows: start, via, finish. */
+function routePointIcon(number: number, role: 'start' | 'via' | 'finish', active = false): L.DivIcon {
+  const key = `route:${number}:${role}:${active}`
+  let icon = iconCache.get(key)
+  if (!icon) {
+    icon = L.divIcon({
+      className: 'route-point-marker',
+      html: `<span class="route-point-pin route-point-pin--${role}${active ? ' active' : ''}"><span>${number}</span></span>`,
+      iconSize: [30, 38],
+      iconAnchor: [15, 36],
+      popupAnchor: [0, -32],
+    })
+    iconCache.set(key, icon)
+  }
+  return icon
+}
+
+/** POI layer glyphs drawn with the shared icon set rather than platform emoji. */
+const POI_GLYPH_ICONS: Record<string, MapIconId> = { '⛽': 'fuel', '💧': 'water', '⛺': 'camp' }
+
 function poiIcon(glyph: string, color: string): L.DivIcon {
   const key = `poi:${glyph}:${color}`
   let icon = iconCache.get(key)
   if (!icon) {
+    const svg = POI_GLYPH_ICONS[glyph]
     icon = L.divIcon({
       className: 'poi-marker',
-      html: `<span class="poi-marker-inner" style="border-color:${color}">${glyph}</span>`,
+      html: `<span class="poi-marker-inner" style="border-color:${color};color:${color}">${svg ? mapIconMarkup(svg, 13) : glyph}</span>`,
       iconSize: [24, 24],
       iconAnchor: [12, 12],
     })
@@ -688,6 +714,7 @@ function App() {
   const [showTools, setShowTools] = useState(false)
   /** Surface, access and fuel-range checks for the loaded track. */
   const [showRideCheck, setShowRideCheck] = useState(false)
+  const [rideTab, setRideTab] = useState<'surface' | 'access' | 'fuel'>('access')
   const [fuelRange, setFuelRange] = useState<FuelRangeSettings>(() => {
     try {
       return normalizeFuelRange(JSON.parse(localStorage.getItem('gpx-fuel-range') ?? '{}') as Partial<FuelRangeSettings>)
@@ -1127,6 +1154,94 @@ function App() {
     [currentTrack],
   )
 
+  /* -- Ride check: surface, access and fuel range -------------------- */
+
+  const trackAnnotation = useTrackAnnotation(
+    currentTrack?.coordinates,
+    runtime,
+    routingData,
+    showRideCheck || colorMode === 'surface',
+  )
+  const trackSpans = trackAnnotation?.status === 'ready' ? trackAnnotation.result.spans : null
+  const trackSurfaceSegments = useMemo(
+    () =>
+      trackSpans && trackSpans.length > 0 && currentTrack
+        ? segmentSurfaces(trackSpans, currentTrack.coordinates.length)
+        : null,
+    [currentTrack, trackSpans],
+  )
+  const trackAccess = useMemo(
+    () => (trackSpans && trackSpans.length > 0 ? accessReport(trackSpans, cumKm) : null),
+    [cumKm, trackSpans],
+  )
+  /** The loaded track can be painted by surface once it has been matched. */
+  const trackColorMode: ColorMode = colorMode === 'surface' && trackSurfaceSegments ? 'surface' : viewColorMode
+
+  const fuelStops = useMemo(
+    () =>
+      currentTrack && activePois.fuel.length > 0
+        ? fuelStopsAlong(currentTrack.coordinates, cumKm, activePois.fuel, FUEL_CORRIDOR_M)
+        : null,
+    [activePois.fuel, currentTrack, cumKm],
+  )
+  const fuelPlan = useMemo(
+    () => (fuelStops && cumKm.length > 0 ? planFuelRange(cumKm[cumKm.length - 1], fuelStops, fuelRange) : null),
+    [cumKm, fuelRange, fuelStops],
+  )
+  const usableRangeKm = fuelRange.rangeKm * (1 - fuelRange.reservePct / 100)
+
+  /**
+   * Opening Ride check re-frames the track into the part of the map the
+   * drawer leaves visible: beside it on a wide screen, above the sheet on a
+   * narrow one. Otherwise the panel would open on top of what it describes.
+   */
+  useEffect(() => {
+    const map = mapRef.current
+    if (!showRideCheck || !map || !currentTrack || currentTrack.coordinates.length < 2) return
+    const bounds = L.latLngBounds(currentTrack.coordinates.map(c => [c.lat, c.lon] as [number, number]))
+    const size = map.getSize()
+    const wide = window.innerWidth > 900
+    map.fitBounds(bounds, {
+      paddingTopLeft: [40, 40],
+      paddingBottomRight: wide ? [384 + 40, 40] : [40, Math.round(size.y * 0.58) + 24],
+      animate: true,
+    })
+    // Only on opening: later edits must not keep yanking the view around.
+  }, [showRideCheck])
+
+  /** Tab badges summarise each check, so the answer shows before the tab opens. */
+  const rideTabs: DrawerTab<'surface' | 'access' | 'fuel'>[] = [
+    {
+      id: 'surface',
+      label: 'Surface',
+      badge: trackAnnotation?.status === 'ready'
+        ? `${(trackAnnotation.result.summary.unpavedFraction * 100).toFixed(0)}% dirt`
+        : undefined,
+    },
+    {
+      id: 'access',
+      label: 'Access',
+      badge: trackAccess ? (trackAccess.stretches.length > 0 ? String(trackAccess.stretches.length) : 'Clear') : undefined,
+      tone: trackAccess ? (trackAccess.stretches.length > 0 ? 'danger' : 'ok') : undefined,
+    },
+    {
+      id: 'fuel',
+      label: 'Fuel',
+      badge: fuelPlan ? (fuelPlan.warnings.length > 0 ? String(fuelPlan.warnings.length) : 'OK') : undefined,
+      tone: fuelPlan
+        ? fuelPlan.warnings.some(leg => leg.status === 'dry') ? 'danger' : fuelPlan.warnings.length > 0 ? 'warn' : 'ok'
+        : undefined,
+    },
+  ]
+
+  /** Zooms the active map to a flagged stretch of the given line. */
+  const focusStretch = useCallback((coords: Coordinate[]) => (stretch: AccessStretch) => {
+    const map = mapRef.current
+    const points = coords.slice(stretch.startIndex, stretch.endIndex + 1)
+    if (!map || points.length === 0) return
+    map.fitBounds(L.latLngBounds(points.map(p => [p.lat, p.lon] as [number, number])), { padding: [60, 60], maxZoom: 16 })
+  }, [])
+
   // Smoothed once, then reused for stats, colouring and the profile so all
   // three agree with each other.
   const smoothedElevations = useMemo(
@@ -1209,12 +1324,15 @@ function App() {
           distKm: pt.distKm,
           barHeight: ((pt.elevation - profileElevMin) / profileElevRange) * 100,
           color:
-            viewColorMode === 'slope'
-              ? getSegmentColor(slope)
-              : altitudeColor(pt.elevation, profileElevMin, profileElevMax),
+            trackColorMode === 'surface' && trackSurfaceSegments
+              // The bar stands for the stretch that ends at its point.
+              ? surfaceColor(trackSurfaceSegments[Math.max(0, Math.min(pt.coordIndex, trackSurfaceSegments.length) - 1)] ?? 'unknown')
+              : viewColorMode === 'slope'
+                ? getSegmentColor(slope)
+                : altitudeColor(pt.elevation, profileElevMin, profileElevMax),
         }
       }),
-    [profilePoints, profileElevMin, profileElevMax, profileElevRange, viewColorMode],
+    [profilePoints, profileElevMin, profileElevMax, profileElevRange, viewColorMode, trackColorMode, trackSurfaceSegments],
   )
 
   const yAxisTicks = useMemo(() => {
@@ -1222,50 +1340,6 @@ function App() {
     for (let t = 0; t <= 4; t++) ticks.push(Math.round(profileElevMin + (profileElevRange * t) / 4))
     return ticks
   }, [profileElevMin, profileElevRange])
-
-  /* -- Ride check: surface, access and fuel range -------------------- */
-
-  const trackAnnotation = useTrackAnnotation(
-    currentTrack?.coordinates,
-    runtime,
-    routingData,
-    showRideCheck || colorMode === 'surface',
-  )
-  const trackSpans = trackAnnotation?.status === 'ready' ? trackAnnotation.result.spans : null
-  const trackSurfaceSegments = useMemo(
-    () =>
-      trackSpans && trackSpans.length > 0 && currentTrack
-        ? segmentSurfaces(trackSpans, currentTrack.coordinates.length)
-        : null,
-    [currentTrack, trackSpans],
-  )
-  const trackAccess = useMemo(
-    () => (trackSpans && trackSpans.length > 0 ? accessReport(trackSpans, cumKm) : null),
-    [cumKm, trackSpans],
-  )
-  /** The loaded track can be painted by surface once it has been matched. */
-  const trackColorMode: ColorMode = colorMode === 'surface' && trackSurfaceSegments ? 'surface' : viewColorMode
-
-  const fuelStops = useMemo(
-    () =>
-      currentTrack && activePois.fuel.length > 0
-        ? fuelStopsAlong(currentTrack.coordinates, cumKm, activePois.fuel, FUEL_CORRIDOR_M)
-        : null,
-    [activePois.fuel, currentTrack, cumKm],
-  )
-  const fuelPlan = useMemo(
-    () => (fuelStops && cumKm.length > 0 ? planFuelRange(cumKm[cumKm.length - 1], fuelStops, fuelRange) : null),
-    [cumKm, fuelRange, fuelStops],
-  )
-  const usableRangeKm = fuelRange.rangeKm * (1 - fuelRange.reservePct / 100)
-
-  /** Zooms the active map to a flagged stretch of the given line. */
-  const focusStretch = useCallback((coords: Coordinate[]) => (stretch: AccessStretch) => {
-    const map = mapRef.current
-    const points = coords.slice(stretch.startIndex, stretch.endIndex + 1)
-    if (!map || points.length === 0) return
-    map.fitBounds(L.latLngBounds(points.map(p => [p.lat, p.lon] as [number, number])), { padding: [60, 60], maxZoom: 16 })
-  }, [])
 
   /* -- Fuel gap ----------------------------------------------------- */
 
@@ -1769,6 +1843,7 @@ function App() {
   const aroundAbortRef = useRef<AbortController | null>(null)
   const [around, setAround] = useState<(AroundState & { point: Coordinate }) | null>(null)
   const [aroundHidden, setAroundHidden] = useState<ReadonlySet<AroundCategory>>(new Set())
+  const [aroundSort, setAroundSort] = useState<AroundSort>('nearest')
   const [aroundRadius, setAroundRadius] = useState(() => {
     const stored = Number(localStorage.getItem('gpx-around-radius'))
     return (AROUND_RADII_KM as readonly number[]).includes(stored) ? stored : DEFAULT_AROUND_RADIUS_KM
@@ -2007,6 +2082,15 @@ function App() {
   )
 
   const surfaceReady = surfaceSummary !== null && surfaceSummary.shares.length > 0
+
+  /** Where each nearby place sits relative to the planned route, once there is one. */
+  const aroundOffsets = useMemo(
+    () =>
+      around?.result && routedCoordinates.length > 1 && creationCumKm.length === routedCoordinates.length
+        ? routeOffsets(around.result.pois, routedCoordinates, creationCumKm)
+        : null,
+    [around?.result, routedCoordinates, creationCumKm],
+  )
 
   const routeAccess = useMemo(
     () =>
@@ -2859,30 +2943,41 @@ function App() {
                 <p className="sidebar-empty">Click on the map to add points</p>
               ) : (
                 <ul className="waypoint-list">
-                  {creationWaypoints.map((w, index) => (
-                    <li key={w.id} style={{ animationDelay: `${index * 0.05}s` }}>
-                      <span className="waypoint-info">
-                        <span className="waypoint-number">#{index + 1}</span>
-                        <span className="waypoint-coords">{w.lat.toFixed(4)}, {w.lon.toFixed(4)}</span>
-                        {w.elevation !== undefined && <span className="waypoint-elev">{w.elevation.toFixed(0)}m</span>}
-                      </span>
-                      <button
-                        className="waypoint-around"
-                        onClick={() => searchAroundPoint({ lat: w.lat, lon: w.lon }, index + 1, aroundRadius)}
-                        title={`What's around this point — water, huts, camps, fuel within ${aroundRadius} km`}
-                        aria-label={`What's around route point ${index + 1}`}
-                      >
-                        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
-                          <path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
-                        </svg>
-                      </button>
-                      <button className="waypoint-delete" onClick={() => deleteWaypoint(w.id)} title="Remove waypoint">
-                        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
-                          <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
+                  {creationWaypoints.map((w, index) => {
+                    const role = index === 0 ? 'start' : index === creationWaypoints.length - 1 ? 'finish' : 'via'
+                    return (
+                      <li key={w.id} className={`waypoint-row waypoint-row--${role}`} style={{ animationDelay: `${index * 0.05}s` }}>
+                        <span className="waypoint-number">{index + 1}</span>
+                        <span className="waypoint-text">
+                          <span className="waypoint-line">
+                            <span className="waypoint-role">{role === 'start' ? 'Start' : role === 'finish' ? 'Finish' : `Via ${index}`}</span>
+                            {w.elevation !== undefined && <span className="waypoint-elev">{w.elevation.toFixed(0)} m</span>}
+                          </span>
+                          <span className="waypoint-coords" title={`${w.lat.toFixed(6)}, ${w.lon.toFixed(6)}`}>
+                            {w.lat.toFixed(3)}, {w.lon.toFixed(3)}
+                          </span>
+                        </span>
+                        <span className="waypoint-actions-row">
+                          <button
+                            className={`waypoint-icon-btn${around?.pointNumber === index + 1 ? ' active' : ''}`}
+                            onClick={() => searchAroundPoint({ lat: w.lat, lon: w.lon }, index + 1, aroundRadius)}
+                            title={`What's around this point (${aroundRadius} km)`}
+                            aria-label={`What's around route point ${index + 1}`}
+                          >
+                            <MapIcon id="search" size={14} />
+                          </button>
+                          <button
+                            className="waypoint-icon-btn waypoint-icon-btn--danger"
+                            onClick={() => deleteWaypoint(w.id)}
+                            title="Remove this point"
+                            aria-label={`Remove route point ${index + 1}`}
+                          >
+                            <MapIcon id="close" size={14} />
+                          </button>
+                        </span>
+                      </li>
+                    )
+                  })}
                 </ul>
               )}
             </div>
@@ -2982,7 +3077,7 @@ function App() {
               </div>
             </div>
 
-            <div className={`map-container${waypointMode ? ' placing-waypoint' : ''}`}>
+            <div className={`map-container${waypointMode ? ' placing-waypoint' : ''}${around ? ' has-map-drawer' : ''}`}>
               <MapContainer
                 center={[41.65, -0.88]}
                 zoom={9}
@@ -3007,6 +3102,12 @@ function App() {
                   <Marker
                     key={w.id}
                     position={[w.lat, w.lon]}
+                    icon={routePointIcon(
+                      index + 1,
+                      index === 0 ? 'start' : index === creationWaypoints.length - 1 ? 'finish' : 'via',
+                      around?.pointNumber === index + 1,
+                    )}
+                    zIndexOffset={1000}
                     draggable
                     eventHandlers={{
                       dragend: e => {
@@ -3087,10 +3188,16 @@ function App() {
                 {around?.result?.pois.filter(poi => !aroundHidden.has(poi.category)).map(poi => {
                   const category = aroundCategory(poi.category)
                   return (
-                    <Marker key={`around:${poi.id}`} position={[poi.lat, poi.lon]} icon={poiIcon(category.glyph, category.color)}>
+                    <Marker
+                      key={`around:${poi.id}`}
+                      position={[poi.lat, poi.lon]}
+                      icon={aroundIcon(poi.category, (aroundOffsets?.get(poi.id)?.offsetM ?? Infinity) <= ON_ROUTE_M)}
+                    >
                       <Popup>
                         <div className="poi-popup">
                           <strong className="poi-popup-name">{poi.name ?? poi.kind}</strong>
+                          <span className="poi-popup-category" style={{ color: category.color }}>{category.label}</span>
+                          <RouteBadge offset={aroundOffsets?.get(poi.id)} />
                           <ul className="poi-popup-prices">
                             {poi.name && <li><span>Type</span><span className="poi-popup-value">{poi.kind}</span></li>}
                             {poi.facts.map(fact => (
@@ -3114,9 +3221,19 @@ function App() {
               </MapContainer>
 
               {around && (
-                <AroundPanel
+                <MapDrawer
+                  icon="search"
+                  title={`Around point #${around.pointNumber}`}
+                  subtitle={`${around.point.lat.toFixed(4)}, ${around.point.lon.toFixed(4)} · within ${around.radiusKm} km`}
+                  label="Nearby places"
+                  onClose={closeAround}
+                >
+                <AroundResults
                   state={around}
                   hidden={aroundHidden}
+                  offsets={aroundOffsets}
+                  sort={aroundSort}
+                  onSort={setAroundSort}
                   onToggleCategory={id => setAroundHidden(prev => {
                     const next = new Set(prev)
                     if (next.has(id)) next.delete(id)
@@ -3130,8 +3247,8 @@ function App() {
                   onRetry={() => searchAroundPoint(around.point, around.pointNumber, around.radiusKm)}
                   onFocus={focusAroundPoi}
                   onKeep={keepAroundPoi}
-                  onClose={closeAround}
                 />
+                </MapDrawer>
               )}
 
               <div className="creation-poi-strip">
@@ -3409,57 +3526,6 @@ function App() {
               )}
             </div>
 
-            {showRideCheck && (
-              <div className="edit-toolbar ride-check" data-testid="ride-check">
-                <div className="edit-cluster ride-check-cluster">
-                  <span className="edit-cluster-label">Surface</span>
-                  {trackAnnotation?.status === 'ready' ? (
-                    <SurfaceBreakdown
-                      summary={trackAnnotation.result.summary}
-                      colorBySurface={trackColorMode === 'surface'}
-                      onToggleColor={() => setColorMode(trackColorMode === 'surface' ? 'slope' : 'surface')}
-                      matched
-                    />
-                  ) : trackAnnotation?.status === 'error' ? (
-                    <p className="route-stat-note" role="status">
-                      Lookup failed: {trackAnnotation.message}{' '}
-                      <button className="btn btn-ghost btn-xs" onClick={trackAnnotation.retry}>Retry</button>
-                    </p>
-                  ) : trackAnnotation?.status === 'unavailable' ? (
-                    <p className="route-stat-note">{trackAnnotation.message}</p>
-                  ) : (
-                    <p className="route-stat-note" role="status">Matching the track to the road network…</p>
-                  )}
-                </div>
-
-                <div className="edit-cluster ride-check-cluster">
-                  <span className="edit-cluster-label">Access</span>
-                  {trackAccess ? (
-                    <AccessWarnings report={trackAccess} onFocus={focusStretch(currentTrack.coordinates)} />
-                  ) : trackAnnotation?.status === 'ready' ? (
-                    <p className="route-stat-note">
-                      This backend reports surface totals only; update it to check access along loaded tracks.
-                    </p>
-                  ) : (
-                    <p className="route-stat-note">Read from the same road match as the surface.</p>
-                  )}
-                </div>
-
-                <div className="edit-cluster ride-check-cluster">
-                  <span className="edit-cluster-label">Fuel range</span>
-                  <FuelRangeView
-                    settings={fuelRange}
-                    onSettings={next => setFuelRange(normalizeFuelRange(next))}
-                    plan={fuelPlan}
-                    fuelLoaded={activePois.fuel.length > 0}
-                    fuelLoading={poiLoading === 'fuel'}
-                    onLoadFuel={() => void togglePoiLayer('fuel')}
-                    corridorKm={FUEL_CORRIDOR_M / 1000}
-                  />
-                </div>
-              </div>
-            )}
-
             {showTools && (
               <div className="edit-toolbar">
                 <div className="edit-cluster">
@@ -3589,7 +3655,7 @@ function App() {
             )}
           </div>
 
-          <div className={`map-wrapper-with-elevation${hasElevationData && !elevationCollapsed ? ' elevation-expanded' : ''}${waypointMode ? ' placing-waypoint' : ''}`}>
+          <div className={`map-wrapper-with-elevation${hasElevationData && !elevationCollapsed ? ' elevation-expanded' : ''}${waypointMode ? ' placing-waypoint' : ''}${showRideCheck ? ' has-map-drawer' : ''}`}>
             <MapContainer
               center={[currentTrack.coordinates[0]?.lat ?? 0, currentTrack.coordinates[0]?.lon ?? 0]}
               zoom={13}
@@ -3683,6 +3749,44 @@ function App() {
               <MapMouseTracker onMove={setCursorPos} />
             </MapContainer>
 
+            {showRideCheck && (
+              <MapDrawer
+                icon="shield"
+                title="Ride check"
+                subtitle={`${fromGpxFilename(currentTrack.filename) || currentTrack.name || 'Track'} · ${trackDistance.toFixed(1)} km`}
+                label="Ride check"
+                tabs={rideTabs}
+                activeTab={rideTab}
+                onTab={setRideTab}
+                onClose={() => setShowRideCheck(false)}
+              >
+                {rideTab === 'surface' && (trackAnnotation?.status === 'ready' ? (
+                  <SurfaceBreakdown
+                    summary={trackAnnotation.result.summary}
+                    colorBySurface={trackColorMode === 'surface'}
+                    onToggleColor={() => setColorMode(trackColorMode === 'surface' ? 'slope' : 'surface')}
+                    matched
+                  />
+                ) : <AnnotationStatus state={trackAnnotation} />)}
+                {rideTab === 'access' && (trackAccess ? (
+                  <AccessWarnings report={trackAccess} onFocus={focusStretch(currentTrack.coordinates)} />
+                ) : trackAnnotation?.status === 'ready' ? (
+                  <p className="insight-note">This backend reports surface totals only; update it to check access along loaded tracks.</p>
+                ) : <AnnotationStatus state={trackAnnotation} />)}
+                {rideTab === 'fuel' && (
+                  <FuelRangeView
+                    settings={fuelRange}
+                    onSettings={next => setFuelRange(normalizeFuelRange(next))}
+                    plan={fuelPlan}
+                    fuelLoaded={activePois.fuel.length > 0}
+                    fuelLoading={poiLoading === 'fuel'}
+                    onLoadFuel={() => void togglePoiLayer('fuel')}
+                    corridorKm={FUEL_CORRIDOR_M / 1000}
+                  />
+                )}
+              </MapDrawer>
+            )}
+
             <FuelPriceLegend
               pois={activePois.fuel}
               reference={fuelReference}
@@ -3712,7 +3816,7 @@ function App() {
                 bars={profileBars}
                 stats={elevationStats}
                 yAxisTicks={yAxisTicks}
-                colorMode={viewColorMode}
+                colorMode={trackColorMode}
                 collapsed={elevationCollapsed}
                 onToggleCollapsed={() => setElevationCollapsed(c => !c)}
                 hoveredBar={hoveredBar}

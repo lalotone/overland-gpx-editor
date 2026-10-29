@@ -35,7 +35,8 @@ A route planner and track editor for offroad, overlanding and motorbike use.
   numbers do not depend on how densely the source device recorded.
 - **Moving time and average moving speed** from recorded timestamps, when the
   file has them.
-- **Longest gap without fuel** once the fuel layer is loaded.
+- **Longest gap without fuel** once the fuel layer is loaded, flagged when it
+  is longer than your fuel range less reserve.
 
 ## Elevation profile
 
@@ -93,6 +94,31 @@ Applies to any loaded track, with undo:
   never quietly assumed sealed. Surface is only as good as the OSM tagging.
 - Long routes are cut into chunks under the server's 200 km trace limit and
   stitched. A trace failure leaves the route and its elevation untouched.
+
+## Ride check (loaded tracks)
+
+A **Ride check** toggle next to Tools opens three panels for the loaded track.
+
+- **Surface** — the track is matched to the open routing region (it must cover
+  the track) and gets the same distance-weighted breakdown as a planned route.
+  The track can then be coloured by surface. The GPX itself is never changed.
+- **Access** — see below; read from the same road match.
+- **Fuel range** — set a full-tank range and a reserve; with the fuel layer
+  loaded, every leg between stations that would put you on reserve or run you
+  dry is listed and marked on the map. Assumes a full tank at the start.
+
+## Access
+
+- **Access warnings on planned routes and loaded tracks, in any country**,
+  from OpenStreetMap tags evaluated for a motorcycle: closed (`no`), private,
+  restricted use (forestry, agricultural, destination, permit…) and paths with
+  no motor permission. The most specific tag wins: `motorcycle` over
+  `motor_vehicle` over `vehicle` over `access`.
+- Each warning is listed with its tag and position and drawn as a dashed
+  stretch on the map; clicking it zooms there.
+- Ways with **no access tag** are counted separately, never as open, because
+  the national default for their road class decides. Gates and seasonal or
+  conditional closures are not covered. See [ACCURACY.md](docs/ACCURACY.md).
 
 ## POIs — fuel, drinking water, campsites
 
@@ -239,12 +265,11 @@ the service is down, the OSM fuel layer answers as before.
 
 ## Not done yet
 
-- **Surface on a loaded track** — the breakdown is read while planning; an
-  imported GPX would need map-matching before it could be classified.
 - **`tracktype`/`smoothness` presentation** — Broom returns these OSM road
   attributes, but the planner does not yet display a roughness breakdown.
 - **Arbitrary public raster basemap packs** — provider policies prohibit them;
   bounded OpenFreeMap vector packs are the supported exception.
-- **Access warnings** — `access=private`, gates, seasonal closures.
+- **Gates and seasonal closures** — barrier nodes and `:conditional` access
+  are not in Broom's per-edge attributes, so access warnings do not cover them.
 - **Mobile layout** — the creation screen is still desktop-shaped.
 - **Track joining in the UI** (`joinTracks` exists in `lib/edit.ts`).

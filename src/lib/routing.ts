@@ -5,6 +5,8 @@ import { fetchRuntimeService, responseError } from './offline'
 import type { RuntimeRequestContext } from './offline'
 import { classifySurface } from './surface'
 import type { SurfaceClass, SurfaceResult } from './surface'
+import { decodeRoadTags } from './access'
+import type { RoadTags } from './access'
 
 export type RoutingProfile = 'road' | 'mixed' | 'trail' | 'enduro' | 'custom'
 
@@ -27,6 +29,8 @@ export interface RouteResult {
   distanceKm: number | null
   engine: string
   surface: SurfaceResult
+  /** `roads[i]` holds the OSM tags for points i..i+1; null off the road network. */
+  roads: (RoadTags | null)[]
   inlineElevations: true
   regionId?: string
   generationId?: string
@@ -56,6 +60,7 @@ interface BroomSegmentPayload {
   geometryStart?: unknown
   geometryEnd?: unknown
   surface?: unknown
+  road?: unknown
   beeline?: unknown
 }
 
@@ -90,6 +95,7 @@ function decodeBroomRoute(data: BroomRoutePayload): RouteResult {
     }
   })
   const surfaceSegments: SurfaceClass[] = new Array(coordinates.length - 1).fill('unknown')
+  const roads: (RoadTags | null)[] = new Array(coordinates.length - 1).fill(null)
   for (const raw of data.segments as BroomSegmentPayload[]) {
     if (!Number.isInteger(raw.geometryStart) || !Number.isInteger(raw.geometryEnd)) {
       throw new RoutingError('Malformed local route annotations')
@@ -100,7 +106,11 @@ function decodeBroomRoute(data: BroomRoutePayload): RouteResult {
       throw new RoutingError('Local route annotations do not align with geometry')
     }
     const surface = raw.beeline === true ? 'unknown' : classifySurface(raw.surface)
-    for (let i = start; i < end; i++) surfaceSegments[i] = surface
+    const road = raw.beeline === true ? null : decodeRoadTags(raw.road)
+    for (let i = start; i < end; i++) {
+      surfaceSegments[i] = surface
+      roads[i] = road
+    }
   }
   return {
     coordinates,
@@ -108,6 +118,7 @@ function decodeBroomRoute(data: BroomRoutePayload): RouteResult {
     distanceKm: finiteNumber(data.distanceMeters) ? data.distanceMeters / 1000 : null,
     engine: `${typeof data.engine === 'string' ? data.engine : 'Broom'}${typeof data.engineVersion === 'string' ? ` ${data.engineVersion}` : ''}`,
     surface: { segments: surfaceSegments },
+    roads,
     inlineElevations: true,
     regionId: typeof data.regionId === 'string' ? data.regionId : undefined,
     generationId: typeof data.generationId === 'string' ? data.generationId : undefined,

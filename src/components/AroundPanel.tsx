@@ -4,12 +4,15 @@ import { Circle } from 'react-leaflet'
 import { AROUND_CATEGORIES, AROUND_RADII_KM, aroundCategory, NEAR_ROUTE_M, ON_ROUTE_M } from '../lib/around'
 import type { AroundCategory, AroundPoi, AroundSearchResult, RouteOffset } from '../lib/around'
 import { MapIcon, mapIconMarkup } from './mapIcons'
+import './insight.css'
 
 export interface AroundState {
   /** Route point number shown in the header, 1-based. */
   pointNumber: number
   radiusKm: number
   loading: boolean
+  /** The user stopped a search that had nothing earlier to fall back to. */
+  cancelled?: boolean
   error?: string
   result?: AroundSearchResult
 }
@@ -67,6 +70,7 @@ export function AroundResults({
   onRetry,
   onFocus,
   onKeep,
+  onCancel,
 }: {
   state: AroundState
   hidden: ReadonlySet<AroundCategory>
@@ -78,7 +82,9 @@ export function AroundResults({
   onRadius: (km: number) => void
   onRetry: () => void
   onFocus: (poi: AroundPoi) => void
-  onKeep: (poi: AroundPoi) => void
+  /** Omitted where there is no document to keep a place in. */
+  onKeep?: (poi: AroundPoi) => void
+  onCancel: () => void
 }) {
   const pois = useMemo(() => state.result?.pois ?? [], [state.result])
   const counts = useMemo(() => {
@@ -119,6 +125,16 @@ export function AroundResults({
           <span>
             <strong>Asking OpenStreetMap</strong>
             <span>A busy server can take up to a minute.</span>
+          </span>
+          <button className="drawer-loading-cancel" onClick={onCancel}>Cancel</button>
+        </div>
+      ) : state.cancelled ? (
+        <div className="drawer-callout tone-neutral" role="status">
+          <MapIcon id="search" size={18} />
+          <span>
+            <strong>Search cancelled</strong>
+            <span>The search was stopped before any results arrived.</span>
+            <button className="insight-link" onClick={onRetry}>Search again</button>
           </span>
         </div>
       ) : state.error ? (
@@ -187,14 +203,16 @@ export function AroundResults({
                       </span>
                       <span className="place-distance">{formatDistance(poi.distanceM)}</span>
                     </button>
-                    <button
-                      className="place-keep"
-                      onClick={() => onKeep(poi)}
-                      title="Keep as a place in this GPX (not routed through)"
-                      aria-label={`Keep ${poi.name ?? poi.kind} as a place`}
-                    >
-                      +
-                    </button>
+                    {onKeep && (
+                      <button
+                        className="place-keep"
+                        onClick={() => onKeep(poi)}
+                        title="Keep as a place in this GPX (not routed through)"
+                        aria-label={`Keep ${poi.name ?? poi.kind} as a place`}
+                      >
+                        +
+                      </button>
+                    )}
                   </li>
                 )
               })}

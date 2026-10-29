@@ -9,6 +9,7 @@ import type { SurfaceSummary } from '../lib/surface'
 import { annotateTrack } from '../lib/trackSurface'
 import { Metric } from './MapDrawer'
 import { MapIcon } from './mapIcons'
+import './insight.css'
 import type { TrackAnnotationResult } from '../lib/trackSurface'
 import type { Coordinate } from '../lib/types'
 
@@ -80,8 +81,9 @@ export function SurfaceBreakdown({
   matched = false,
 }: {
   summary: SurfaceSummary
-  colorBySurface: boolean
-  onToggleColor: () => void
+  colorBySurface?: boolean
+  /** Omitted where the map has no surface colouring to switch. */
+  onToggleColor?: () => void
   /** The track was matched to the road network rather than routed on it. */
   matched?: boolean
 }) {
@@ -119,11 +121,13 @@ export function SurfaceBreakdown({
         })}
       </ul>
 
-      <label className="insight-switch">
-        <input type="checkbox" role="switch" checked={colorBySurface} onChange={onToggleColor} />
-        <span className="insight-switch-track" aria-hidden="true" />
-        <span>Colour the route by surface</span>
-      </label>
+      {onToggleColor && (
+        <label className="insight-switch">
+          <input type="checkbox" role="switch" checked={Boolean(colorBySurface)} onChange={onToggleColor} />
+          <span className="insight-switch-track" aria-hidden="true" />
+          <span>Colour the route by surface</span>
+        </label>
+      )}
 
       <p className="insight-note">
         From OpenStreetMap surface tags.{' '}

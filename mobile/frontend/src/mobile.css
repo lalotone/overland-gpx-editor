@@ -18,6 +18,29 @@
   --green: #365d46;
   --orange: #c76b3e;
   -webkit-tap-highlight-color: transparent;
+  /* The shared insight panels (src/components/insight.css) read the desktop's
+     semantic names; these map them onto the field-guide palette. */
+  --bg-secondary: var(--card);
+  --bg-tertiary: #efede4;
+  --bg-card: var(--card);
+  --text-primary: var(--ink);
+  --text-secondary: #4f5d54;
+  --text-muted: var(--muted);
+  --border-subtle: var(--line);
+  --border-color: var(--line);
+  --border-strong: #cdd1c4;
+  --accent: var(--green);
+  --accent-solid: var(--green);
+  --accent-light: #365d4617;
+  --transition: 0.18s ease;
+  --tone-ok: #2f7a4a;
+  --tone-ok-bg: #2f7a4a17;
+  --tone-warn: #a65d17;
+  --tone-warn-bg: #c27a2c1f;
+  --tone-danger: #b23a2c;
+  --tone-danger-bg: #b23a2c14;
+  --tone-neutral: #5d6a60;
+  --tone-neutral-bg: #5d6a6012;
 }
 * {
   box-sizing: border-box;
@@ -1584,4 +1607,183 @@ progress {
   min-width: 0;
   flex-direction: column;
   align-items: flex-start;
+}
+
+/* -- Map credits: one line, tap for the full text ------------------- */
+
+.leaflet-control-attribution {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.leaflet-control-attribution.expanded {
+  white-space: normal;
+  overflow: visible;
+  font-size: 10px !important;
+  line-height: 1.4 !important;
+}
+
+/* -- Map action buttons --------------------------------------------- */
+
+.map-actions button {
+  color: var(--ink);
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.map-actions button:active {
+  transform: scale(0.94);
+}
+.map-actions button.selected {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.map-actions button:disabled {
+  opacity: 0.5;
+}
+.poi-chips button svg {
+  flex-shrink: 0;
+}
+
+/* -- Route details: sections of one scrolling sheet ----------------- */
+
+.route-info-overlay {
+  padding: 14px 18px 20px;
+  border: 1px solid #ffffffb0;
+  backdrop-filter: blur(12px);
+}
+.route-info-overlay .section-heading h2 {
+  font-size: 19px;
+  letter-spacing: -0.01em;
+}
+.ride-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.ride-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.ride-section-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--green);
+  background: var(--accent-light);
+}
+.ride-section .insight {
+  font-size: 13px;
+}
+.ride-section .insight-legend li {
+  padding: 7px 2px;
+}
+.ride-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.ride-note--error {
+  margin-top: 10px;
+  color: var(--tone-danger);
+}
+.ride-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+}
+.ride-status p {
+  margin: 0;
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink);
+}
+.ride-status--error {
+  background: var(--tone-warn-bg);
+}
+.ride-status--error p {
+  color: var(--tone-warn);
+}
+/* Touch targets: the shared panels are sized for a mouse. */
+.ride-section .access-group-head,
+.nearby-overlay .place-row {
+  min-height: 52px;
+}
+.ride-section .insight-field-input input {
+  font-size: 16px;
+  padding: 10px 0;
+}
+.ride-section .insight-action {
+  min-height: 48px;
+  font-size: 14px;
+}
+
+/* -- Nearby places sheet -------------------------------------------- */
+
+.nearby-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nearby-heading h2 {
+  margin: 0;
+  font-size: 19px;
+}
+.nearby-heading span {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.nearby-overlay .insight {
+  margin-top: 12px;
+  font-size: 13px;
+}
+.nearby-overlay .segmented button {
+  min-height: 38px;
+  font-size: 13px;
+}
+.nearby-overlay .chip {
+  min-height: 36px;
+  font-size: 13px;
+}
+.nearby-overlay .place-list {
+  margin: 0 -10px;
+}
+.popup-category {
+  display: block;
+  margin: 2px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* -- Library: the details button explains itself -------------------- */
+
+.ride-details-button {
+  justify-content: flex-start !important;
+  text-align: left;
+}
+.ride-details-button span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-weight: 700;
+}
+.ride-details-button small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
 }

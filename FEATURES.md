@@ -124,6 +124,10 @@ before you open it, and the map re-frames the track beside it.
   the national default for their road class decides. Gates and seasonal or
   conditional closures are not covered. See [ACCURACY.md](docs/ACCURACY.md).
 
+The Android app has the same checks in its **Route details** sheet (planned
+routes and opened tracks) and the same nearby search around the map centre; see
+[mobile/README.md](mobile/README.md).
+
 ## POIs — fuel, drinking water, campsites
 
 Loaded on demand from Overpass, with two ways to ask:

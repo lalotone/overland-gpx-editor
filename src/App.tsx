@@ -1866,6 +1866,22 @@ function App() {
       })
   }, [handleCacheMetadata, runtime])
 
+  /**
+   * Stops a slow search for real (the request is aborted, so a busy Overpass
+   * is not left computing for nobody) and puts back what was showing before,
+   * or says it was cancelled when nothing was.
+   */
+  const cancelAround = useCallback(() => {
+    aroundAbortRef.current?.abort()
+    setAround(prev => {
+      if (!prev) return prev
+      if (prev.result) {
+        return { point: prev.result.center, pointNumber: prev.pointNumber, radiusKm: prev.result.radiusKm, loading: false, result: prev.result }
+      }
+      return { ...prev, loading: false, cancelled: true }
+    })
+  }, [])
+
   const closeAround = useCallback(() => {
     aroundAbortRef.current?.abort()
     setAround(null)
@@ -3247,6 +3263,7 @@ function App() {
                   onRetry={() => searchAroundPoint(around.point, around.pointNumber, around.radiusKm)}
                   onFocus={focusAroundPoi}
                   onKeep={keepAroundPoi}
+                  onCancel={cancelAround}
                 />
                 </MapDrawer>
               )}

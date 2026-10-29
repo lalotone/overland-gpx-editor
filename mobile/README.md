@@ -7,10 +7,19 @@ continues to use its existing entry point.
 ## Interface
 
 - **Explore:** full-screen map, place search at the top, fuel/water/camp overlays
-  at the bottom. Map layers, location and track fitting are floating controls.
+  at the bottom. Map layers, location, track fitting and **What's around here**
+  are floating controls. Map credits stay on screen as one line and expand on tap.
+- **What's around here** (Explore and Plan) lists water, huts and shelters,
+  camping, fuel, motorcycle shops and viewpoints around the map centre (the
+  crosshair in Plan), 2–30 km, using the desktop's shared search: one cached
+  union query, reused for smaller radii and nearby points, cancellable. With a
+  planned route each place says whether it is on the route or how far off it,
+  and **Along route** lists them in riding order.
 - **Plan:** map-first by default, with a round add-point button at the bottom
-  right and route-info button on the left. Route details shows distance-weighted
-  surface percentages with unknown sections kept separate. Tap or pull up the route-points handle to reveal a panel with pinned
+  right and route-info button on the left. **Route details** is one scrolling
+  sheet: distance and elevation, distance-weighted surface (unknown kept
+  separate), motorcycle **access warnings** grouped by restriction and drawn on
+  the map, and a **fuel range** check against the stations along the route. Tap or pull up the route-points handle to reveal a panel with pinned
   Road/Dirt/Trail/Enduro profiles and save/share actions; only the point list
   scrolls. Drag numbered map controls to adjust the route. An info button opens
   distance, elevation and moving-time details over the map.

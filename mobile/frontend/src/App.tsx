@@ -30,7 +30,16 @@ import type { Document, Draft, Plan, Tab } from './model'
 import Icon from './Icon'
 import MobileMap from './MobileMap'
 import TrackSummary from './TrackSummary'
-import RouteSurface from './RouteSurface'
+import RideDetails from './RideDetails'
+import type { RideOverlay } from './RideDetails'
+import { AccessOverlay, FuelRangeMarkers } from '../../../src/components/RideCheck'
+import { AroundRadius, AroundResults, aroundIcon, formatDistance, osmLink, RouteBadge } from '../../../src/components/AroundPanel'
+import type { AroundSort, AroundState } from '../../../src/components/AroundPanel'
+import { MapIcon } from '../../../src/components/mapIcons'
+import { AroundAreaCache, AROUND_RADII_KM, aroundCategory, ON_ROUTE_M, routeOffsets, searchAround } from '../../../src/lib/around'
+import type { AroundCategory, AroundPoi } from '../../../src/lib/around'
+import { cumulativeDistanceKm } from '../../../src/lib/geo'
+import { Marker, Popup } from 'react-leaflet'
 import OfflineMapControl from './OfflineMapControl'
 import PlanPanel, { PlanHandle } from './PlanPanel'
 import { useIncomingGPX } from './useIncomingGPX'
@@ -111,6 +120,26 @@ export default function App() {
     map.current = value
     setRestoreView(true)
   }, [])
+  /* -- Ride details map overlay and nearby places --------------------- */
+
+  const [rideOverlay, setRideOverlay] = useState<RideOverlay>({ access: [], fuel: null })
+  const aroundCache = useRef(new AroundAreaCache())
+  const aroundAbort = useRef<AbortController | null>(null)
+  const [around, setAround] = useState<(AroundState & { point: Coordinate }) | null>(null)
+  const [aroundHidden, setAroundHidden] = useState<ReadonlySet<AroundCategory>>(new Set())
+  const [aroundSort, setAroundSort] = useState<AroundSort>('nearest')
+  const [aroundRadius, setAroundRadius] = useState(() => {
+    const stored = Number(localStorage.getItem('gpx-around-radius'))
+    // Phones start smaller than the desktop: a 5 km list fits the sheet.
+    return (AROUND_RADII_KM as readonly number[]).includes(stored) ? stored : 5
+  })
+  useEffect(() => { localStorage.setItem('gpx-around-radius', String(aroundRadius)) }, [aroundRadius])
+  const closeAround = useCallback(() => {
+    aroundAbort.current?.abort()
+    setAround(null)
+  }, [])
+  useEffect(() => () => aroundAbort.current?.abort(), [])
+
   const onView = useCallback((point: Coordinate, box: BoundingBox) => {
     setCenter(point)
     setBounds(box)
@@ -136,6 +165,37 @@ export default function App() {
     ? (route?.coordinates ?? emptyCoordinates)
     : (document?.track.coordinates ?? emptyCoordinates)
   const pins = showingPlan ? [] : (document?.track.waypoints ?? [])
+  /** User-triggered only: one search at a time, around the map centre. */
+  const searchAroundHere = useCallback((point: Coordinate, radiusKm: number) => {
+    aroundAbort.current?.abort()
+    const controller = new AbortController()
+    aroundAbort.current = controller
+    setAround((prev) => ({ point, pointNumber: 0, radiusKm, loading: true, result: prev?.result }))
+    searchAround(point, radiusKm, aroundCache.current, controller.signal, { runtime })
+      .then((result) => {
+        if (!controller.signal.aborted) setAround({ point, pointNumber: 0, radiusKm, loading: false, result })
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || (error as Error).name === 'AbortError') return
+        setAround({ point, pointNumber: 0, radiusKm, loading: false, error: (error as Error).message || 'Search failed' })
+      })
+  }, [runtime])
+  const cancelAround = useCallback(() => {
+    aroundAbort.current?.abort()
+    setAround((prev) => {
+      if (!prev) return prev
+      if (prev.result) return { point: prev.result.center, pointNumber: 0, radiusKm: prev.result.radiusKm, loading: false, result: prev.result }
+      return { ...prev, loading: false, cancelled: true }
+    })
+  }, [])
+  const routeKm = useMemo(() => cumulativeDistanceKm(route?.coordinates ?? emptyCoordinates), [route])
+  const aroundOffsets = useMemo(
+    () => around?.result && tab === 'plan' && route && route.coordinates.length > 1
+      ? routeOffsets(around.result.pois, route.coordinates, routeKm)
+      : null,
+    [around?.result, tab, route, routeKm],
+  )
+
   const fit = useCallback((points: Coordinate[]) => {
     if (points.length)
       map.current?.fitBounds(
@@ -539,7 +599,33 @@ export default function App() {
           onMap={onMap}
           onMovePoint={movePoint}
           onError={notify}
-        />
+        >
+          {routeInfoOpen && rideOverlay.access.length > 0 && (
+            <AccessOverlay coordinates={coordinates} stretches={rideOverlay.access} />
+          )}
+          {routeInfoOpen && rideOverlay.fuel && rideOverlay.fuel.warnings.length > 0 && (
+            <FuelRangeMarkers coordinates={coordinates} cumKm={cumulativeDistanceKm(coordinates)} plan={rideOverlay.fuel} />
+          )}
+          {around?.result && <AroundRadius result={around.result} />}
+          {around?.result?.pois.filter((poi) => !aroundHidden.has(poi.category)).map((poi) => {
+            const category = aroundCategory(poi.category)
+            return (
+              <Marker
+                key={poi.id}
+                position={[poi.lat, poi.lon]}
+                icon={aroundIcon(poi.category, (aroundOffsets?.get(poi.id)?.offsetM ?? Infinity) <= ON_ROUTE_M)}
+              >
+                <Popup>
+                  <strong>{poi.name ?? poi.kind}</strong>
+                  <span className="popup-category" style={{ color: category.color }}>{category.label}</span>
+                  <RouteBadge offset={aroundOffsets?.get(poi.id)} />
+                  {poi.facts.map((fact) => <p key={fact.label}>{fact.label}: {fact.value}</p>)}
+                  <p>{formatDistance(poi.distanceM)} from the search point · <a href={osmLink(poi)} target="_blank" rel="noreferrer">OSM</a></p>
+                </Popup>
+              </Marker>
+            )
+          })}
+        </MobileMap>
         <header className="map-header">
           {tab === 'explore' ? (
             <div className="map-search">
@@ -625,6 +711,22 @@ export default function App() {
           >
             <Icon name="fit" />
           </button>
+          {(tab === 'explore' || tab === 'plan') && (
+            <button
+              aria-label="What's around here"
+              className={around ? 'selected' : ''}
+              disabled={!runtimeReady}
+              onClick={() => {
+                if (around) return closeAround()
+                setLayersOpen(false)
+                setRouteInfoOpen(false)
+                setPlanPanelOpen(false)
+                searchAroundHere(center, aroundRadius)
+              }}
+            >
+              <Icon name="nearby" />
+            </button>
+          )}
         </div>
         {tab === 'plan' && (
           <>
@@ -656,6 +758,7 @@ export default function App() {
                   setLayersOpen(false)
                   setPlanPanelOpen(false)
                   setRouteInfoOpen((value) => !value)
+                  closeAround()
                 }}
               >
                 <Icon name="info" size={24} />
@@ -672,7 +775,7 @@ export default function App() {
                 disabled={busy}
                 onClick={() => loadPois(kind.id)}
               >
-                <span aria-hidden="true">{kind.glyph}</span>
+                <MapIcon id={kind.id} size={16} />
                 {kind.label}
               </button>
             ))}
@@ -777,11 +880,48 @@ export default function App() {
             </button>
           </div>
           <TrackSummary coordinates={detailCoordinates} duration={tab === 'plan' ? route?.durationSeconds : undefined} />
-          <RouteSurface
+          <RideDetails
             coordinates={detailCoordinates}
-            surface={tab === 'plan' ? route?.surface : undefined}
+            route={tab === 'plan' ? route : undefined}
             runtime={runtime}
             routing={routing}
+            onOverlay={setRideOverlay}
+          />
+        </section>
+      )}
+      {around && (tab === 'explore' || tab === 'plan') && (
+        <section className="route-info-overlay nearby-overlay" role="dialog" aria-label="Nearby places">
+          <div className="section-heading">
+            <div className="nearby-heading">
+              <h2>Around here</h2>
+              <span>
+                {around.point.lat.toFixed(3)}, {around.point.lon.toFixed(3)}
+                {tab === 'plan' ? ' · at the crosshair' : ' · map centre'}
+              </span>
+            </div>
+            <button className="icon-button" aria-label="Close nearby places" onClick={closeAround}>
+              <Icon name="close" size={20} />
+            </button>
+          </div>
+          <AroundResults
+            state={around}
+            hidden={aroundHidden}
+            offsets={aroundOffsets}
+            sort={aroundSort}
+            onSort={setAroundSort}
+            onToggleCategory={(id) => setAroundHidden((prev) => {
+              const next = new Set(prev)
+              if (next.has(id)) next.delete(id)
+              else next.add(id)
+              return next
+            })}
+            onRadius={(km) => {
+              setAroundRadius(km)
+              searchAroundHere(around.point, km)
+            }}
+            onRetry={() => searchAroundHere(around.point, around.radiusKm)}
+            onFocus={(poi: AroundPoi) => map.current?.setView([poi.lat, poi.lon], Math.max(map.current.getZoom(), 15))}
+            onCancel={cancelAround}
           />
         </section>
       )}
@@ -898,12 +1038,16 @@ export default function App() {
             {tab === 'library' && document && (
               <div className="panel-stack">
                 <TrackSummary coordinates={document.track.coordinates} />
-                <button className="secondary" onClick={() => {
+                <button className="secondary ride-details-button" aria-label="Route details" onClick={() => {
                   setLayersOpen(false)
                   setRouteInfoOpen(true)
+                  closeAround()
                 }}>
                   <Icon name="info" size={18} />
-                  Route details
+                  <span>
+                    Route details
+                    <small>Surface, access, fuel range</small>
+                  </span>
                 </button>
                 <div className="track-meta">
                   {document.track.coordinates.length.toLocaleString()} points ·{' '}

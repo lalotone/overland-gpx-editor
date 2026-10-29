@@ -21,6 +21,7 @@ const paths = {
   scissors:
     'm9 9 11 11M9 15 20 4M10 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0M10 17a3 3 0 1 1-6 0 3 3 0 0 1 6 0',
   trash: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
+  nearby: 'M12 21s-6-5.4-6-10.2a6 6 0 1 1 12 0C18 15.6 12 21 12 21zM12 12.8a2 2 0 1 0 0-4 2 2 0 0 0 0 4M3 19.5c1.6 1.3 4.9 2 9 2s7.4-.7 9-2',
 } as const
 export type IconName = keyof typeof paths
 export default function Icon({ name, size = 22 }: { name: IconName; size?: number }) {

@@ -25,8 +25,8 @@ import { fetchPoisForArea, POI_KINDS } from '../../../src/lib/poi'
 import type { BoundingBox, Poi, PoiKind } from '../../../src/lib/poi'
 import { runtimeTerrainLayers } from '../../../src/lib/terrain'
 import type { Coordinate, Track } from '../../../src/lib/types'
-import { decodeDraft, emptyPlan, jsonBody, request, trackGPX } from './model'
-import type { Document, Draft, Plan, Tab } from './model'
+import { decodeDraft, defaultSettings, emptyPlan, jsonBody, request, trackGPX } from './model'
+import type { Document, Draft, Plan, Settings, Tab, ThemePreference } from './model'
 import Icon from './Icon'
 import MobileMap from './MobileMap'
 import TrackSummary from './TrackSummary'
@@ -36,7 +36,7 @@ import { AccessOverlay, FuelRangeMarkers } from '../../../src/components/RideChe
 import { AroundRadius, AroundResults, aroundIcon, formatDistance, osmLink, RouteBadge } from '../../../src/components/AroundPanel'
 import type { AroundSort, AroundState } from '../../../src/components/AroundPanel'
 import { MapIcon } from '../../../src/components/mapIcons'
-import { AroundAreaCache, AROUND_RADII_KM, aroundCategory, ON_ROUTE_M, routeOffsets, searchAround } from '../../../src/lib/around'
+import { AroundAreaCache, aroundCategory, ON_ROUTE_M, routeOffsets, searchAround } from '../../../src/lib/around'
 import type { AroundCategory, AroundPoi } from '../../../src/lib/around'
 import { cumulativeDistanceKm } from '../../../src/lib/geo'
 import { Marker, Popup } from 'react-leaflet'
@@ -128,12 +128,33 @@ export default function App() {
   const [around, setAround] = useState<(AroundState & { point: Coordinate }) | null>(null)
   const [aroundHidden, setAroundHidden] = useState<ReadonlySet<AroundCategory>>(new Set())
   const [aroundSort, setAroundSort] = useState<AroundSort>('nearest')
-  const [aroundRadius, setAroundRadius] = useState(() => {
-    const stored = Number(localStorage.getItem('gpx-around-radius'))
-    // Phones start smaller than the desktop: a 5 km list fits the sheet.
-    return (AROUND_RADII_KM as readonly number[]).includes(stored) ? stored : 5
-  })
-  useEffect(() => { localStorage.setItem('gpx-around-radius', String(aroundRadius)) }, [aroundRadius])
+  const [settings, setSettings] = useState<Settings>(defaultSettings)
+  const aroundRadius = settings.aroundRadiusKm
+  const setAroundRadius = (km: number) => setSettings((value) => ({ ...value, aroundRadiusKm: km }))
+
+  /* Appearance: the system choice follows the phone live, not only at launch. */
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false)
+  useEffect(() => {
+    const query = window.matchMedia?.('(prefers-color-scheme: dark)')
+    if (!query) return
+    const update = () => setSystemDark(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  const dark = settings.theme === 'dark' || (settings.theme === 'system' && systemDark)
+  useEffect(() => {
+    const root = window.document.documentElement
+    root.classList.toggle('theme-dark', dark)
+    // Status bar and system chrome follow the app, not the default page white.
+    let meta = window.document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    if (!meta) {
+      meta = window.document.createElement('meta')
+      meta.name = 'theme-color'
+      window.document.head.appendChild(meta)
+    }
+    meta.content = dark ? '#151a17' : '#f6f4ec'
+  }, [dark])
+  const setTheme = (theme: ThemePreference) => setSettings((value) => ({ ...value, theme }))
   const closeAround = useCallback(() => {
     aroundAbort.current?.abort()
     setAround(null)
@@ -234,6 +255,7 @@ export default function App() {
           setDocument(draft.document)
           setTab(draft.tab)
           setActiveMap(draft.tab === 'plan' || !draft.document ? 'plan' : 'track')
+          if (draft.settings) setSettings(draft.settings)
         }
         setCanPersist(true)
       })
@@ -255,7 +277,7 @@ export default function App() {
   useEffect(() => {
     if (!hydrated || !canPersist) return
     setDraftSaved(false)
-    const draft: Draft = { version: 1, plan, document, tab }
+    const draft: Draft = { version: 1, plan, document, tab, settings }
     const timer = setTimeout(() => {
       // Serialize writes so a slow earlier save never overwrites a newer edit.
       draftQueue.current = draftQueue.current
@@ -269,7 +291,7 @@ export default function App() {
         })
     }, 250)
     return () => clearTimeout(timer)
-  }, [plan, document, tab, hydrated, canPersist, notify])
+  }, [plan, document, tab, settings, hydrated, canPersist, notify])
   useEffect(() => {
     const controller = new AbortController()
     void request<{ files: string[] }>('/files', { signal: controller.signal })
@@ -815,6 +837,21 @@ export default function App() {
                 {layer === item.id && <Icon name="check" size={18} />}
               </button>
             ))}
+            <div className="setting-group">
+              <span>Appearance</span>
+              <div className="segmented" role="group" aria-label="Appearance">
+                {(['system', 'light', 'dark'] as const).map((theme) => (
+                  <button
+                    key={theme}
+                    className={settings.theme === theme ? 'active' : undefined}
+                    aria-pressed={settings.theme === theme}
+                    onClick={() => setTheme(theme)}
+                  >
+                    {theme === 'system' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
+                  </button>
+                ))}
+              </div>
+            </div>
             <label className="setting-row">
               Relief shading
               <input
@@ -886,6 +923,8 @@ export default function App() {
             runtime={runtime}
             routing={routing}
             onOverlay={setRideOverlay}
+            fuelRange={settings.fuelRange}
+            onFuelRange={(fuelRange) => setSettings((value) => ({ ...value, fuelRange }))}
           />
         </section>
       )}

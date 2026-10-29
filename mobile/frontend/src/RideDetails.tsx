@@ -5,7 +5,7 @@ import { MapIcon } from '../../../src/components/mapIcons'
 import type { MapIconId } from '../../../src/components/mapIcons'
 import { accessReport, locateSegmentRoads } from '../../../src/lib/access'
 import type { AccessReport, AccessStretch } from '../../../src/lib/access'
-import { DEFAULT_FUEL_RANGE, fuelStopsAlong, normalizeFuelRange, planFuelRange } from '../../../src/lib/fuelRange'
+import { fuelStopsAlong, normalizeFuelRange, planFuelRange } from '../../../src/lib/fuelRange'
 import type { FuelRangePlan, FuelRangeSettings } from '../../../src/lib/fuelRange'
 import { cumulativeDistanceKm } from '../../../src/lib/geo'
 import type { RuntimeConfig, RoutingDataStatus } from '../../../src/lib/offline'
@@ -37,14 +37,6 @@ function Section({ icon, title, children }: { icon: MapIconId; title: string; ch
   )
 }
 
-function readFuelRange(): FuelRangeSettings {
-  try {
-    return normalizeFuelRange(JSON.parse(localStorage.getItem('gpx-fuel-range') ?? '{}') as Partial<FuelRangeSettings>)
-  } catch {
-    return DEFAULT_FUEL_RANGE
-  }
-}
-
 /**
  * Surface, access and fuel range for a planned route or an opened track.
  * A planned route carries its own surface and road tags; an opened track is
@@ -56,6 +48,8 @@ export default function RideDetails({
   runtime,
   routing,
   onOverlay,
+  fuelRange,
+  onFuelRange,
 }: {
   coordinates: Coordinate[]
   /** Present on the planner, where Broom returned the geometry inline. */
@@ -63,6 +57,9 @@ export default function RideDetails({
   runtime: RuntimeConfig
   routing: RoutingDataStatus | null
   onOverlay: (overlay: RideOverlay) => void
+  /** Kept in the app's settings, which persist with the draft. */
+  fuelRange: FuelRangeSettings
+  onFuelRange: (settings: FuelRangeSettings) => void
 }) {
   const cumKm = useMemo(() => cumulativeDistanceKm(coordinates), [coordinates])
 
@@ -102,8 +99,6 @@ export default function RideDetails({
   }, [route, cumKm, current?.result])
 
   /* -- Fuel range ------------------------------------------------------ */
-  const [fuelRange, setFuelRange] = useState(readFuelRange)
-  useEffect(() => { localStorage.setItem('gpx-fuel-range', JSON.stringify(fuelRange)) }, [fuelRange])
   const [fuel, setFuel] = useState<{ coordinates: Coordinate[]; stations: Poi[] } | null>(null)
   const [fuelLoading, setFuelLoading] = useState(false)
   const [fuelError, setFuelError] = useState<string | null>(null)
@@ -171,7 +166,7 @@ export default function RideDetails({
       <Section icon="fuel" title="Fuel range">
         <FuelRangeView
           settings={fuelRange}
-          onSettings={next => setFuelRange(normalizeFuelRange(next))}
+          onSettings={next => onFuelRange(normalizeFuelRange(next))}
           plan={fuelPlan}
           fuelLoaded={stations !== null}
           fuelLoading={fuelLoading}

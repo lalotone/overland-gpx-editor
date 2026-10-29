@@ -9,6 +9,11 @@ continues to use its existing entry point.
 - **Explore:** full-screen map, place search at the top, fuel/water/camp overlays
   at the bottom. Map layers, location, track fitting and **What's around here**
   are floating controls. Map credits stay on screen as one line and expand on tap.
+- **Appearance:** Auto (follows the phone, live), Light or Dark, in the Map style
+  panel. The dark theme recolours the app, not the map: terrain colours are data.
+  Settings (appearance, fuel range, nearby radius) are saved with the draft,
+  because the WebView's loopback origin changes at every launch and
+  `localStorage` does not survive a restart.
 - **What's around here** (Explore and Plan) lists water, huts and shelters,
   camping, fuel, motorcycle shops and viewpoints around the map centre (the
   crosshair in Plan), 2–30 km, using the desktop's shared search: one cached

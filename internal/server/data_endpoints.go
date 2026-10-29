@@ -289,20 +289,46 @@ func (s *Server) handlePOISearch(w http.ResponseWriter, r *http.Request) {
 	writeCachedResponse(w, response)
 }
 
+// aroundSelectors is everything the planner's "what's around this point"
+// search shows, asked for in one union query: one cached reply per area
+// serves every category, where a request per category would multiply the
+// load on the shared Overpass service. Bus shelters are left out; they are
+// not where you wait out a storm with a motorbike.
+const aroundSelectors = `nwr["amenity"~"^(drinking_water|water_point|fuel)$"];` +
+	`nwr["natural"="spring"];` +
+	`nwr["tourism"~"^(alpine_hut|wilderness_hut|camp_site|caravan_site|viewpoint)$"];` +
+	`nwr["amenity"="shelter"]["shelter_type"!="public_transport"];` +
+	`nwr["shop"~"^(motorcycle|motorcycle_repair)$"];`
+
+const (
+	// The client snaps a 30 km radius outward to its grid; this leaves room
+	// for that and refuses anything resembling a regional sweep.
+	maxAroundSpanKM  = 80
+	maxAroundResults = 1500
+)
+
 func buildPOIRequest(policy *providerPolicy, kind string, bounds bbox) (cachedRequest, error) {
 	selector := map[string]string{
-		"fuel":  `nwr["amenity"="fuel"]`,
-		"water": `nwr["amenity"="drinking_water"]`,
-		"camp":  `nwr["tourism"~"^(camp_site|caravan_site)$"]`,
+		"fuel":   `nwr["amenity"="fuel"]`,
+		"water":  `nwr["amenity"="drinking_water"]`,
+		"camp":   `nwr["tourism"~"^(camp_site|caravan_site)$"]`,
+		"around": aroundSelectors,
 	}[kind]
 	if selector == "" {
-		return cachedRequest{}, errors.New("kind must be fuel, water, or camp")
+		return cachedRequest{}, errors.New("kind must be fuel, water, camp, or around")
 	}
-	if err := bounds.validate(250, false); err != nil {
+	maxSpan, limit := 250.0, 400
+	if kind == "around" {
+		maxSpan, limit = maxAroundSpanKM, maxAroundResults
+	}
+	if err := bounds.validate(maxSpan, false); err != nil {
 		return cachedRequest{}, err
 	}
 	area := fmt.Sprintf("%.5f,%.5f,%.5f,%.5f", bounds.South, bounds.West, bounds.North, bounds.East)
-	query := fmt.Sprintf("[out:json][timeout:30];%s(%s);out center 400;", selector, area)
+	query := fmt.Sprintf("[out:json][timeout:30];%s(%s);out center %d;", selector, area, limit)
+	if kind == "around" {
+		query = fmt.Sprintf("[out:json][timeout:60][bbox:%s];(%s);out center %d;", area, selector, limit)
+	}
 	form := url.Values{"data": {query}}.Encode()
 	return cachedRequest{
 		policy: policy, method: http.MethodPost, url: policy.baseURL.String(), params: kind + ":" + area,

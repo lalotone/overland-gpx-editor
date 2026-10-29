@@ -27,7 +27,10 @@ const {
 } = await import('../src/lib/geo')
 const { simplifyToMaxPoints, trimTrack, reverseTrack, splitIntoStages, withElevations } = await import('../src/lib/edit')
 const { classifySurface, summarizeSurface } = await import('../src/lib/surface')
-const { annotateTrackSurface } = await import('../src/lib/trackSurface')
+const { annotateTrack, annotateTrackSurface, segmentSurfaces } = await import('../src/lib/trackSurface')
+const { accessReport, classifyAccess, locateSegmentRoads } = await import('../src/lib/access')
+const { fuelStopsAlong, normalizeFuelRange, planFuelRange } = await import('../src/lib/fuelRange')
+const { AroundAreaCache, aroundSearchArea, classifyAround, aroundFacts, searchAround } = await import('../src/lib/around')
 const { boundingBoxSpanKm, boundsAround, MAX_SEARCH_SPAN_KM } = await import('../src/lib/poi')
 const {
   parseFuelStations,
@@ -614,6 +617,18 @@ console.log(`\nPublic-service policy checks\n${'='.repeat(78)}`)
   check('Nominatim interval is at least one second', NOMINATIM_REQUEST_INTERVAL_MS >= 1000)
   check('OSM thumbnails use the policy hostname',
     getThumbnailLayer('openfreemap').url === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
+  {
+    // Esri's terms require an ArcGIS subscription for its basemaps outside
+    // Esri software; relief is shaded from the open Terrarium set instead.
+    const relief = getBaseLayerFrom(runtimeTerrainLayers(), 'relief')
+    const hillshade = runtimeHillshadeLayer()
+    check('relief base map is shaded from the Terrarium DEM, not Esri',
+      relief.kind === 'relief' && relief.dem.encoding === 'terrarium' && !relief.dem.url.includes('arcgis'))
+    check('hillshade overlay is shaded from the Terrarium DEM, not Esri',
+      hillshade?.encoding === 'terrarium' && !hillshade.url.includes('arcgis'))
+    check('relief thumbnails fall back to an image-tile layer',
+      getThumbnailLayer('relief').url === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
+  }
   check('service attribution links to fix-the-map',
     SERVICE_ATTRIBUTIONS.some(credit => credit.includes('openstreetmap.org/fixthemap')))
   check('service attribution names elevation sources',
@@ -870,7 +885,9 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       trails === undefined && !layers.some(layer => layer.id === 'satellite' || layer.id === 'relief'))
   const selectedUrls = layers.flatMap(layer => layer.kind === 'vector'
     ? [layer.styleUrl, layer.fallback.url]
-    : [layer.url])
+    : layer.kind === 'relief'
+      ? [layer.dem.url, layer.fallback.url]
+      : [layer.url])
   check('cache-only terrain selects no direct public URL',
     selectedUrls.every(url => url.startsWith('https://backend.example.test/api/') || url.startsWith('data:')),
     selectedUrls.join(', '))
@@ -989,8 +1006,8 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
         coordinates: [{ lat: 41.6, lon: -0.9 }, { lat: 41.65, lon: -0.85 }, { lat: 41.7, lon: -0.8 }],
         elevations: [{ meters: 100, interpolated: false }, { meters: 110, interpolated: true }, null],
         segments: [
-          { geometryStart: 0, geometryEnd: 1, surface: 'asphalt' },
-          { geometryStart: 1, geometryEnd: 2, surface: 'fine_gravel' },
+          { geometryStart: 0, geometryEnd: 1, surface: 'asphalt', road: { highway: 'tertiary', bicycle: 'no' } },
+          { geometryStart: 1, geometryEnd: 2, surface: 'fine_gravel', road: { highway: 'track', motor_vehicle: 'forestry', ignored: 7 } },
         ],
         distanceMeters: 1200,
         durationSeconds: 90,
@@ -1004,6 +1021,9 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
       route.coordinates[1].elevationInterpolated === true && route.coordinates[2].elevation === undefined)
   check('Broom annotation spans become exact per-segment surface classes',
     route.surface.segments.join(',') === 'paved,compacted')
+  check('Broom road tags are kept per segment for access checks',
+    route.roads.length === 2 && route.roads[0]?.highway === 'tertiary' &&
+      route.roads[1]?.motor_vehicle === 'forestry' && !('ignored' in (route.roads[1] ?? {})))
   check('Broom duration, distance and generation identity are retained',
     route.durationSeconds === 90 && route.distanceKm === 1.2 && route.regionId === 'spain/aragon' && route.generationId === 'abc123')
 
@@ -1670,6 +1690,166 @@ console.log(`\nRuntime offline checks\n${'='.repeat(78)}`)
     id: 'pack-2', state: 'complete', bbox: { south: -90, west: -1, north: 42, east: 0 }, resources: {},
   }])[0] as { bbox?: unknown }
   check('pack summaries discard malformed area bounds', malformedPack.bbox === undefined)
+}
+
+/* -- Access, track spans and fuel range ------------------------------ */
+
+console.log(`\nAccess and fuel range checks\n${'='.repeat(78)}`)
+
+{
+  check('motorcycle tag beats a general access=no',
+    classifyAccess({ highway: 'track', access: 'no', motorcycle: 'yes' }).id === 'open')
+  check('motor_vehicle=forestry is restricted and names its tag',
+    classifyAccess({ highway: 'track', motor_vehicle: 'forestry' }).tag === 'motor_vehicle=forestry' &&
+      classifyAccess({ highway: 'track', motor_vehicle: 'forestry' }).id === 'restricted')
+  check('access=private is private', classifyAccess({ highway: 'service', access: 'private' }).id === 'private')
+  check('vehicle=no closes the way to motorcycles', classifyAccess({ highway: 'track', vehicle: 'no' }).id === 'closed')
+  check('an untagged track is untagged, never open', classifyAccess({ highway: 'track' }).id === 'untagged')
+  check('an untagged path is flagged for its motor-vehicle default', classifyAccess({ highway: 'path' }).id === 'path')
+  check('access=yes on a path is not motor permission', classifyAccess({ highway: 'footway', access: 'yes' }).id === 'path')
+  check('motor_vehicle=yes on a path is permission', classifyAccess({ highway: 'path', motor_vehicle: 'yes' }).id === 'open')
+  check('an unmatched stretch is unknown', classifyAccess(null).id === 'unknown')
+  check('an unrecognised lookup value is unknown, not open', classifyAccess({ highway: 'track', access: 'unknown' }).id === 'unknown')
+
+  const cum = [0, 1, 2, 3, 4]
+  const report = accessReport(locateSegmentRoads([
+    { highway: 'tertiary' },
+    { highway: 'track', motor_vehicle: 'forestry' },
+    { highway: 'track', motor_vehicle: 'forestry' },
+    null,
+  ]), cum)
+  check('adjacent restricted segments merge into one stretch',
+    report.stretches.length === 1 && report.stretches[0].startKm === 1 && report.stretches[0].endKm === 3 &&
+      report.stretches[0].startIndex === 1 && report.stretches[0].endIndex === 3)
+  check('access km split covers the whole track without assuming legality',
+    report.totalKm === 4 && report.km.untagged === 1 && report.km.restricted === 2 && report.km.unknown === 1 && report.km.open === undefined)
+
+  const fractional = accessReport([
+    { startIndex: 0, startFraction: 0.5, endIndex: 2, endFraction: 0.25, road: { highway: 'service', access: 'private' } },
+  ], cum)
+  check('track-span fractions place warnings between points',
+    fractional.stretches[0].startKm === 0.5 && fractional.stretches[0].endKm === 2.25 && fractional.stretches[0].endIndex === 3)
+}
+
+{
+  const runtime = decodeRuntimeConfig({ services: { broomAnnotate: '/routing/broom/annotate' } }, 'https://backend.example.test')
+  const coordinates = [{ lat: 42, lon: 1 }, { lat: 42, lon: 1.001 }, { lat: 42, lon: 1.002 }, { lat: 42, lon: 1.003 }]
+  const result = await annotateTrack(coordinates, undefined, {
+    runtime,
+    fetcher: async () => new Response(JSON.stringify({ schemaVersion: 1, distanceMeters: 300, surfaces: [
+      { surface: 'asphalt', distanceMeters: 150 }, { surface: '', distanceMeters: 150 },
+    ], spans: [
+      { start: { index: 0, fraction: 0 }, end: { index: 1, fraction: 0.4 }, distanceMeters: 150, matched: true, surface: 'asphalt', road: { highway: 'service', access: 'private' } },
+      { start: { index: 1, fraction: 0.4 }, end: { index: 3, fraction: 0 }, distanceMeters: 150, matched: false, surface: 'gravel', road: { access: 'no' } },
+    ] })),
+  })
+  check('unmatched spans carry neither surface nor tags', result.spans[1].surface === 'unknown' && result.spans[1].road === null)
+  check('loaded-track segments take the surface covering most of them',
+    segmentSurfaces(result.spans, coordinates.length).join(',') === 'paved,unknown,unknown')
+  const legacy = await annotateTrack(coordinates, undefined, {
+    runtime,
+    fetcher: async () => new Response(JSON.stringify({ schemaVersion: 1, distanceMeters: 300, surfaces: [{ surface: 'asphalt', distanceMeters: 300 }] })),
+  })
+  check('a backend without spans still yields the surface summary', legacy.spans.length === 0 && legacy.summary.totalKm > 0)
+  let rejected = false
+  try {
+    await annotateTrack(coordinates, undefined, {
+      runtime,
+      fetcher: async () => new Response(JSON.stringify({ schemaVersion: 1, distanceMeters: 300, surfaces: [{ surface: '', distanceMeters: 300 }],
+        spans: [{ start: { index: 9, fraction: 0 }, end: { index: 10, fraction: 0 }, matched: false }] })),
+    })
+  } catch { rejected = true }
+  check('spans outside the track are rejected', rejected)
+}
+
+{
+  const settings = { rangeKm: 200, reservePct: 25 }
+  const at = (km: number, id: string) => ({ km, offsetM: 0, station: { id, lat: 0, lon: 0 } })
+  const plan = planFuelRange(500, [at(100, 'a'), at(260, 'b')], settings)
+  check('usable range subtracts the reserve', plan.usableKm === 150)
+  check('a leg beyond usable range but within the tank is a reserve warning',
+    plan.warnings[0]?.status === 'reserve' && plan.warnings[0].fromKm === 100 && plan.warnings[0].atKm === 250)
+  check('a leg beyond the full tank runs dry after the last station',
+    plan.warnings[1]?.status === 'dry' && plan.warnings[1].from?.station.id === 'b' && plan.warnings[1].to === null &&
+      plan.warnings[1].atKm === 460)
+  check('legs within usable range raise no warning', plan.warnings.length === 2 && plan.longestLegKm === 240)
+  check('the start is assumed full: a first station inside range is fine',
+    planFuelRange(120, [at(90, 'a')], settings).warnings.length === 0)
+  check('nonsense settings fall back to defaults',
+    normalizeFuelRange({ rangeKm: -5, reservePct: Number.NaN }).rangeKm === 250 && normalizeFuelRange({ reservePct: 200 }).reservePct === 90)
+
+  const line = [0, 1, 2, 3, 4, 5, 6].map(i => ({ lat: 42, lon: 1 + i * 0.01 }))
+  const lineKm = cumulativeDistanceKm(line)
+  const station = { id: 's', lat: 42.001, lon: 1.02 }
+  const outAndBack = [...line, ...[...line].reverse().slice(1)]
+  const stops = fuelStopsAlong(line, lineKm, [station, { id: 'far', lat: 43, lon: 1 }], 500)
+  check('stations are placed at their closest track point inside the corridor',
+    stops.length === 1 && stops[0].km === lineKm[2] && stops[0].offsetM < 200)
+  check('an out-and-back passes a station twice',
+    fuelStopsAlong(outAndBack, cumulativeDistanceKm(outAndBack), [station], 500).length === 2)
+}
+
+/* -- What's around a route point -------------------------------------- */
+
+console.log(`\nNearby search checks\n${'='.repeat(78)}`)
+
+{
+  const a = aroundSearchArea({ lat: 42.571, lon: -0.551 }, 10)
+  const b = aroundSearchArea({ lat: 42.574, lon: -0.548 }, 10)
+  check('nearby points snap to the identical search area, so the backend cache answers',
+    JSON.stringify(a) === JSON.stringify(b))
+  const r = 10 / 111.195
+  check('the snapped area still contains the whole circle',
+    a.south <= 42.571 - r && a.north >= 42.571 + r && a.west < -0.551 - r && a.east > -0.551 + r)
+  const big = aroundSearchArea({ lat: 42.57, lon: -0.55 }, 30)
+  check('a 30 km search stays inside the backend around limit',
+    (big.north - big.south) * 111.195 < 80 && (big.east - big.west) * 111.195 * Math.cos(42.57 * Math.PI / 180) < 80)
+
+  check('springs, water points and fountains are water', classifyAround({ natural: 'spring' }) === 'water' &&
+    classifyAround({ amenity: 'water_point' }) === 'water' && classifyAround({ amenity: 'drinking_water' }) === 'water')
+  check('bus shelters are not huts', classifyAround({ amenity: 'shelter', shelter_type: 'public_transport' }) === null &&
+    classifyAround({ amenity: 'shelter', shelter_type: 'basic_hut' }) === 'hut')
+  check('a spring is not called drinkable unless tagged',
+    aroundFacts({ natural: 'spring' }, 'water').find(f => f.label === 'Drinkable')?.value === 'not stated' &&
+      aroundFacts({ natural: 'spring', drinking_water: 'no' }, 'water').find(f => f.label === 'Drinkable')?.value === 'no')
+  check('hut access and season are surfaced',
+    aroundFacts({ tourism: 'wilderness_hut', access: 'private', seasonal: 'summer' }, 'hut').map(f => f.label).join(',') === 'Access,Seasonal')
+
+  const runtime = decodeRuntimeConfig({ services: { pois: '/pois/search' } }, 'https://backend.example.test')
+  const bodies: string[] = []
+  const element = (id: number, lat: number, lon: number, tags: Record<string, string>) => ({ type: 'node', id, lat, lon, tags })
+  const fetcher = async (_url: RequestInfo | URL, init?: RequestInit) => {
+    bodies.push(String(init?.body))
+    return new Response(JSON.stringify({ elements: [
+      element(1, 42.571, -0.551, { natural: 'spring', name: 'Fuente' }),
+      element(2, 42.62, -0.551, { tourism: 'alpine_hut' }),
+      element(3, 42.70, -0.551, { amenity: 'fuel' }),
+      element(4, 42.572, -0.551, { amenity: 'bench' }),
+    ] }), { headers: { 'Content-Type': 'application/json' } })
+  }
+  const cache = new AroundAreaCache()
+  const first = await searchAround({ lat: 42.57, lon: -0.551 }, 10, cache, undefined, { runtime, fetcher })
+  check('one union request goes to the backend as kind "around"',
+    bodies.length === 1 && JSON.parse(bodies[0]).kind === 'around')
+  check('results are filtered to the radius, classified and sorted by distance',
+    first.pois.map(p => p.id).join(',') === 'node/1,node/2' && first.pois[0].category === 'water')
+  const smaller = await searchAround({ lat: 42.57, lon: -0.551 }, 5, cache, undefined, { runtime, fetcher })
+  check('a smaller radius is answered from the session without a request',
+    bodies.length === 1 && smaller.reused && smaller.pois.map(p => p.id).join(',') === 'node/1')
+  await searchAround({ lat: 42.574, lon: -0.548 }, 10, cache, undefined, { runtime, fetcher })
+  check('a nearby point reuses the same area without a request', bodies.length === 1)
+  await searchAround({ lat: 42.57, lon: -0.551 }, 30, cache, undefined, { runtime, fetcher })
+  check('a larger radius fetches its larger area once', bodies.length === 2)
+
+  const truncatedCache = new AroundAreaCache()
+  let calls = 0
+  const full = async () => {
+    calls++
+    return new Response(JSON.stringify({ elements: Array.from({ length: 1500 }, (_, i) => element(i, 42.57, -0.551, { amenity: 'drinking_water' })) }))
+  }
+  const capped = await searchAround({ lat: 42.57, lon: -0.551 }, 30, truncatedCache, undefined, { runtime, fetcher: full })
+  await searchAround({ lat: 42.57, lon: -0.551 }, 5, truncatedCache, undefined, { runtime, fetcher: full })
+  check('a capped reply is flagged and never stands in for a smaller search', capped.truncated && calls === 2)
 }
 
 /* -- Surface classification and chunking ---------------------------- */

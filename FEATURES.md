@@ -8,10 +8,11 @@ A route planner and track editor for offroad, overlanding and motorbike use.
 
 - **Base maps** — OpenFreeMap vector maps, OpenTopoMap (contour lines + relief),
   CyclOSM (renders track surface and grade clearly), Esri satellite imagery,
-  Esri shaded relief.
+  shaded relief drawn from the Terrarium elevation tiles.
 - **Hillshade overlay** with adjustable strength, drawn in its own map pane
   above the base tiles and below the track. Works over satellite, where
-  imagery alone flattens gullies and ridgelines out.
+  imagery alone flattens gullies and ridgelines out. Shaded in the browser by
+  MapLibre from the Terrarium elevation tiles, so it needs WebGL2.
 - **Live ground elevation under the cursor** — hover anywhere and the readout
   shows the terrain altitude at that point, sampled from the DEM and cached.
 - **Track colouring by gradient or by altitude.** Altitude mode uses a
@@ -34,7 +35,8 @@ A route planner and track editor for offroad, overlanding and motorbike use.
   numbers do not depend on how densely the source device recorded.
 - **Moving time and average moving speed** from recorded timestamps, when the
   file has them.
-- **Longest gap without fuel** once the fuel layer is loaded.
+- **Longest gap without fuel** once the fuel layer is loaded, flagged when it
+  is longer than your fuel range less reserve.
 
 ## Elevation profile
 
@@ -93,6 +95,31 @@ Applies to any loaded track, with undo:
 - Long routes are cut into chunks under the server's 200 km trace limit and
   stitched. A trace failure leaves the route and its elevation untouched.
 
+## Ride check (loaded tracks)
+
+A **Ride check** toggle next to Tools opens three panels for the loaded track.
+
+- **Surface** — the track is matched to the open routing region (it must cover
+  the track) and gets the same distance-weighted breakdown as a planned route.
+  The track can then be coloured by surface. The GPX itself is never changed.
+- **Access** — see below; read from the same road match.
+- **Fuel range** — set a full-tank range and a reserve; with the fuel layer
+  loaded, every leg between stations that would put you on reserve or run you
+  dry is listed and marked on the map. Assumes a full tank at the start.
+
+## Access
+
+- **Access warnings on planned routes and loaded tracks, in any country**,
+  from OpenStreetMap tags evaluated for a motorcycle: closed (`no`), private,
+  restricted use (forestry, agricultural, destination, permit…) and paths with
+  no motor permission. The most specific tag wins: `motorcycle` over
+  `motor_vehicle` over `vehicle` over `access`.
+- Each warning is listed with its tag and position and drawn as a dashed
+  stretch on the map; clicking it zooms there.
+- Ways with **no access tag** are counted separately, never as open, because
+  the national default for their road class decides. Gates and seasonal or
+  conditional closures are not covered. See [ACCURACY.md](docs/ACCURACY.md).
+
 ## POIs — fuel, drinking water, campsites
 
 Loaded on demand from Overpass, with two ways to ask:
@@ -106,6 +133,23 @@ Loaded on demand from Overpass, with two ways to ask:
 Views larger than 250 km across are refused with a prompt to zoom in: Overpass
 caps a reply at 400 results, and 400 points spread over half a country reads
 as "nothing here" in the gaps where really we just stopped counting.
+
+### What's around a route point
+
+- The magnifier on a planner point (or **What's around** in its popup) lists
+  water (fountains, water points, springs), huts and shelters, campsites,
+  fuel, motorcycle shops and viewpoints within **2–30 km**, nearest first.
+- Each result shows what OSM says about it and no more: whether a spring is
+  tagged drinkable, access, fee, season, opening hours, beds. Bus shelters
+  are left out.
+- Any result can be kept as a place in the GPX; nothing is added on its own
+  and nothing is ever routed through.
+- **Light on OpenStreetMap's servers**: one union query for every category,
+  only when asked; the area snaps to a ~5 km grid so nearby points reuse the
+  backend's shared cache, and a smaller radius or a point inside an area
+  already fetched is answered in the browser with no request at all. A reply
+  that hit the 1,500-result cap is flagged and never reused for another
+  search.
 
 ### Fuel prices in Spain
 
@@ -238,12 +282,11 @@ the service is down, the OSM fuel layer answers as before.
 
 ## Not done yet
 
-- **Surface on a loaded track** — the breakdown is read while planning; an
-  imported GPX would need map-matching before it could be classified.
 - **`tracktype`/`smoothness` presentation** — Broom returns these OSM road
   attributes, but the planner does not yet display a roughness breakdown.
 - **Arbitrary public raster basemap packs** — provider policies prohibit them;
   bounded OpenFreeMap vector packs are the supported exception.
-- **Access warnings** — `access=private`, gates, seasonal closures.
+- **Gates and seasonal closures** — barrier nodes and `:conditional` access
+  are not in Broom's per-edge attributes, so access warnings do not cover them.
 - **Mobile layout** — the creation screen is still desktop-shaped.
 - **Track joining in the UI** (`joinTracks` exists in `lib/edit.ts`).

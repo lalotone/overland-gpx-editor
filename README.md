@@ -293,8 +293,9 @@ require explicit repair or update.
 OpenFreeMap is cached through the backend and supports bounded trip-pack
 prefetch by default. Attribution remains visible, and the source can be
 overridden or bulk fetching disabled at startup. OSM, OpenTopoMap and CyclOSM
-are cached only as they are viewed and are never area-prefetched. Esri live
-layers remain browser-direct and are not stored by the server. An OpenFreeMap
+are cached only as they are viewed and are never area-prefetched. Esri
+satellite imagery and the relief shading remain browser-direct and are not
+stored by the server. An OpenFreeMap
 failure produces a dismissible structured warning and never silently switches
 the selected map to another provider. See
 **[docs/OFFLINE.md](docs/OFFLINE.md)** for provider and privacy details.
@@ -441,7 +442,7 @@ bundle at build time.
 Full detail in **[FEATURES.md](FEATURES.md)**. In brief:
 
 **Terrain** — OpenFreeMap vector maps / OpenTopoMap / CyclOSM / Esri satellite
-and shaded relief, plus a hillshade overlay that works over any base. Track
+/ shaded relief, plus a hillshade overlay that works over any base. Track
 colouring by gradient or altitude. Live ground elevation under the cursor.
 
 **Analysis** — distance, min/max altitude, gain/loss, moving time and average
@@ -516,12 +517,12 @@ straight at the public services.
 
 | Service | Used for |
 | --- | --- |
-| [oms](https://code.rbel.co/rubiojr/oms) at `oms.rbel.co` | Default source of the OpenFreeMap Liberty map, of Geofabrik extracts and Skadi elevation for routing, and of Terrarium terrain tiles for elevation |
+| [oms](https://code.rbel.co/rubiojr/oms) at `oms.rbel.co` | Default source of the OpenFreeMap Liberty map, of Geofabrik extracts and Skadi elevation for routing, and of Terrarium terrain tiles for elevation and, read straight from the browser, for the relief shading |
 | [OpenFreeMap](https://openfreemap.org) | Vector base map (OpenStreetMap data), through the oms mirror by default |
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | Raster library thumbnails and non-WebGL fallback — see the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) |
 | [OpenTopoMap](https://opentopomap.org) | Contour base map (CC-BY-SA, low volume only) |
 | [CyclOSM](https://www.cyclosm.org) | Surface/grade base map |
-| Esri ArcGIS | Satellite, relief, hillshade (attribution required; World Shaded Relief retires March 2028) |
+| Esri ArcGIS | Satellite imagery (attribution required) |
 | [Broom](https://code.rbel.co/rubiojr/broom) | Embedded local routing over explicitly prepared OpenStreetMap and DEM data, fetched through the oms mirror by default |
 | [Nominatim](https://nominatim.org) | Place search, throttled to one request/second and cached; switchable with `NOMINATIM_URL` |
 | [Overpass](https://overpass-api.de) | User-triggered fuel / water / campsite POIs |

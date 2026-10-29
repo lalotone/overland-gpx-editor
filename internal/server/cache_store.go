@@ -262,74 +262,123 @@ func (s *cacheStore) relativePaths(scope, key string) (string, string, error) {
 	return filepath.Join(dir, key+".body"), filepath.Join(dir, key+".json"), nil
 }
 
-func (s *cacheStore) load() error {
-	s.recoverBackups()
-	if err := fs.WalkDir(s.root.FS(), filepath.ToSlash(s.entriesRel), func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
+// cacheLoadWorkers bounds concurrent metadata reads at startup. Each entry is
+// a few small files; issuing them in parallel keeps an SSD's queue busy where
+// one reader leaves it waiting on every open.
+const cacheLoadWorkers = 16
+
+type cacheEntryFiles struct {
+	metadata []string
+	bodies   []string
+	backups  bool
+}
+
+// listEntryFiles walks the entries once, removing temporaries and foreign
+// files on the way, and returns what is left to index.
+func (s *cacheStore) listEntryFiles() cacheEntryFiles {
+	var files cacheEntryFiles
+	_ = fs.WalkDir(s.root.FS(), filepath.ToSlash(s.entriesRel), func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.Contains(d.Name(), ".tmp-") {
+		name := d.Name()
+		switch {
+		case strings.Contains(name, ".tmp-"):
 			_ = s.root.Remove(path)
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".body") {
-			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".json") {
-			_ = s.root.Remove(path)
-			return nil
-		}
-		raw, err := readFileLimitAt(s.root, path, maxMetadataBytes)
-		if err != nil {
-			_ = s.root.Remove(path)
-			return nil
-		}
-		var meta cacheMetadata
-		if json.Unmarshal(raw, &meta) != nil || meta.Schema != cacheSchemaVersion ||
-			!validScope(meta.Scope) || !validCacheKey(meta.Key) || meta.Length < 0 {
-			s.removePairByMetadataPath(path)
-			return nil
-		}
-		bodyPath, metaPath, err := s.relativePaths(meta.Scope, meta.Key)
-		if err != nil || filepath.Clean(metaPath) != filepath.Clean(path) {
-			s.removePairByMetadataPath(path)
-			return nil
-		}
-		body, err := readFileLimitAt(s.root, bodyPath, meta.Length)
-		if err != nil || int64(len(body)) != meta.Length || checksum(body) != meta.Checksum {
-			_ = s.root.Remove(bodyPath)
-			_ = s.root.Remove(metaPath)
-			return nil
-		}
-		meta.metadataLength = int64(len(raw))
-		if old := s.entries[meta.Key]; old != nil {
-			s.bytes -= old.Length + old.metadataLength
-		}
-		copyMeta := meta
-		s.setEntryLocked(&copyMeta)
-		s.bytes += meta.Length + meta.metadataLength
-		return nil
-	}); err != nil {
-		return err
-	}
-	// Metadata is authoritative. Bodies left without a valid sidecar are
-	// interrupted writes or corruption and must not consume quota silently.
-	_ = fs.WalkDir(s.root.FS(), filepath.ToSlash(s.entriesRel), func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".body") {
-			return nil
-		}
-		key := strings.TrimSuffix(d.Name(), ".body")
-		s.mu.Lock()
-		_, indexed := s.entries[key]
-		s.mu.Unlock()
-		if !indexed {
+		case strings.HasSuffix(name, ".body.bak"), strings.HasSuffix(name, ".json.bak"):
+			files.backups = true
+		case strings.HasSuffix(name, ".body"):
+			files.bodies = append(files.bodies, path)
+		case strings.HasSuffix(name, ".json"):
+			files.metadata = append(files.metadata, path)
+		default:
 			_ = s.root.Remove(path)
 		}
 		return nil
 	})
+	return files
+}
+
+// loadMetadataAt validates one sidecar and its body, removing the pair when
+// either is unusable. It touches no shared state, so it runs in parallel.
+func (s *cacheStore) loadMetadataAt(path string) *cacheMetadata {
+	raw, err := readFileLimitAt(s.root, path, maxMetadataBytes)
+	if err != nil {
+		_ = s.root.Remove(path)
+		return nil
+	}
+	var meta cacheMetadata
+	if json.Unmarshal(raw, &meta) != nil || meta.Schema != cacheSchemaVersion ||
+		!validScope(meta.Scope) || !validCacheKey(meta.Key) || meta.Length < 0 {
+		s.removePairByMetadataPath(path)
+		return nil
+	}
+	bodyPath, metaPath, err := s.relativePaths(meta.Scope, meta.Key)
+	if err != nil || filepath.Clean(metaPath) != filepath.Clean(path) {
+		s.removePairByMetadataPath(path)
+		return nil
+	}
+	// Size only: reading and checksumming every body made startup read the
+	// whole cache (hundreds of MB, minutes from a cold disk) before the
+	// server listened. get verifies the checksum on every read and drops a
+	// corrupt pair, so a damaged body is still never served.
+	info, err := s.root.Lstat(bodyPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != meta.Length {
+		_ = s.root.Remove(bodyPath)
+		_ = s.root.Remove(metaPath)
+		return nil
+	}
+	meta.metadataLength = int64(len(raw))
+	return &meta
+}
+
+func (s *cacheStore) load() error {
+	files := s.listEntryFiles()
+	if files.backups {
+		// Interrupted replacements are rare; recover them, then index the result.
+		s.recoverBackups()
+		files = s.listEntryFiles()
+	}
+
+	loaded := make([]*cacheMetadata, len(files.metadata))
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for range min(cacheLoadWorkers, len(files.metadata)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				loaded[i] = s.loadMetadataAt(files.metadata[i])
+			}
+		}()
+	}
+	for i := range files.metadata {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+
+	// Applied in walk order, so a key found twice resolves as it always has.
+	s.mu.Lock()
+	for _, meta := range loaded {
+		if meta == nil {
+			continue
+		}
+		if old := s.entries[meta.Key]; old != nil {
+			s.bytes -= old.Length + old.metadataLength
+		}
+		s.setEntryLocked(meta)
+		s.bytes += meta.Length + meta.metadataLength
+	}
+	// Metadata is authoritative. Bodies left without a valid sidecar are
+	// interrupted writes or corruption and must not consume quota silently.
+	for _, path := range files.bodies {
+		if _, indexed := s.entries[strings.TrimSuffix(filepath.Base(path), ".body")]; !indexed {
+			_ = s.root.Remove(path)
+		}
+	}
+	s.mu.Unlock()
+
 	entries, _ := fs.ReadDir(s.root.FS(), filepath.ToSlash(s.tmpRel))
 	for _, entry := range entries {
 		if !entry.IsDir() {

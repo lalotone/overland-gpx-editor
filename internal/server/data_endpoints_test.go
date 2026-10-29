@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"net/url"
+	"strings"
+	"testing"
+)
 
 func TestProviderResponseValidators(t *testing.T) {
 	tests := []struct {
@@ -34,5 +38,40 @@ func TestProviderResponseValidators(t *testing.T) {
 				t.Fatal("invalid response accepted")
 			}
 		})
+	}
+}
+
+func TestAroundPOIRequestIsOneBoundedUnion(t *testing.T) {
+	s := newTestServer(t)
+	policy := s.providers["pois"]
+	request, err := buildPOIRequest(policy, "around", bbox{South: 42.4, West: -0.8, North: 42.8, East: -0.3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query, err := url.ParseQuery(string(request.body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := query.Get("data")
+	for _, want := range []string{
+		"[bbox:42.40000,-0.80000,42.80000,-0.30000]", `"natural"="spring"`, "alpine_hut", "motorcycle_repair",
+		`["shelter_type"!="public_transport"]`, "out center 1500;",
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("around query lacks %q: %s", want, data)
+		}
+	}
+	if !request.cacheable || request.params != "around:42.40000,-0.80000,42.80000,-0.30000" {
+		t.Errorf("around request must be cached per area, params %q", request.params)
+	}
+	// A regional sweep is refused even though the single-kind limit allows it.
+	if _, err := buildPOIRequest(policy, "around", bbox{South: 42, West: -1, North: 43, East: 0}); err == nil {
+		t.Error("around accepted a 110 km area")
+	}
+	if _, err := buildPOIRequest(policy, "fuel", bbox{South: 42, West: -1, North: 43, East: 0}); err != nil {
+		t.Errorf("single-kind limit changed: %v", err)
+	}
+	if _, err := buildPOIRequest(policy, "everything", bbox{South: 42, West: -1, North: 42.1, East: -0.9}); err == nil {
+		t.Error("an unknown kind was accepted")
 	}
 }

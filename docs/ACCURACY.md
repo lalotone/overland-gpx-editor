@@ -181,6 +181,55 @@ Caveats worth keeping in mind:
 
 ---
 
+## Fuel range
+
+Set a full-tank range and a reserve in Ride check. The track is assumed to
+**start on a full tank**, the one assumption the data cannot check, and the
+panel says so. Each fuel station within the same 3 km corridor is placed at
+the track point it passes closest to (an out-and-back passes it twice), and
+every leg between consecutive refuelling opportunities, including start and
+end, is compared with two limits:
+
+- longer than **range × (1 − reserve)**: you arrive on reserve, marked where
+  the reserve starts;
+- longer than the **full range**: you run dry, marked where the tank empties,
+  with the last station before it.
+
+The same caveats as the fuel gap apply, so treat the warnings as a floor: the
+detour to a station is not added, and hours, card-only pumps and fuel grade are
+unknown. The "Longest fuel gap" tile now warns beyond the usable range instead
+of a fixed 200 km.
+
+---
+
+## Access warnings
+
+Access comes from the same Broom tags as surface: inline on planned routes, and
+from `AnnotateTrack` spans on loaded tracks. Broom returns lookup-normalized
+`access`, `vehicle`, `motor_vehicle` and `motorcycle` values, **not** an
+evaluated permission, so the app evaluates them itself for a motorcycle:
+
+- The **most specific supplied key wins**: `motorcycle`, then `motor_vehicle`,
+  then `vehicle`, then `access`. `bicycle` and `foot` never count.
+- `no` is closed, `private` is private, and anything else that is not `yes`,
+  `permissive` or `designated` (forestry, agricultural, destination, permit,
+  delivery…) is restricted use.
+- `path`, `footway`, `cycleway`, `bridleway`, `pedestrian` and `steps` need an
+  affirmative **motor** permission. A general `access=yes` is not enough, the
+  same rule Broom's offroad profiles route by.
+- A way with **no access tag is "No access tag"**, never "open". OSM leaves it
+  to the national or regional default for its road class, and those differ —
+  forest tracks are closed by regional law in parts of Spain and open in much
+  of France — so it is reported on its own and never added to either side.
+- Unmatched or ambiguous distance on a loaded track has no tags and is
+  **unknown**. A Broom value outside its lookup table is unknown too.
+
+Barriers are OSM nodes and `:conditional` restrictions are not part of Broom's
+attributes, so **gates, seasonal and time-based closures are not covered**. The
+warnings are a reading of the map data, not a legal certificate.
+
+---
+
 ## Route surface percentages
 
 Surface shares are **distance-weighted**, never point or segment counts. They use

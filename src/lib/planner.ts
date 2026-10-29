@@ -1,3 +1,4 @@
+import type { RoadTags } from './access'
 import type { SurfaceClass } from './surface'
 import type { Coordinate } from './types'
 
@@ -6,6 +7,7 @@ export interface ClearedRouteDerivedState {
   durationSeconds: null
   engine: null
   surfaceSegments: SurfaceClass[] | null
+  roads: (RoadTags | null)[] | null
   elevationInterpolated: false
   elevationApiError: false
   routeStatus: ''
@@ -19,6 +21,7 @@ export function clearedRouteDerivedState(): ClearedRouteDerivedState {
     durationSeconds: null,
     engine: null,
     surfaceSegments: null,
+    roads: null,
     elevationInterpolated: false,
     elevationApiError: false,
     routeStatus: '',

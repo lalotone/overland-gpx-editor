@@ -9,6 +9,16 @@ import { ExploreScreen } from './components/ExploreScreen'
 import { MapTiles, TerrainControls, VectorMapDiagnostic } from './components/MapLayers'
 import type { VectorMapIssue } from './components/MapLayers'
 import { OfflineRegionsButton, OfflineRegionsDialog } from './components/OfflineRegions'
+import { AroundPanel, AroundRadius, formatDistance, osmLink } from './components/AroundPanel'
+import type { AroundState } from './components/AroundPanel'
+import {
+  AccessOverlay,
+  AccessWarnings,
+  FuelRangeMarkers,
+  FuelRangeView,
+  SurfaceBreakdown,
+  useTrackAnnotation,
+} from './components/RideCheck'
 import { useRegionDownloads } from './components/useRegionDownloads'
 import { SplashScreen } from './components/SplashScreen'
 import { TrackCard } from './components/TrackCard'
@@ -53,8 +63,15 @@ import type { BoundingBox, Poi, PoiKind } from './lib/poi'
 import { calculateRoute, formatDuration, ROUTING_PROFILES } from './lib/routing'
 import type { RoutingProfile } from './lib/routing'
 import { availableFuels, DEFAULT_FUEL_REFERENCE, fuelBandColors, FUEL_PRICE_BANDS } from './lib/fuel'
-import { summarizeSurface, surfaceDefinition } from './lib/surface'
+import { summarizeSurface } from './lib/surface'
 import type { SurfaceClass } from './lib/surface'
+import { accessReport, locateSegmentRoads } from './lib/access'
+import type { AccessStretch, RoadTags } from './lib/access'
+import { DEFAULT_FUEL_RANGE, fuelStopsAlong, normalizeFuelRange, planFuelRange } from './lib/fuelRange'
+import type { FuelRangeSettings } from './lib/fuelRange'
+import { segmentSurfaces } from './lib/trackSurface'
+import { AroundAreaCache, AROUND_RADII_KM, aroundCategory, DEFAULT_AROUND_RADIUS_KM, searchAround } from './lib/around'
+import type { AroundCategory, AroundPoi } from './lib/around'
 import { clearedRouteDerivedState, routeSequenceIsCurrent } from './lib/planner'
 import type { McpCommand, McpMapMarker } from './lib/mcp'
 import {
@@ -638,9 +655,11 @@ function App() {
   useEffect(() => { localStorage.setItem('gpx-color-mode', colorMode) }, [colorMode])
 
   /**
-   * Surface colouring only exists where a route has been traced, which is the
-   * creation screen. Everywhere else the choice falls back to gradient rather
-   * than drawing a track with no colour data at all.
+   * Surface colouring needs per-segment surface data: a planned route has it
+   * inline, a loaded track only once Ride check has matched it to the road
+   * network (`trackColorMode`). Without it the choice falls back to gradient
+   * rather than drawing a track with no colour data at all. The elevation
+   * profile always uses this fallback.
    */
   const viewColorMode: ColorMode = colorMode === 'surface' ? 'slope' : colorMode
 
@@ -667,6 +686,16 @@ function App() {
   /* -- Editing ------------------------------------------------------ */
 
   const [showTools, setShowTools] = useState(false)
+  /** Surface, access and fuel-range checks for the loaded track. */
+  const [showRideCheck, setShowRideCheck] = useState(false)
+  const [fuelRange, setFuelRange] = useState<FuelRangeSettings>(() => {
+    try {
+      return normalizeFuelRange(JSON.parse(localStorage.getItem('gpx-fuel-range') ?? '{}') as Partial<FuelRangeSettings>)
+    } catch {
+      return DEFAULT_FUEL_RANGE
+    }
+  })
+  useEffect(() => { localStorage.setItem('gpx-fuel-range', JSON.stringify(fuelRange)) }, [fuelRange])
   /** Clicking the map drops a place of interest instead of a route point. */
   const [waypointMode, setWaypointMode] = useState(false)
   /** Places of interest placed while planning — not part of the routed line. */
@@ -723,6 +752,7 @@ function App() {
   /** Fuel the price colouring ranks on, shared by both screens. */
   const [fuelReference, setFuelReference] = useState(DEFAULT_FUEL_REFERENCE)
   const [surfaceSegments, setSurfaceSegments] = useState<SurfaceClass[] | null>(null)
+  const [routeRoads, setRouteRoads] = useState<(RoadTags | null)[] | null>(null)
   const [placeSearch, setPlaceSearch] = useState('')
   const [placeResults, setPlaceResults] = useState<PlaceResult[]>([])
   const [placeCache, setPlaceCache] = useState<CacheMetadata | undefined>()
@@ -747,6 +777,7 @@ function App() {
     setRoutedDuration(cleared.durationSeconds)
     setRoutedEngine(cleared.engine)
     setSurfaceSegments(cleared.surfaceSegments)
+    setRouteRoads(cleared.roads)
     setElevationInterpolated(cleared.elevationInterpolated)
     setElevationApiError(cleared.elevationApiError)
     setRouteStatus(cleared.routeStatus)
@@ -1192,6 +1223,50 @@ function App() {
     return ticks
   }, [profileElevMin, profileElevRange])
 
+  /* -- Ride check: surface, access and fuel range -------------------- */
+
+  const trackAnnotation = useTrackAnnotation(
+    currentTrack?.coordinates,
+    runtime,
+    routingData,
+    showRideCheck || colorMode === 'surface',
+  )
+  const trackSpans = trackAnnotation?.status === 'ready' ? trackAnnotation.result.spans : null
+  const trackSurfaceSegments = useMemo(
+    () =>
+      trackSpans && trackSpans.length > 0 && currentTrack
+        ? segmentSurfaces(trackSpans, currentTrack.coordinates.length)
+        : null,
+    [currentTrack, trackSpans],
+  )
+  const trackAccess = useMemo(
+    () => (trackSpans && trackSpans.length > 0 ? accessReport(trackSpans, cumKm) : null),
+    [cumKm, trackSpans],
+  )
+  /** The loaded track can be painted by surface once it has been matched. */
+  const trackColorMode: ColorMode = colorMode === 'surface' && trackSurfaceSegments ? 'surface' : viewColorMode
+
+  const fuelStops = useMemo(
+    () =>
+      currentTrack && activePois.fuel.length > 0
+        ? fuelStopsAlong(currentTrack.coordinates, cumKm, activePois.fuel, FUEL_CORRIDOR_M)
+        : null,
+    [activePois.fuel, currentTrack, cumKm],
+  )
+  const fuelPlan = useMemo(
+    () => (fuelStops && cumKm.length > 0 ? planFuelRange(cumKm[cumKm.length - 1], fuelStops, fuelRange) : null),
+    [cumKm, fuelRange, fuelStops],
+  )
+  const usableRangeKm = fuelRange.rangeKm * (1 - fuelRange.reservePct / 100)
+
+  /** Zooms the active map to a flagged stretch of the given line. */
+  const focusStretch = useCallback((coords: Coordinate[]) => (stretch: AccessStretch) => {
+    const map = mapRef.current
+    const points = coords.slice(stretch.startIndex, stretch.endIndex + 1)
+    if (!map || points.length === 0) return
+    map.fitBounds(L.latLngBounds(points.map(p => [p.lat, p.lon] as [number, number])), { padding: [60, 60], maxZoom: 16 })
+  }, [])
+
   /* -- Fuel gap ----------------------------------------------------- */
 
   const fuelGap = useMemo(() => {
@@ -1373,6 +1448,8 @@ function App() {
     setWaypointMode(false)
     setActivePois({ fuel: [], water: [], camp: [] })
     setSurfaceSegments(null)
+    setRouteRoads(null)
+    setShowRideCheck(false)
     setElevationInterpolated(false)
     setElevationApiError(false)
     setShowTools(false)
@@ -1686,6 +1763,59 @@ function App() {
       : pin))
   }, [])
 
+  /* -- What's around a route point ----------------------------------- */
+
+  const aroundCacheRef = useRef(new AroundAreaCache())
+  const aroundAbortRef = useRef<AbortController | null>(null)
+  const [around, setAround] = useState<(AroundState & { point: Coordinate }) | null>(null)
+  const [aroundHidden, setAroundHidden] = useState<ReadonlySet<AroundCategory>>(new Set())
+  const [aroundRadius, setAroundRadius] = useState(() => {
+    const stored = Number(localStorage.getItem('gpx-around-radius'))
+    return (AROUND_RADII_KM as readonly number[]).includes(stored) ? stored : DEFAULT_AROUND_RADIUS_KM
+  })
+  useEffect(() => { localStorage.setItem('gpx-around-radius', String(aroundRadius)) }, [aroundRadius])
+
+  /** Only ever user-triggered: one search at a time, a newer one replaces it. */
+  const searchAroundPoint = useCallback((point: Coordinate, pointNumber: number, radiusKm: number) => {
+    aroundAbortRef.current?.abort()
+    const controller = new AbortController()
+    aroundAbortRef.current = controller
+    setAround(prev => ({ point, pointNumber, radiusKm, loading: true, result: prev?.result }))
+    searchAround(point, radiusKm, aroundCacheRef.current, controller.signal, { runtime, onCacheMetadata: handleCacheMetadata })
+      .then(result => {
+        if (!controller.signal.aborted) setAround({ point, pointNumber, radiusKm, loading: false, result })
+      })
+      .catch(err => {
+        if (controller.signal.aborted || (err as Error).name === 'AbortError') return
+        setAround({ point, pointNumber, radiusKm, loading: false, error: (err as Error).message || 'Search failed' })
+      })
+  }, [handleCacheMetadata, runtime])
+
+  const closeAround = useCallback(() => {
+    aroundAbortRef.current?.abort()
+    setAround(null)
+  }, [])
+  useEffect(() => () => aroundAbortRef.current?.abort(), [])
+
+  const focusAroundPoi = useCallback((poi: AroundPoi) => {
+    const map = mapRef.current
+    if (map) map.setView([poi.lat, poi.lon], Math.max(map.getZoom(), 15))
+  }, [])
+
+  /** An explicit choice to keep a result: it becomes a saved place, never a route point. */
+  const keepAroundPoi = useCallback((poi: AroundPoi) => {
+    setCreationPins(prev => [
+      ...prev,
+      {
+        lat: poi.lat,
+        lon: poi.lon,
+        name: poi.name ?? poi.kind,
+        sym: waypointMarkerDefinition(aroundCategory(poi.category).marker).gpxSymbol,
+      },
+    ])
+    notify(`Added ${poi.name ?? poi.kind} as a place`, 'success')
+  }, [notify])
+
   const deleteWaypoint = useCallback((id: number) => {
     setCreationWaypoints(prev => prev.filter(w => w.id !== id))
   }, [])
@@ -1823,6 +1953,7 @@ function App() {
         setRoutedDuration(result.durationSeconds)
         setRoutedEngine(result.engine)
         setSurfaceSegments(result.surface.segments)
+        setRouteRoads(result.roads)
         setElevationInterpolated(result.coordinates.some(point => point.elevationInterpolated === true))
         setElevationApiError(!result.coordinates.some(point => point.elevation !== undefined))
       } catch (err) {
@@ -1876,6 +2007,14 @@ function App() {
   )
 
   const surfaceReady = surfaceSummary !== null && surfaceSummary.shares.length > 0
+
+  const routeAccess = useMemo(
+    () =>
+      routeRoads && routeRoads.length === creationCumKm.length - 1
+        ? accessReport(locateSegmentRoads(routeRoads), creationCumKm)
+        : null,
+    [routeRoads, creationCumKm],
+  )
 
   /** Sidebar sparkline path, sampled down to a manageable number of points. */
   const creationSparkPath = useMemo(() => {
@@ -1953,8 +2092,9 @@ function App() {
     setCreationPins([])
     setWaypointMode(false)
     clearRouteDerived()
+    closeAround()
     setSaveFileName('')
-  }, [clearRouteDerived])
+  }, [clearRouteDerived, closeAround])
 
   const resetCreation = useCallback(() => {
     setAccessPermit(false)
@@ -1965,12 +2105,13 @@ function App() {
     clearRouteDerived()
     setCreationPois({ fuel: [], water: [], camp: [] })
     setCreationPoiCache({})
+    closeAround()
     setPlaceCache(undefined)
     // Otherwise the next track starts with the panels hidden and no hint why.
     setMapOnly(false)
     loadSavedFiles()
     setViewMode('welcome')
-  }, [clearRouteDerived, loadSavedFiles])
+  }, [clearRouteDerived, closeAround, loadSavedFiles])
 
   const fitMcpPoints = (points: Coordinate[]) => {
     if (points.length === 0) return
@@ -2660,63 +2801,27 @@ function App() {
               </h3>
 
               {surfaceReady && surfaceSummary ? (
-                <div className="surface-panel">
-                  <div className="surface-headline">
-                    <span>
-                      <strong>{(surfaceSummary.unpavedFraction * 100).toFixed(0)}%</strong> unpaved
-                    </span>
-                    <span className="surface-headline-sub">
-                      {surfaceSummary.unpavedKm.toFixed(1)} of {surfaceSummary.totalKm.toFixed(1)} km
-                    </span>
-                  </div>
-
-                  <div className="surface-bar" aria-hidden="true">
-                    {surfaceSummary.shares.map(share => (
-                      <span
-                        key={share.id}
-                        className="surface-bar-part"
-                        style={{
-                          width: `${(share.fraction * 100).toFixed(2)}%`,
-                          background: surfaceDefinition(share.id).color,
-                        }}
-                        title={`${surfaceDefinition(share.id).label} — ${share.km.toFixed(1)} km`}
-                      />
-                    ))}
-                  </div>
-
-                  <ul className="surface-legend">
-                    {surfaceSummary.shares.map(share => {
-                      const def = surfaceDefinition(share.id)
-                      return (
-                        <li key={share.id} title={def.hint}>
-                          <span className="surface-swatch" style={{ background: def.color }} />
-                          <span className="surface-legend-label">{def.label}</span>
-                          <span className="surface-legend-value">
-                            {share.km.toFixed(1)} km · {(share.fraction * 100).toFixed(0)}%
-                          </span>
-                        </li>
-                      )
-                    })}
-                  </ul>
-
-                  <button
-                    className="surface-mode-btn"
-                    onClick={() => setColorMode(colorMode === 'surface' ? 'slope' : 'surface')}
-                    title="Paint the route on the map with these colours"
-                  >
-                    {colorMode === 'surface' ? 'Back to gradient colours' : 'Colour route by surface'}
-                  </button>
-
-                  {surfaceSummary.unknownKm > 0.05 && (
-                    <p className="route-stat-note">
-                      {surfaceSummary.unknownKm.toFixed(1)} km carries no surface tag in
-                      OpenStreetMap. It is shown as Unknown and left out of the unpaved share
-                      rather than assumed sealed.
-                    </p>
-                  )}
-                </div>
+                <SurfaceBreakdown
+                  summary={surfaceSummary}
+                  colorBySurface={colorMode === 'surface'}
+                  onToggleColor={() => setColorMode(colorMode === 'surface' ? 'slope' : 'surface')}
+                />
               ) : (
                 <p className="sidebar-empty">Add waypoints to see what the route is made of</p>
+              )}
+            </div>
+
+            <div className="sidebar-section">
+              <h3>
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                  <path d="M12 2a10 10 0 100 20 10 10 0 000-20zM4 12c0-1.85.63-3.55 1.69-4.9L16.9 18.31A7.93 7.93 0 0112 20c-4.42 0-8-3.58-8-8zm14.31 4.9L7.1 5.69A7.93 7.93 0 0112 4c4.42 0 8 3.58 8 8 0 1.85-.63 3.55-1.69 4.9z" />
+                </svg>
+                Access
+              </h3>
+              {routeAccess && routeAccess.totalKm > 0 ? (
+                <AccessWarnings report={routeAccess} onFocus={focusStretch(routedCoordinates)} />
+              ) : (
+                <p className="sidebar-empty">Add waypoints to check the route for access restrictions</p>
               )}
             </div>
 
@@ -2761,6 +2866,16 @@ function App() {
                         <span className="waypoint-coords">{w.lat.toFixed(4)}, {w.lon.toFixed(4)}</span>
                         {w.elevation !== undefined && <span className="waypoint-elev">{w.elevation.toFixed(0)}m</span>}
                       </span>
+                      <button
+                        className="waypoint-around"
+                        onClick={() => searchAroundPoint({ lat: w.lat, lon: w.lon }, index + 1, aroundRadius)}
+                        title={`What's around this point — water, huts, camps, fuel within ${aroundRadius} km`}
+                        aria-label={`What's around route point ${index + 1}`}
+                      >
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                          <path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+                        </svg>
+                      </button>
                       <button className="waypoint-delete" onClick={() => deleteWaypoint(w.id)} title="Remove waypoint">
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
                           <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
@@ -2888,7 +3003,7 @@ function App() {
                 />
                 <ZoomControl position="bottomright" />
                 <ViewportReporter onSettle={handleViewportSettle} />
-                {creationWaypoints.map(w => (
+                {creationWaypoints.map((w, index) => (
                   <Marker
                     key={w.id}
                     position={[w.lat, w.lon]}
@@ -2900,7 +3015,17 @@ function App() {
                       },
                     }}
                   >
-                    <Popup>Route point</Popup>
+                    <Popup>
+                      <strong>Route point #{index + 1}</strong>
+                      <span className="wpt-popup-actions">
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          onClick={() => searchAroundPoint({ lat: w.lat, lon: w.lon }, index + 1, aroundRadius)}
+                        >
+                          What's around ({aroundRadius} km)
+                        </button>
+                      </span>
+                    </Popup>
                   </Marker>
                 ))}
 
@@ -2942,6 +3067,9 @@ function App() {
                     />
                   )
                 )}
+                {routeAccess && routeAccess.stretches.length > 0 && (
+                  <AccessOverlay coordinates={routedCoordinates} stretches={routeAccess.stretches} />
+                )}
                 {POI_KINDS.flatMap(kind =>
                   creationPois[kind.id].map(poi => (
                     <Marker
@@ -2955,11 +3083,56 @@ function App() {
                     </Marker>
                   )),
                 )}
+                {around?.result && <AroundRadius result={around.result} />}
+                {around?.result?.pois.filter(poi => !aroundHidden.has(poi.category)).map(poi => {
+                  const category = aroundCategory(poi.category)
+                  return (
+                    <Marker key={`around:${poi.id}`} position={[poi.lat, poi.lon]} icon={poiIcon(category.glyph, category.color)}>
+                      <Popup>
+                        <div className="poi-popup">
+                          <strong className="poi-popup-name">{poi.name ?? poi.kind}</strong>
+                          <ul className="poi-popup-prices">
+                            {poi.name && <li><span>Type</span><span className="poi-popup-value">{poi.kind}</span></li>}
+                            {poi.facts.map(fact => (
+                              <li key={fact.label}><span>{fact.label}</span><span className="poi-popup-value">{fact.value}</span></li>
+                            ))}
+                            <li><span>From point #{around.pointNumber}</span><span className="poi-popup-value">{formatDistance(poi.distanceM)}</span></li>
+                          </ul>
+                          <span className="wpt-popup-actions">
+                            <button className="btn btn-ghost btn-xs" onClick={() => keepAroundPoi(poi)}>Keep as place</button>
+                            <a className="btn btn-ghost btn-xs" href={osmLink(poi)} target="_blank" rel="noreferrer">OSM</a>
+                          </span>
+                        </div>
+                      </Popup>
+                    </Marker>
+                  )
+                })}
                 <SessionMapOverlays track={sessionMapTrack} markers={sessionMapMarkers} />
 
                 <MapClickHandler onClick={handleMapClick} />
                 <MapMouseTracker onMove={setCursorPos} />
               </MapContainer>
+
+              {around && (
+                <AroundPanel
+                  state={around}
+                  hidden={aroundHidden}
+                  onToggleCategory={id => setAroundHidden(prev => {
+                    const next = new Set(prev)
+                    if (next.has(id)) next.delete(id)
+                    else next.add(id)
+                    return next
+                  })}
+                  onRadius={km => {
+                    setAroundRadius(km)
+                    searchAroundPoint(around.point, around.pointNumber, km)
+                  }}
+                  onRetry={() => searchAroundPoint(around.point, around.pointNumber, around.radiusKm)}
+                  onFocus={focusAroundPoi}
+                  onKeep={keepAroundPoi}
+                  onClose={closeAround}
+                />
+              )}
 
               <div className="creation-poi-strip">
                 <span className="creation-poi-label">In view</span>
@@ -3157,8 +3330,10 @@ function App() {
                 * grew the panel and shoved the map and profile down the page.
                 */}
               <div
-                className={`stat-item${fuelGap !== null && fuelGap > 200 ? ' stat-warn' : ''}`}
-                title={fuelGap === null ? 'Turn on the Fuel layer to measure this' : undefined}
+                className={`stat-item${fuelGap !== null && fuelGap > usableRangeKm ? ' stat-warn' : ''}`}
+                title={fuelGap === null
+                  ? 'Turn on the Fuel layer to measure this'
+                  : `Warns beyond ${usableRangeKm.toFixed(0)} km — your range less reserve, set in Ride check`}
               >
                 <span className="stat-label">Longest fuel gap</span>
                 <span className="stat-value">
@@ -3179,6 +3354,17 @@ function App() {
                   <path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z" />
                 </svg>
                 Tools
+              </button>
+
+              <button
+                className={`btn btn-ghost btn-xs toolbar-toggle${showRideCheck ? ' active' : ''}`}
+                onClick={() => setShowRideCheck(v => !v)}
+                title="Surface, access restrictions and fuel range along this track"
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z" />
+                </svg>
+                Ride check
               </button>
 
               <button
@@ -3222,6 +3408,57 @@ function App() {
                 </>
               )}
             </div>
+
+            {showRideCheck && (
+              <div className="edit-toolbar ride-check" data-testid="ride-check">
+                <div className="edit-cluster ride-check-cluster">
+                  <span className="edit-cluster-label">Surface</span>
+                  {trackAnnotation?.status === 'ready' ? (
+                    <SurfaceBreakdown
+                      summary={trackAnnotation.result.summary}
+                      colorBySurface={trackColorMode === 'surface'}
+                      onToggleColor={() => setColorMode(trackColorMode === 'surface' ? 'slope' : 'surface')}
+                      matched
+                    />
+                  ) : trackAnnotation?.status === 'error' ? (
+                    <p className="route-stat-note" role="status">
+                      Lookup failed: {trackAnnotation.message}{' '}
+                      <button className="btn btn-ghost btn-xs" onClick={trackAnnotation.retry}>Retry</button>
+                    </p>
+                  ) : trackAnnotation?.status === 'unavailable' ? (
+                    <p className="route-stat-note">{trackAnnotation.message}</p>
+                  ) : (
+                    <p className="route-stat-note" role="status">Matching the track to the road network…</p>
+                  )}
+                </div>
+
+                <div className="edit-cluster ride-check-cluster">
+                  <span className="edit-cluster-label">Access</span>
+                  {trackAccess ? (
+                    <AccessWarnings report={trackAccess} onFocus={focusStretch(currentTrack.coordinates)} />
+                  ) : trackAnnotation?.status === 'ready' ? (
+                    <p className="route-stat-note">
+                      This backend reports surface totals only; update it to check access along loaded tracks.
+                    </p>
+                  ) : (
+                    <p className="route-stat-note">Read from the same road match as the surface.</p>
+                  )}
+                </div>
+
+                <div className="edit-cluster ride-check-cluster">
+                  <span className="edit-cluster-label">Fuel range</span>
+                  <FuelRangeView
+                    settings={fuelRange}
+                    onSettings={next => setFuelRange(normalizeFuelRange(next))}
+                    plan={fuelPlan}
+                    fuelLoaded={activePois.fuel.length > 0}
+                    fuelLoading={poiLoading === 'fuel'}
+                    onLoadFuel={() => void togglePoiLayer('fuel')}
+                    corridorKm={FUEL_CORRIDOR_M / 1000}
+                  />
+                </div>
+              </div>
+            )}
 
             {showTools && (
               <div className="edit-toolbar">
@@ -3376,10 +3613,17 @@ function App() {
                 coordinates={currentTrack.coordinates}
                 elevations={smoothedElevations}
                 cumKm={cumKm}
-                colorMode={viewColorMode}
+                colorMode={trackColorMode}
                 elevMin={elevationStats.min}
                 elevMax={elevationStats.max}
+                surfaces={trackSurfaceSegments ?? undefined}
               />
+              {showRideCheck && trackAccess && trackAccess.stretches.length > 0 && (
+                <AccessOverlay coordinates={currentTrack.coordinates} stretches={trackAccess.stretches} />
+              )}
+              {showRideCheck && fuelPlan && fuelPlan.warnings.length > 0 && (
+                <FuelRangeMarkers coordinates={currentTrack.coordinates} cumKm={cumKm} plan={fuelPlan} />
+              )}
 
               {selection && currentTrack.coordinates.length > 0 && (
                 <Polyline
@@ -3446,7 +3690,7 @@ function App() {
             />
 
             <div className="map-control-stack" data-testid="map-control-stack">
-              {renderTerrainControls(viewColorMode, false)}
+              {renderTerrainControls(trackColorMode, Boolean(trackSurfaceSegments))}
             </div>
             <VectorMapDiagnostic
               issue={activeBaseLayer === 'openfreemap' ? vectorMapIssue : null}

@@ -5,6 +5,11 @@
  * I", so the track can be coloured by gradient or by absolute altitude, and
  * a hillshade relief overlay can be laid over any base map — including
  * satellite, where imagery alone flattens gullies and ridgelines out.
+ *
+ * Relief is shaded in the browser from the same Terrarium elevation tiles the
+ * backend reads heights from, rather than fetched pre-shaded: the data is
+ * open, it already sits on the project mirror, and the shading then agrees
+ * with the numbers instead of with somebody else's DEM.
  */
 
 import type { RuntimeConfig } from './offline'
@@ -30,12 +35,31 @@ export interface VectorBaseLayerDefinition extends BaseLayerCommon {
   fallback: ThumbnailLayerDefinition
 }
 
-export type BaseLayerDefinition = RasterBaseLayerDefinition | VectorBaseLayerDefinition
+/** A base map drawn only from the elevation model: shaded relief on paper. */
+export interface ReliefBaseLayerDefinition extends BaseLayerCommon {
+  kind: 'relief'
+  dem: DemLayerDefinition
+  fallback: ThumbnailLayerDefinition
+}
+
+export type BaseLayerDefinition =
+  | RasterBaseLayerDefinition
+  | VectorBaseLayerDefinition
+  | ReliefBaseLayerDefinition
 
 export interface ThumbnailLayerDefinition {
   url: string
   attribution: string
   maxZoom: number
+}
+
+/** Terrain-RGB elevation tiles, shaded client-side with MapLibre. */
+export interface DemLayerDefinition {
+  url: string
+  encoding: 'terrarium'
+  /** Deepest zoom the DEM is published at; deeper views overzoom it. */
+  maxZoom: number
+  attribution: string
 }
 
 const OSM_ATTRIBUTION =
@@ -56,6 +80,20 @@ const OSM_THUMBNAIL_LAYER: ThumbnailLayerDefinition = {
   url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
   attribution: OSM_ATTRIBUTION,
   maxZoom: 19,
+}
+
+/*
+ * The mirror's copy of the AWS Terrarium set. It sends CORS headers, so the
+ * browser reads it directly with or without a backend, like the no-backend
+ * OpenFreeMap style above it in BASE_LAYERS.
+ */
+const TERRARIUM_DEM: DemLayerDefinition = {
+  url: 'https://oms.rbel.co/elevation/terrarium/{z}/{x}/{y}.png',
+  encoding: 'terrarium',
+  maxZoom: 15,
+  attribution:
+    'Relief: <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md">' +
+    'Terrain Tiles</a> (USGS, Copernicus &amp; others)',
 }
 
 const EMPTY_TILE_LAYER: RasterBaseLayerDefinition = {
@@ -126,24 +164,16 @@ export const BASE_LAYERS: BaseLayerDefinition[] = [
   {
     id: 'relief',
     label: 'Relief',
-    title: 'Esri World Shaded Relief — landform shape without clutter',
-    kind: 'raster',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}',
-    attribution: 'Copyright &copy; 2014 Esri',
-    maxZoom: 13,
+    title: 'Shaded relief — landform shape without clutter',
+    kind: 'relief',
+    dem: TERRARIUM_DEM,
+    attribution: TERRARIUM_DEM.attribution,
+    fallback: OSM_THUMBNAIL_LAYER,
   },
 ]
 
 /** Semi-transparent relief, drawn between the base tiles and the track. */
-export const HILLSHADE_LAYER = {
-  url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
-  attribution:
-    '<a href="https://goto.arcgisonline.com/maps/Elevation/World_Hillshade" ' +
-    'title="Sources: Esri, Vantor, Airbus DS, USGS, NGA, NASA, CGIAR, N Robinson, NCEAS, NLS, OS, NMA, ' +
-    'Geodatastyrelsen, Rijkswaterstaat, GSA, Geoland, FEMA, Intermap, and the GIS user community">' +
-    'Hillshade &copy; Esri and data providers</a>',
-  maxZoom: 16,
-}
+export const HILLSHADE_LAYER: DemLayerDefinition = TERRARIUM_DEM
 
 export function getBaseLayer(id: string): BaseLayerDefinition {
   return getBaseLayerFrom(BASE_LAYERS, id)
@@ -210,7 +240,7 @@ export function runtimeTerrainLayers(runtime?: RuntimeConfig): BaseLayerDefiniti
   })
 }
 
-export function runtimeHillshadeLayer(runtime?: RuntimeConfig): typeof HILLSHADE_LAYER | undefined {
+export function runtimeHillshadeLayer(runtime?: RuntimeConfig): DemLayerDefinition | undefined {
   return runtime?.offline?.mode === 'cache-only' ? undefined : HILLSHADE_LAYER
 }
 

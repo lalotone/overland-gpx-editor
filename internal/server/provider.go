@@ -25,6 +25,7 @@ const (
 	defaultMaxPendingOutbound            = 64
 	defaultMaxPendingOutboundPerProvider = 16
 	defaultOutboundFetchTimeout          = 30 * time.Second
+	overpassFetchTimeout                 = 90 * time.Second
 )
 
 // offlineModeController linearizes runtime mode changes with transport starts.

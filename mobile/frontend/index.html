@@ -1,2 +1,83 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" /><meta name="theme-color" content="#f6f4ec" /><title>Overland</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f3329" />
+    <title>Overland</title>
+    <!--
+      The splash is plain markup and CSS so it paints before any JavaScript is
+      parsed: it continues the native Android splash and the bootstrap page in
+      the same colours and layout, and the app fades it out once it is ready
+      (src/splash.ts). Keep it in step with mobile/cmd/overland/main_android.go.
+    -->
+    <style>
+      html, body { margin: 0; background: #1f3329; }
+      #splash {
+        position: fixed; inset: 0; z-index: 10000;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        padding: var(--safe-top, env(safe-area-inset-top, 0px)) 24px var(--safe-bottom, env(safe-area-inset-bottom, 0px));
+        background: radial-gradient(120% 70% at 50% 38%, #2c4638 0%, #1f3329 58%, #182920 100%);
+        color: #f3f1e8;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        transition: opacity 320ms ease, visibility 0s linear 320ms;
+      }
+      #splash.done { opacity: 0; visibility: hidden; pointer-events: none; }
+      .splash-mark { width: 112px; height: 112px; overflow: visible; }
+      .splash-ridge { fill: #f3f1e8; transform-origin: 54px 80px; animation: splash-rise 700ms cubic-bezier(.2,.8,.2,1) both; }
+      .splash-ridge-far { fill: #8fb39c; opacity: .55; animation-delay: 80ms; }
+      .splash-trail {
+        fill: none; stroke: #e0844f; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round;
+        stroke-dasharray: 120; stroke-dashoffset: 120;
+        animation: splash-draw 1100ms 450ms cubic-bezier(.45,.05,.25,1) forwards;
+      }
+      .splash-pin { fill: #e0844f; opacity: 0; animation: splash-pop 300ms 1450ms ease-out forwards; }
+      .splash-word {
+        margin-top: 26px; font-size: 21px; font-weight: 800; letter-spacing: .32em; padding-left: .32em;
+        animation: splash-fade 600ms 250ms ease both;
+      }
+      .splash-tagline {
+        margin-top: 8px; font-size: 13px; letter-spacing: .02em; color: #b9cbbd;
+        animation: splash-fade 600ms 400ms ease both;
+      }
+      .splash-foot {
+        position: absolute; left: 0; right: 0; bottom: calc(44px + var(--safe-bottom, env(safe-area-inset-bottom, 0px)));
+        display: flex; flex-direction: column; align-items: center; gap: 12px;
+      }
+      .splash-bar { width: 132px; height: 3px; border-radius: 3px; background: #ffffff1f; overflow: hidden; }
+      .splash-bar::after {
+        content: ''; display: block; width: 40%; height: 100%; border-radius: inherit; background: #e0844f;
+        animation: splash-slide 1300ms ease-in-out infinite;
+      }
+      #splash-status { min-height: 16px; font-size: 12px; color: #9fb4a5; text-align: center; max-width: 280px; }
+      @keyframes splash-rise { from { opacity: 0; transform: translateY(10px) scale(.96); } to { opacity: 1; transform: none; } }
+      @keyframes splash-draw { to { stroke-dashoffset: 0; } }
+      @keyframes splash-pop { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: none; } }
+      @keyframes splash-fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+      @keyframes splash-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(260%); } }
+      @media (prefers-reduced-motion: reduce) {
+        #splash *, #splash *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; }
+        .splash-trail { stroke-dashoffset: 0; }
+        .splash-pin { opacity: 1; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="splash" role="status" aria-live="polite" aria-label="Opening Overland">
+      <svg class="splash-mark" viewBox="0 0 108 108" aria-hidden="true">
+        <path class="splash-ridge splash-ridge-far" d="M48 80 L70 44 L84 62 L91 52 L104 80 Z" />
+        <path class="splash-ridge" d="M6 80 L38 28 L54 54 L64 38 L92 80 Z" />
+        <path class="splash-trail" d="M20 100 C 34 96, 44 92, 40 84 S 46 70, 54 66 S 58 56, 54 54" />
+        <circle class="splash-pin" cx="54" cy="54" r="4.5" />
+      </svg>
+      <div class="splash-word">OVERLAND</div>
+      <div class="splash-tagline">Routes beyond the road</div>
+      <div class="splash-foot">
+        <div class="splash-bar"></div>
+        <div id="splash-status">Opening maps and routing…</div>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

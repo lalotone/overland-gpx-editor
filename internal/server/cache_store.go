@@ -174,7 +174,7 @@ func openCacheStore(dir string, maxBytes int64, maxEntries int, enforceLimits bo
 	}
 	s.root = root
 	s.removeFile = root.Remove
-	if err := s.root.Chmod(".", 0o700); err != nil {
+	if err := chmodIn(s.root, ".", 0o700); err != nil {
 		s.root.Close()
 		return nil, fmt.Errorf("secure offline cache: %w", err)
 	}
@@ -187,7 +187,7 @@ func openCacheStore(dir string, maxBytes int64, maxEntries int, enforceLimits bo
 			s.root.Close()
 			return nil, fmt.Errorf("create offline cache: %w", err)
 		}
-		if err := s.root.Chmod(path, 0o700); err != nil {
+		if err := chmodIn(s.root, path, 0o700); err != nil {
 			s.root.Close()
 			return nil, fmt.Errorf("secure offline cache: %w", err)
 		}
@@ -886,7 +886,7 @@ func (s *cacheStore) putWithAdmission(meta cacheMetadata, body []byte, admit fun
 	if err := s.root.MkdirAll(filepath.Dir(bodyPath), 0o700); err != nil {
 		return 0, err
 	}
-	_ = s.root.Chmod(filepath.Dir(bodyPath), 0o700)
+	_ = chmodIn(s.root, filepath.Dir(bodyPath), 0o700)
 	if err := replaceCachePairAt(s.root, s.tmpRel, bodyPath, metaPath, body, raw, replacing); err != nil {
 		return 0, err
 	}

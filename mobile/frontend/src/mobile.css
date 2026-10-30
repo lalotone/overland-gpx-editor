@@ -106,7 +106,7 @@ small {
   font-size: 12px;
 }
 .mobile-app {
-  --nav: calc(68px + env(safe-area-inset-bottom, 0px));
+  --nav: calc(68px + var(--safe-bottom, env(safe-area-inset-bottom, 0px)));
   --sheet: min(340px, 40dvh);
   position: relative;
   width: 100%;
@@ -141,7 +141,7 @@ small {
 .incoming-gpx {
   position: absolute;
   z-index: 880;
-  top: calc(74px + env(safe-area-inset-top, 0px));
+  top: calc(74px + var(--safe-top, env(safe-area-inset-top, 0px)));
   left: 12px;
   right: 12px;
   display: flex;
@@ -299,7 +299,7 @@ small {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 16px;
+  padding: calc(12px + var(--safe-top, env(safe-area-inset-top, 0px))) 16px 16px;
   flex-shrink: 0;
 }
 .region-browser-header h1 {
@@ -500,7 +500,7 @@ small {
 .map-header {
   position: absolute;
   z-index: 450;
-  top: calc(16px + env(safe-area-inset-top, 0px));
+  top: calc(16px + var(--safe-top, env(safe-area-inset-top, 0px)));
   left: 20px;
   right: 20px;
   display: flex;
@@ -548,7 +548,7 @@ small {
   position: absolute;
   z-index: 450;
   right: 16px;
-  top: calc(79px + env(safe-area-inset-top, 0px));
+  top: calc(79px + var(--safe-top, env(safe-area-inset-top, 0px)));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -736,14 +736,14 @@ small {
 .route-info-overlay {
   position: absolute;
   z-index: 520;
-  top: calc(76px + env(safe-area-inset-top, 0px));
+  top: calc(76px + var(--safe-top, env(safe-area-inset-top, 0px)));
   left: 20px;
   right: 20px;
   padding: 12px 20px 18px;
   border-radius: 20px;
   background: var(--m-bg-fffef9f5);
   box-shadow: 0 8px 30px #233c3125;
-  max-height: calc(100% - var(--nav) - 96px - env(safe-area-inset-top, 0px));
+  max-height: calc(100% - var(--nav) - 96px - var(--safe-top, env(safe-area-inset-top, 0px)));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -794,7 +794,7 @@ small {
   position: absolute;
   z-index: 460;
   left: 20px;
-  top: calc(78px + env(safe-area-inset-top, 0px));
+  top: calc(78px + var(--safe-top, env(safe-area-inset-top, 0px)));
   display: flex;
   align-items: center;
   gap: 8px;
@@ -881,7 +881,7 @@ small {
   bottom: 0;
   height: var(--nav);
   width: 100%;
-  padding: 4px 12px env(safe-area-inset-bottom, 0px);
+  padding: 4px 12px var(--safe-bottom, env(safe-area-inset-bottom, 0px));
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   background: var(--m-bg-fffef9);
@@ -1349,7 +1349,7 @@ progress {
 .layers-popover {
   position: absolute;
   z-index: 480;
-  top: calc(65px + env(safe-area-inset-top, 0px));
+  top: calc(65px + var(--safe-top, env(safe-area-inset-top, 0px)));
   right: 70px;
   width: 205px;
   padding: 12px;
@@ -1420,7 +1420,7 @@ progress {
   z-index: 1000;
   left: 18px;
   right: 18px;
-  top: calc(14px + env(safe-area-inset-top, 0px));
+  top: calc(14px + var(--safe-top, env(safe-area-inset-top, 0px)));
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2036,4 +2036,111 @@ html.theme-dark .insight-switch-track {
 .setting-group .segmented button {
   min-height: 36px;
   font-size: 13px;
+}
+
+/* -- Wide and landscape screens -------------------------------------- */
+/*
+ * The app used to be capped at 640px and centred, so a phone in landscape
+ * (a handlebar mount) or a tablet showed the map in a strip between two
+ * bars. The map now always uses the whole screen; reading panels keep a
+ * comfortable width instead.
+ */
+.mobile-app {
+  max-width: none;
+}
+.map-pois,
+.offline-map-control,
+.toast,
+.startup-notice,
+.incoming-gpx {
+  max-width: 560px;
+  margin-inline: auto;
+}
+.map-search {
+  max-width: 560px;
+}
+
+/* Short landscape screens: sheets dock beside the map rather than under it. */
+@media (orientation: landscape) and (max-height: 560px) {
+  .mobile-app,
+  .mobile-app.sheet-expanded,
+  .mobile-app.plan-open {
+    --sheet: 0px;
+  }
+  .map-stage {
+    inset: 0 0 var(--nav);
+  }
+  .bottom-sheet {
+    top: calc(8px + var(--safe-top, env(safe-area-inset-top, 0px)));
+    left: var(--safe-left, env(safe-area-inset-left, 0px));
+    width: min(400px, 46vw);
+    height: auto;
+    border-radius: 0 22px 22px 0;
+    box-shadow: 8px 0 28px #22372b26;
+  }
+  .route-info-overlay {
+    right: auto;
+    left: calc(12px + var(--safe-left, env(safe-area-inset-left, 0px)));
+    width: min(440px, 50vw);
+    top: calc(12px + var(--safe-top, env(safe-area-inset-top, 0px)));
+    max-height: calc(100% - var(--nav) - 24px - var(--safe-top, env(safe-area-inset-top, 0px)));
+  }
+  .map-header {
+    left: calc(20px + var(--safe-left, env(safe-area-inset-left, 0px)));
+    right: calc(20px + var(--safe-right, env(safe-area-inset-right, 0px)));
+  }
+  .map-actions {
+    right: calc(16px + var(--safe-right, env(safe-area-inset-right, 0px)));
+  }
+  .bottom-nav {
+    padding-left: var(--safe-left, env(safe-area-inset-left, 0px));
+    padding-right: var(--safe-right, env(safe-area-inset-right, 0px));
+  }
+}
+
+/* -- You are here ---------------------------------------------------- */
+
+.my-location { background: none; border: none; }
+.my-location-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #2f80ed33;
+  animation: my-location-pulse 2.4s ease-out infinite;
+}
+.my-location-dot {
+  position: absolute;
+  inset: 13px;
+  border-radius: 50%;
+  background: #2f80ed;
+  border: 3px solid #fff;
+  box-shadow: 0 2px 8px #0000004d;
+}
+@keyframes my-location-pulse {
+  0% { transform: scale(0.45); opacity: 1; }
+  100% { transform: scale(1.15); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .my-location-ring { animation: none; }
+}
+
+/* -- Status bar scrim ------------------------------------------------ */
+/*
+ * The app is drawn under the status bar, over a map that stays light in both
+ * themes. A short fade in the theme colour keeps the clock and icons legible
+ * whatever the map shows, as map apps do.
+ */
+.mobile-app::before {
+  content: '';
+  position: absolute;
+  z-index: 440;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 14px);
+  background: linear-gradient(to bottom, #f6f4eccc, #f6f4ec00);
+  pointer-events: none;
+}
+html.theme-dark .mobile-app::before {
+  background: linear-gradient(to bottom, #101411d9, #10141100);
 }

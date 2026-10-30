@@ -3780,6 +3780,7 @@ function App() {
                 {rideTab === 'surface' && (trackAnnotation?.status === 'ready' ? (
                   <SurfaceBreakdown
                     summary={trackAnnotation.result.summary}
+                    unmatchedKm={trackAccess?.km.unknown}
                     colorBySurface={trackColorMode === 'surface'}
                     onToggleColor={() => setColorMode(trackColorMode === 'surface' ? 'slope' : 'surface')}
                     matched

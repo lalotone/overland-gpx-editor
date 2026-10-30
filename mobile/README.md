@@ -6,6 +6,10 @@ continues to use its existing entry point.
 
 ## Interface
 
+- **Landscape** (a handlebar mount) uses the full width: sheets and Route
+  details dock on the left and tracks fit into the visible map beside them.
+- **My location** marks where you are and explains how to fix a denied
+  permission or switched-off location.
 - **Explore:** full-screen map, place search at the top, fuel/water/camp overlays
   at the bottom. Map layers, location, track fitting and **What's around here**
   are floating controls. Map credits stay on screen as one line and expand on tap.
@@ -134,6 +138,12 @@ adb shell am start -n co.overland.mobile/com.wails.app.MainActivity
 Use `install -r`, not uninstall/install: uninstalling removes the library and
 downloaded regions. The application ID is `co.overland.mobile`.
 
+Set `JAVA_HOME` to a full JDK (with `javac`), not a JRE: Gradle needs the
+compiler. For the **x86_64 emulator**, build a debug APK with
+`OVERLAND_ANDROID_ABI=x86_64 bash mobile/build-android.sh debug`; the emulator's
+ARM translation cannot run the Go library (it stops with SIGILL). Release
+builds are always ARM64.
+
 `make android-release` builds a production-mode APK at
 **`build/android/overland-release.apk`**. Wails uses
 the Android debug keystore unless `ANDROID_KEYSTORE_FILE`,
@@ -213,6 +223,14 @@ node mobile/e2e/device-smoke.mjs --prepare
 node mobile/e2e/device-restart.mjs
 ```
 
+Older Android System WebViews (emulator images among them) reject a DevTools
+call Playwright's `connectOverCDP` makes. `device-smoke-cdp.mjs` runs the same
+smoke check over raw DevTools (`cdp.mjs`) and works with any WebView:
+
+```sh
+node mobile/e2e/device-smoke-cdp.mjs --prepare
+```
+
 The smoke script explicitly downloads **Monaco**, then verifies all four riding
 profiles in cache-only mode. The restart script checks recovery of the existing
 draft without editing it. Set `ANDROID_SERIAL` when multiple devices are attached.
@@ -260,6 +278,28 @@ foreground service independently of WebView timers. Android can still terminate
 an app or time-limit background work. Backend atomic writes and existing
 preparation/cache reuse handle interruption; the area button can retry.
 
-The native library is linked with 16 KiB segment alignment. Physical testing has
-used a Pixel 10 Pro XL (Android 17, Vanadium 153, 4 KiB pages); a 16 KiB device
-runtime has not been tested.
+The native library is linked with 16 KiB segment alignment (every `LOAD` segment
+at `0x4000`, APK zip-aligned for 16 KiB). Physical testing has used a Pixel 10
+Pro XL (Android 17, Vanadium 153, 4 KiB pages). Emulator testing covers Android
+16 (Pixel 7 image, 4 KiB pages) and Android 15 with **16 KiB pages**: launch,
+Monaco download and graph build, and routing in all four profiles in cache-only
+mode, with the x86_64 debug build.
+
+## Platform notes
+
+- **No `os.Root.Chmod` in the server.** It needs the `fchmodat2` syscall, which
+  Android's app seccomp policy can answer by killing the process (SIGSYS)
+  rather than with an error; it crashed the app at launch on Android 16.
+  `chmodIn` uses `fchmod` on a descriptor opened through the root instead, and
+  a test keeps `Root.Chmod` out of `internal/server`.
+- **Back goes through `OnBackPressedDispatcher`.** With `targetSdk 36`, Android
+  16 enables predictive back and no longer calls `onBackPressed`.
+- **Edge to edge.** Android 15+ draws the app under the system bars and the
+  WebView reports zero safe-area insets. `OverlandChrome` (a two-method native
+  interface) supplies the insets as `--safe-*` CSS variables and sets light or
+  dark bar icons to suit the theme; a short scrim keeps the status bar legible
+  over the map.
+- **Launch** shows one continuous splash: the Android 12+ system splash, the
+  same mark on the Wails bootstrap page, then a splash inline in `index.html`
+  that paints before any JavaScript and fades once the draft is restored, the
+  backend answers and the map has drawn (at most 8 s).

@@ -1,5 +1,6 @@
 """Apply small, checked Android host adaptations to pinned Wails templates."""
 from pathlib import Path
+import os
 import shutil
 
 root = Path(__file__).resolve().parent.parent
@@ -10,8 +11,16 @@ for name, dest in {
     "network_security_config.xml": main / "res/xml/network_security_config.xml",
     "file_paths.xml": main / "res/xml/file_paths.xml",
     "overland_icon.xml": main / "res/drawable/overland_icon.xml",
+    "overland_splash.xml": main / "res/drawable/overland_splash.xml",
+    "overland_icon_foreground.xml": main / "res/drawable/overland_icon_foreground.xml",
+    "overland_icon_monochrome.xml": main / "res/drawable/overland_icon_monochrome.xml",
+    "overland_launcher.xml": main / "res/mipmap-anydpi-v26/overland_launcher.xml",
+    "themes.xml": main / "res/values/themes.xml",
+    "themes_v31.xml": main / "res/values-v31/themes.xml",
     "IncomingGpx.java": main / "java/com/wails/app/IncomingGpx.java",
+    "OverlandChrome.java": main / "java/com/wails/app/OverlandChrome.java",
     "test/IncomingGpxTest.java": project / "app/src/test/java/com/wails/app/IncomingGpxTest.java",
+    "lint.xml": project / "app/lint.xml",
 }.items():
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / "android" / name, dest)
@@ -31,7 +40,11 @@ replace(gradle, 'applicationId "com.wails.app"', 'applicationId "co.overland.mob
 replace(gradle, 'compileSdk 35', 'compileSdk 36')
 replace(gradle, 'targetSdk 35', 'targetSdk 36')
 replace(gradle, 'minSdk 21', 'minSdk 26')
-replace(gradle, "abiFilters 'arm64-v8a', 'x86_64'", "abiFilters 'arm64-v8a'")
+# One ABI per APK: arm64-v8a for phones, x86_64 only for emulator debug builds.
+abi = os.environ.get("OVERLAND_ANDROID_ABI", "arm64-v8a")
+if abi not in ("arm64-v8a", "x86_64"):
+    raise SystemExit(f"unsupported OVERLAND_ANDROID_ABI {abi!r}")
+replace(gradle, "abiFilters 'arm64-v8a', 'x86_64'", f"abiFilters '{abi}'")
 replace(gradle, 'dependencies {', "dependencies {\n    testImplementation 'junit:junit:4.13.2'")
 
 # Wails' share API currently only shares text. Extend it with a constrained
@@ -56,7 +69,14 @@ replace(bridge, 'String text = opts.optString("text", "");', '''String path = op
 # Native interfaces must never be exposed to a page from an external origin.
 activity = main / "java/com/wails/app/MainActivity.java"
 replace(activity, '        loadApplication();', '''        loadApplication();
-        if (savedInstanceState == null) IncomingGpx.receive(this, getIntent());''')
+        if (savedInstanceState == null) IncomingGpx.receive(this, getIntent());
+        // targetSdk 36 turns predictive back on: Android 16 never calls
+        // onBackPressed, so without a dispatcher callback every back press
+        // closed the app instead of the open sheet or tab.
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() { handleBack(); }
+        });''')
 replace(activity, '    private void loadApplication() {', '''    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -65,6 +85,9 @@ replace(activity, '    private void loadApplication() {', '''    @Override
 
     private void loadApplication() {''')
 replace(activity, 'private WebView webView;', 'private WebView webView;\n    private String overlandOrigin;')
+# Paint the splash green until the first page draws: the WebView default is white.
+# OverlandChrome reports system bar insets and sets the bar icon colours.
+replace(activity, '        webView = findViewById(R.id.webview);', '        webView = findViewById(R.id.webview);\n        webView.setBackgroundColor(0xFF1F3329);\n        webView.addJavascriptInterface(new OverlandChrome(this), "OverlandChrome");')
 replace(activity, 'webView.setWebViewClient(new WebViewClient() {', '''webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -80,6 +103,9 @@ replace(activity, 'webView.setWebViewClient(new WebViewClient() {', '''webView.s
                 if ("https".equals(uri.getScheme())) startActivity(new Intent(Intent.ACTION_VIEW, uri));
                 return true;
             }''')
+replace(activity, '''    @Override
+    public void onBackPressed() {''', '''    private void handleBack() {''')
+replace(activity, '            super.onBackPressed();', '            moveTaskToBack(true);')
 replace(activity, 'if (webView != null && webView.canGoBack()) {', '''if (webView != null && webView.getUrl() != null && webView.getUrl().startsWith("http://127.0.0.1:")) {
             webView.evaluateJavascript("!window.dispatchEvent(new Event('overland:back', {cancelable:true}))", result -> { if ("false".equals(result)) moveTaskToBack(true); });
         } else if (webView != null && webView.canGoBack()) {''')

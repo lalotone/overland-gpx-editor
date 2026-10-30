@@ -30,14 +30,16 @@ func main() {
 			defer urlMu.RUnlock()
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if startURL == "" {
-				fmt.Fprint(w, `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><script>setTimeout(()=>location.reload(),100)</script><body style="background:#f6f4ec;color:#24372e;font:20px sans-serif;padding:64px 28px"><h1>Overland</h1><p>Opening Overland…</p>`)
+				status := "Opening maps and routing…"
+				reload := `<script>setTimeout(()=>location.reload(),100)</script>`
 				if startupError != "" {
-					fmt.Fprint(w, "<p>Could not start. Close and reopen Overland.</p>")
+					status, reload = "Could not start. Close and reopen Overland.", ""
 				}
+				fmt.Fprintf(w, bootstrapPage, reload, status)
 				return
 			}
 			encoded, _ := json.Marshal(startURL)
-			fmt.Fprintf(w, `<!doctype html><meta name="referrer" content="no-referrer"><script>location.replace(%s)</script>`, encoded)
+			fmt.Fprintf(w, `<!doctype html><meta name="referrer" content="no-referrer"><body style="margin:0;background:#1f3329"><script>location.replace(%s)</script>`, encoded)
 		})},
 	})
 	app.Window.NewWithOptions(application.WebviewWindowOptions{Title: "Overland"})
@@ -129,3 +131,15 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// bootstrapPage is shown while the Go host starts. It is the web splash in
+// mobile/frontend/index.html without its animation, so the native splash,
+// this page and the app's own splash read as one continuous screen.
+const bootstrapPage = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">%s
+<style>html,body{margin:0;height:100%%;background:#1f3329}body{display:flex;flex-direction:column;align-items:center;justify-content:center;
+background:radial-gradient(120%% 70%% at 50%% 38%%,#2c4638 0%%,#1f3329 58%%,#182920 100%%);color:#f3f1e8;font-family:system-ui,sans-serif}
+.w{margin-top:26px;font-size:21px;font-weight:800;letter-spacing:.32em;padding-left:.32em}.t{margin-top:8px;font-size:13px;color:#b9cbbd}
+.s{position:absolute;bottom:44px;left:0;right:0;text-align:center;font-size:12px;color:#9fb4a5}</style>
+<svg width="112" height="112" viewBox="0 0 108 108" aria-hidden="true"><path fill="#8fb39c" opacity=".55" d="M48 80 L70 44 L84 62 L91 52 L104 80 Z"/>
+<path fill="#f3f1e8" d="M6 80 L38 28 L54 54 L64 38 L92 80 Z"/><path fill="none" stroke="#e0844f" stroke-width="5" stroke-linecap="round" d="M20 100 C 34 96, 44 92, 40 84 S 46 70, 54 66 S 58 56, 54 54"/>
+<circle fill="#e0844f" cx="54" cy="54" r="4.5"/></svg><div class="w">OVERLAND</div><div class="t">Routes beyond the road</div><div class="s">%s</div>`

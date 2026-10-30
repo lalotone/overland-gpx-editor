@@ -110,6 +110,7 @@ export default function MobileMap({
   onMap,
   onMovePoint,
   onError,
+  onFirstRender,
   children,
 }: {
   runtime: RuntimeConfig
@@ -125,6 +126,8 @@ export default function MobileMap({
   onMap: (map: L.Map) => void
   onMovePoint: (index: number, point: Coordinate) => void
   onError: (message: string) => void
+  /** The base map has drawn its first view; the launch splash can go. */
+  onFirstRender?: () => void
   /** Session overlays drawn above the track: access stretches, nearby places. */
   children?: ReactNode
 }) {
@@ -152,6 +155,7 @@ export default function MobileMap({
         hillshadeOpacity={0.25}
         hillshadeLayer={runtimeHillshadeLayer(runtime)}
         onVectorStatus={vectorStatus}
+        onFirstRender={onFirstRender}
       />}
       <Events points={points} onMovePoint={onMovePoint} onView={onView} onMap={onMap} />
       {coordinates.length > 1 && (

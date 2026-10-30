@@ -139,7 +139,7 @@ func (h *Host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Commit the loopback origin before navigating again: an HTTP redirect
 		// from wails.localhost would withhold a SameSite=Strict cookie.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, `<!doctype html><meta name="referrer" content="no-referrer"><script>location.replace("/")</script>`)
+		_, _ = io.WriteString(w, `<!doctype html><meta name="referrer" content="no-referrer"><body style="margin:0;background:#1f3329"><script>location.replace("/")</script>`)
 		return
 	}
 	cookie, err := r.Cookie("overland")

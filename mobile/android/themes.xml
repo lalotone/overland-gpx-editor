@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Overland's own theme, replacing the Wails template's blue. The window
+  background is the splash green, so every launch stage (native splash,
+  bootstrap page, web splash) shares one colour with no white or navy flash.
+-->
+<resources>
+    <color name="overland_splash">#1F3329</color>
+    <color name="overland_forest">#365D46</color>
+    <color name="overland_forest_dark">#233C31</color>
+    <style name="Theme.WailsApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/overland_forest</item>
+        <item name="colorPrimaryVariant">@color/overland_forest_dark</item>
+        <item name="colorOnPrimary">@android:color/white</item>
+        <item name="android:statusBarColor">@color/overland_splash</item>
+        <item name="android:navigationBarColor">@color/overland_splash</item>
+        <item name="android:windowBackground">@color/overland_splash</item>
+    </style>
+</resources>

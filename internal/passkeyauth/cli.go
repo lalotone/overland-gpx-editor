@@ -42,18 +42,57 @@ type userOptions struct {
 
 // parseInterspersed lets flags follow positional arguments, as in
 // "myapp user add alice --ttl 1h".
+//
+// Passkey IDs are base64url, whose alphabet includes '-', so "revoke alice
+// -JPBScF4" must treat the ID as an argument rather than fail as an unknown
+// flag. A single-dash token is a flag only if this command defines it; an
+// unknown "--name" is still reported, since that is how a typo looks. "--"
+// ends the flags as usual: everything after it is positional.
 func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	var positional []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			return nil, err
+	var positional, flags []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
 		}
-		if fs.NArg() == 0 {
-			return positional, nil
+		name, hasValue := flagName(arg)
+		defined := name != "" && fs.Lookup(name) != nil
+		if !defined && strings.HasPrefix(arg, "--") {
+			return nil, fmt.Errorf("flag provided but not defined: %s (an argument starting with '-' can follow --)", arg)
 		}
-		positional = append(positional, fs.Arg(0))
-		args = fs.Args()[1:]
+		if !defined {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		// A non-boolean flag written "--ttl 1h" takes the next token as its value.
+		if !hasValue && !isBoolFlag(fs.Lookup(name)) && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
 	}
+	if err := fs.Parse(flags); err != nil {
+		return nil, err
+	}
+	return positional, nil
+}
+
+// flagName returns the name in "-name", "--name" or "--name=value".
+func flagName(arg string) (name string, hasValue bool) {
+	if len(arg) < 2 || arg[0] != '-' {
+		return "", false
+	}
+	name = strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+	if before, _, found := strings.Cut(name, "="); found {
+		return before, true
+	}
+	return name, false
+}
+
+func isBoolFlag(f *flag.Flag) bool {
+	b, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
 }
 
 // CommandOptions configures Command for the host program.

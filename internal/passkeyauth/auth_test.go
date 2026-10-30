@@ -612,7 +612,8 @@ func TestRevokeEndsSessions(t *testing.T) {
 	key, session := f.newUser(t, "alice")
 	require.Equal(t, http.StatusOK, f.do(t, "GET", "/auth/api/me", nil, session).Code)
 	var out bytes.Buffer
-	err := Command([]string{"revoke", "alice", b64(key.id)[:8], "--db", filepath.Join(f.dir, "accounts.db")},
+	// The ID is random base64url and may begin with '-' or "--": pass it after --.
+	err := Command([]string{"revoke", "--db", filepath.Join(f.dir, "accounts.db"), "alice", "--", b64(key.id)[:8]},
 		strings.NewReader(""), &out, CommandOptions{Program: "test user", DefaultOrigin: testOrigin})
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "ended 1 session(s)")

@@ -502,7 +502,7 @@ test('offline regions manager downloads a region and reports its progress', asyn
   await expect(routingCard.getByRole('list', { name: 'Routing steps' }).locator('[aria-current="step"]')).toHaveText('Terrain')
   await expect(routingCard).toContainText('Downloading terrain · 12 of 55 tiles (8 new, 4 reused)')
   await expect(routingCard.getByRole('progressbar', { name: 'Current routing step progress' })).toHaveAttribute('value', '22')
-  await expect(manager.getByText('4.00 KiB of routing data (last measured)')).toBeVisible()
+  await expect(manager.getByText('4.00 KiB of routing data')).toBeVisible()
   // Storage inspection is explicit (once per opening), never part of polling.
   const summaryAfterOpen = summaryRequests
   expect(summaryAfterOpen).toBeGreaterThan(0)
@@ -636,11 +636,11 @@ test('a country without catalogue regions offers grid areas to download one by o
   await expect(manager.getByRole('region', { name: 'Routing' })).toContainText('One download for all of Morocco')
   const areas = manager.getByRole('list', { name: 'Areas' })
   await expect(areas.getByRole('listitem')).toHaveCount(12)
-  await areas.getByRole('button', { name: /Morocco · row 2, column 1/ }).click()
+  await areas.getByRole('button', { name: /Morocco · north-west/ }).click()
   await manager.getByRole('button', { name: 'Download everything' }).click()
-  await expect.poll(() => started).toEqual(['Map: Morocco · row 2, column 1'])
+  await expect.poll(() => started).toEqual(['Map: Morocco · north-west'])
   expect(prepared).toEqual(['morocco'])
-  await expect(manager.getByRole('heading', { name: 'Morocco · row 2, column 1' })).toBeVisible()
+  await expect(manager.getByRole('heading', { name: 'Morocco · north-west' })).toBeVisible()
 })
 
 test('routing and each offline resource download separately', async ({ page }) => {
@@ -746,7 +746,7 @@ test('offline regions manager lists, inspects and removes stored downloads', asy
   const manager = page.getByRole('dialog', { name: 'Offline regions' })
   await expect(manager.getByRole('tab', { name: 'Downloads' })).toHaveAttribute('aria-selected', 'true')
   const regions = manager.getByRole('region', { name: 'Downloaded regions' })
-  await expect(regions).toContainText('Routing and maps downloaded')
+  await expect(regions).toContainText('Routing, maps, terrain and POIs downloaded')
   await expect(regions).toContainText('In use')
 
   const maps = manager.getByRole('region', { name: 'Map downloads' })

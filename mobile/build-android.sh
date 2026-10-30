@@ -5,13 +5,23 @@ WAILS_VERSION=v3.0.0-beta.25
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
 NDK="${ANDROID_NDK_HOME:-$SDK/ndk/27.2.12479018}"
 if [[ ! -d "$NDK" && -z "${ANDROID_NDK_HOME:-}" ]]; then NDK="$SDK/ndk/android-ndk-r27c"; fi
-if [[ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang" ]]; then
+MODE="${1:-debug}"
+case "$MODE" in debug|release) ;; *) printf 'Usage: %s [debug|release]\n' "$0"; exit 1;; esac
+# Phones are ARM64. OVERLAND_ANDROID_ABI=x86_64 builds a debug APK for the x86_64
+# emulator: its ARM translation cannot run the Go library (SIGILL).
+ARCH="${OVERLAND_ANDROID_ABI:-arm64-v8a}"
+case "$ARCH" in
+  arm64-v8a) GOARCH_TARGET=arm64; CLANG=aarch64-linux-android26-clang ;;
+  x86_64)
+    [[ "$MODE" == debug ]] || { printf 'x86_64 is for emulator debug builds only.\n' >&2; exit 1; }
+    GOARCH_TARGET=amd64; CLANG=x86_64-linux-android26-clang ;;
+  *) printf 'OVERLAND_ANDROID_ABI must be arm64-v8a or x86_64.\n' >&2; exit 1 ;;
+esac
+export OVERLAND_ANDROID_ABI="$ARCH"
+if [[ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/$CLANG" ]]; then
   printf 'Install Android NDK r27c or set ANDROID_NDK_HOME to its directory.\n' >&2
   exit 1
 fi
-ARCH=arm64-v8a
-MODE="${1:-debug}"
-case "$MODE" in debug|release) ;; *) printf 'Usage: %s [debug|release]\n' "$0"; exit 1;; esac
 mkdir -p "$ROOT/bin/tools" "$ROOT/build"
 if [[ ! -x "$ROOT/bin/tools/wails3" ]]; then
   # The host CLI only generates build assets; it needs no GTK/WebKit linkage.
@@ -23,8 +33,8 @@ python3 "$ROOT/android/configure.py"
 npm --prefix "$ROOT/.." run build:mobile
 mkdir -p "$ROOT/build/android/app/src/main/jniLibs/$ARCH"
 export ANDROID_HOME="$SDK"
-export CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-export CGO_ENABLED=1 GOOS=android GOARCH=arm64
+export CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/$CLANG"
+export CGO_ENABLED=1 GOOS=android GOARCH="$GOARCH_TARGET"
 export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
 TAGS=android,debug
 [[ "$MODE" == release ]] && TAGS=android,production

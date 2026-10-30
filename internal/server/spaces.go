@@ -79,7 +79,7 @@ func (o *ownerSpaces) open(owner Owner) (*os.Root, error) {
 	}
 	// A pre-existing directory keeps whatever mode it was created with;
 	// private data must not be group or world readable.
-	if err := o.root.Chmod(base, ownerDirMode); err != nil {
+	if err := chmodIn(o.root, base, ownerDirMode); err != nil {
 		return nil, err
 	}
 	return o.root.OpenRoot(base)

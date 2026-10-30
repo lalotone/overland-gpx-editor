@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Splash mark: the same ridge and trail as the web splash, inside the
+  system's 2/3 safe circle of a 108dp canvas, on a transparent ground.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+  <group android:scaleX="0.56" android:scaleY="0.56" android:translateX="23.8" android:translateY="22">
+    <path android:fillColor="#8FB39C" android:fillAlpha="0.55" android:pathData="M48,80 L70,44 L84,62 L91,52 L104,80 Z" />
+    <path android:fillColor="#F3F1E8" android:pathData="M6,80 L38,28 L54,54 L64,38 L92,80 Z" />
+    <path android:strokeColor="#E0844F" android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M20,100 C34,96 44,92 40,84 S46,70 54,66 S58,56 54,54" />
+    <path android:fillColor="#E0844F" android:pathData="M49.5,54 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 z" />
+  </group>
+</vector>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { maplibreGL } from '@maplibre/maplibre-gl-leaflet'
 import type { StyleSpecification } from 'maplibre-gl'
 import { TileLayer, useMap } from 'react-leaflet'
@@ -117,10 +117,12 @@ function VectorBaseLayer({
   styleUrl,
   attribution,
   onStatus,
+  onRendered,
 }: {
   styleUrl: string
   attribution: string
   onStatus?: (issue: VectorMapIssue | null) => void
+  onRendered?: () => void
 }) {
   const map = useMap()
   const webGL2 = hasWebGL2()
@@ -137,8 +139,10 @@ function VectorBaseLayer({
     if (lastLoggedRef.current === fingerprint) return
     lastLoggedRef.current = fingerprint
     onStatus?.(issue)
+    // A map that cannot draw has still finished trying; never hold a splash on it.
+    onRendered?.()
     console.error(`[vector-map] ${issue.message}${issue.resource ? ` (${issue.resource})` : ''}`)
-  }, [onStatus])
+  }, [onStatus, onRendered])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -193,15 +197,18 @@ function VectorBaseLayer({
     }
     const libreMap = layer.getMaplibreMap()
     const reportResourceFailure = (event: unknown) => reportIssue(mapLibreIssue(event))
+    const rendered = () => onRendered?.()
     libreMap.on('error', reportResourceFailure)
+    libreMap.once('idle', rendered)
     map.attributionControl.addAttribution(attribution)
 
     return () => {
       libreMap.off('error', reportResourceFailure)
+      libreMap.off('idle', rendered)
       map.attributionControl.removeAttribution(attribution)
       if (map.hasLayer(layer)) map.removeLayer(layer)
     }
-  }, [attribution, map, reportIssue, style, webGL2])
+  }, [attribution, map, onRendered, reportIssue, style, webGL2])
 
   useEffect(() => {
     if (!webGL2) {
@@ -235,12 +242,14 @@ function HillshadeLayer({
   paneZIndex,
   opacity = 1,
   background,
+  onRendered,
 }: {
   dem: DemLayerDefinition
   pane: string
   paneZIndex?: number
   opacity?: number
   background?: string
+  onRendered?: () => void
 }) {
   const map = useMap()
   const webGL2 = hasWebGL2()
@@ -296,16 +305,19 @@ function HillshadeLayer({
       console.warn(`[relief] elevation ${issue.phase} failed${issue.status ? ` with HTTP ${issue.status}` : ''}`)
     }
     const libreMap = layer.getMaplibreMap()
+    const rendered = () => onRendered?.()
     libreMap.on('error', reportFailure)
+    libreMap.once('idle', rendered)
     map.attributionControl.addAttribution(dem.attribution)
 
     return () => {
       libreMap.off('error', reportFailure)
+      libreMap.off('idle', rendered)
       map.attributionControl.removeAttribution(dem.attribution)
       if (map.hasLayer(layer)) map.removeLayer(layer)
       layerRef.current = null
     }
-  }, [background, dem, map, pane, paneZIndex, webGL2])
+  }, [background, dem, map, onRendered, pane, paneZIndex, webGL2])
 
   useEffect(() => {
     const container = layerRef.current?.getContainer()
@@ -329,6 +341,7 @@ export function MapTiles({
   onVectorStatus,
   layers,
   hillshadeLayer,
+  onFirstRender,
 }: {
   baseLayerId: string
   hillshade: boolean
@@ -336,9 +349,24 @@ export function MapTiles({
   onVectorStatus?: (issue: VectorMapIssue | null) => void
   layers: BaseLayerDefinition[]
   hillshadeLayer?: DemLayerDefinition
+  /** Called once, when the base map has first finished drawing (or given up). */
+  onFirstRender?: () => void
 }) {
   const base = getBaseLayerFrom(layers, baseLayerId)
   const webGL2 = hasWebGL2()
+  const firstRenderRef = useRef(onFirstRender)
+  firstRenderRef.current = onFirstRender
+  const firedRef = useRef(false)
+  const rendered = useCallback(() => {
+    if (firedRef.current) return
+    firedRef.current = true
+    firstRenderRef.current?.()
+  }, [])
+  // Without WebGL the vector and relief maps draw nothing at all.
+  useEffect(() => {
+    if (!webGL2 && base.kind === 'vector') rendered()
+  }, [base.kind, rendered, webGL2])
+  const tileEvents = useMemo(() => ({ load: rendered, tileerror: rendered }), [rendered])
 
   return (
     <>
@@ -349,10 +377,11 @@ export function MapTiles({
           styleUrl={base.styleUrl}
           attribution={base.attribution}
           onStatus={onVectorStatus}
+          onRendered={rendered}
         />
       ) : base.kind === 'relief' ? (
         webGL2 ? (
-          <HillshadeLayer key={base.id} dem={base.dem} pane="tilePane" background={RELIEF_BACKGROUND} />
+          <HillshadeLayer key={base.id} dem={base.dem} pane="tilePane" background={RELIEF_BACKGROUND} onRendered={rendered} />
         ) : (
           <TileLayer
             key={base.id}
@@ -360,6 +389,7 @@ export function MapTiles({
             attribution={base.fallback.attribution}
             maxZoom={base.fallback.maxZoom}
             maxNativeZoom={base.fallback.maxZoom}
+            eventHandlers={tileEvents}
           />
         )
       ) : (
@@ -369,6 +399,7 @@ export function MapTiles({
           attribution={base.attribution}
           maxZoom={base.maxZoom}
           maxNativeZoom={base.maxZoom}
+          eventHandlers={tileEvents}
         />
       )}
       {hillshade && hillshadeLayer && webGL2 && (

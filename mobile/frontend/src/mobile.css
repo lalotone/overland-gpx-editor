@@ -106,7 +106,7 @@ small {
   font-size: 12px;
 }
 .mobile-app {
-  --nav: calc(68px + env(safe-area-inset-bottom, 0px));
+  --nav: calc(68px + var(--safe-bottom, env(safe-area-inset-bottom, 0px)));
   --sheet: min(340px, 40dvh);
   position: relative;
   width: 100%;
@@ -141,7 +141,7 @@ small {
 .incoming-gpx {
   position: absolute;
   z-index: 880;
-  top: calc(74px + env(safe-area-inset-top, 0px));
+  top: calc(74px + var(--safe-top, env(safe-area-inset-top, 0px)));
   left: 12px;
   right: 12px;
   display: flex;
@@ -299,7 +299,7 @@ small {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 16px;
+  padding: calc(12px + var(--safe-top, env(safe-area-inset-top, 0px))) 16px 16px;
   flex-shrink: 0;
 }
 .region-browser-header h1 {
@@ -500,7 +500,7 @@ small {
 .map-header {
   position: absolute;
   z-index: 450;
-  top: calc(16px + env(safe-area-inset-top, 0px));
+  top: calc(16px + var(--safe-top, env(safe-area-inset-top, 0px)));
   left: 20px;
   right: 20px;
   display: flex;
@@ -548,7 +548,7 @@ small {
   position: absolute;
   z-index: 450;
   right: 16px;
-  top: calc(79px + env(safe-area-inset-top, 0px));
+  top: calc(79px + var(--safe-top, env(safe-area-inset-top, 0px)));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -736,14 +736,14 @@ small {
 .route-info-overlay {
   position: absolute;
   z-index: 520;
-  top: calc(76px + env(safe-area-inset-top, 0px));
+  top: calc(76px + var(--safe-top, env(safe-area-inset-top, 0px)));
   left: 20px;
   right: 20px;
   padding: 12px 20px 18px;
   border-radius: 20px;
   background: var(--m-bg-fffef9f5);
   box-shadow: 0 8px 30px #233c3125;
-  max-height: calc(100% - var(--nav) - 96px - env(safe-area-inset-top, 0px));
+  max-height: calc(100% - var(--nav) - 96px - var(--safe-top, env(safe-area-inset-top, 0px)));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -794,7 +794,7 @@ small {
   position: absolute;
   z-index: 460;
   left: 20px;
-  top: calc(78px + env(safe-area-inset-top, 0px));
+  top: calc(78px + var(--safe-top, env(safe-area-inset-top, 0px)));
   display: flex;
   align-items: center;
   gap: 8px;
@@ -881,7 +881,7 @@ small {
   bottom: 0;
   height: var(--nav);
   width: 100%;
-  padding: 4px 12px env(safe-area-inset-bottom, 0px);
+  padding: 4px 12px var(--safe-bottom, env(safe-area-inset-bottom, 0px));
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   background: var(--m-bg-fffef9);
@@ -1349,7 +1349,7 @@ progress {
 .layers-popover {
   position: absolute;
   z-index: 480;
-  top: calc(65px + env(safe-area-inset-top, 0px));
+  top: calc(65px + var(--safe-top, env(safe-area-inset-top, 0px)));
   right: 70px;
   width: 205px;
   padding: 12px;
@@ -1420,7 +1420,7 @@ progress {
   z-index: 1000;
   left: 18px;
   right: 18px;
-  top: calc(14px + env(safe-area-inset-top, 0px));
+  top: calc(14px + var(--safe-top, env(safe-area-inset-top, 0px)));
   display: flex;
   align-items: center;
   gap: 12px;

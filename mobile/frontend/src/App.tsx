@@ -43,6 +43,8 @@ import { Marker, Popup } from 'react-leaflet'
 import OfflineMapControl from './OfflineMapControl'
 import PlanPanel, { PlanHandle } from './PlanPanel'
 import { useIncomingGPX } from './useIncomingGPX'
+import { hideSplash, setSplashStatus, SPLASH_MAX_MS, whenSplashHidden } from './splash'
+import { setDarkChrome } from './chrome'
 
 const emptyCoordinates: Coordinate[] = []
 type Dialog = {
@@ -154,6 +156,10 @@ export default function App() {
     }
     meta.content = dark ? '#151a17' : '#f6f4ec'
   }, [dark])
+  // Bar icons stay light over the dark splash, then follow the theme.
+  const [splashGone, setSplashGone] = useState(false)
+  useEffect(() => whenSplashHidden(() => setSplashGone(true)), [])
+  useEffect(() => { if (splashGone) setDarkChrome(dark) }, [dark, splashGone])
   const setTheme = (theme: ThemePreference) => setSettings((value) => ({ ...value, theme }))
   const closeAround = useCallback(() => {
     aroundAbort.current?.abort()
@@ -239,6 +245,19 @@ export default function App() {
       })
     return () => controller.abort()
   }, [startupAttempt])
+  // The launch splash stays until the draft is back and the backend answers;
+  // an error hands over at once to the notice below, which can retry.
+  // Then the map's first view, so the app never opens on an empty canvas.
+  const [mapDrawn, setMapDrawn] = useState(false)
+  const onFirstRender = useCallback(() => setMapDrawn(true), [])
+  useEffect(() => {
+    if (startupError || (hydrated && runtimeReady && mapDrawn)) hideSplash()
+    else setSplashStatus(!hydrated ? 'Restoring your last ride…' : !runtimeReady ? 'Opening maps and routing…' : 'Drawing the map…')
+  }, [hydrated, runtimeReady, mapDrawn, startupError])
+  useEffect(() => {
+    const timer = window.setTimeout(hideSplash, SPLASH_MAX_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
   useEffect(() => {
     const controller = new AbortController()
     void request<{ native: boolean; incomingGPX?: boolean }>('/mobile/capabilities', { signal: controller.signal })
@@ -621,6 +640,7 @@ export default function App() {
           onMap={onMap}
           onMovePoint={movePoint}
           onError={notify}
+          onFirstRender={onFirstRender}
         >
           {routeInfoOpen && rideOverlay.access.length > 0 && (
             <AccessOverlay coordinates={coordinates} stretches={rideOverlay.access} />

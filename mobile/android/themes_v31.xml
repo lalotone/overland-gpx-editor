@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ system splash: the Overland mark on the splash green. -->
+<resources>
+    <style name="Theme.WailsApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/overland_forest</item>
+        <item name="colorPrimaryVariant">@color/overland_forest_dark</item>
+        <item name="colorOnPrimary">@android:color/white</item>
+        <item name="android:statusBarColor">@color/overland_splash</item>
+        <item name="android:navigationBarColor">@color/overland_splash</item>
+        <item name="android:windowBackground">@color/overland_splash</item>
+        <item name="android:windowSplashScreenBackground">@color/overland_splash</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/overland_splash</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/overland_splash</item>
+    </style>
+</resources>

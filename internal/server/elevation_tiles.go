@@ -204,7 +204,7 @@ func newTileStoreWithQuota(url string, zoom int, cacheDir string, maxDiskBytes i
 			return store
 		}
 		store.cacheRoot = root
-		if err := root.Chmod(".", 0o700); err != nil {
+		if err := chmodIn(root, ".", 0o700); err != nil {
 			root.Close()
 			store.cacheRoot = nil
 			store.cacheErr = err
@@ -616,7 +616,7 @@ func (s *tileStore) writeDisk(key tileKey, raw []byte) error {
 	if err := s.cacheRoot.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	_ = s.cacheRoot.Chmod(dir, 0o700)
+	_ = chmodIn(s.cacheRoot, dir, 0o700)
 	if err := s.makeDiskRoomLocked(path, int64(len(raw))); err != nil {
 		return err
 	}

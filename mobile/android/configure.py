@@ -1,5 +1,6 @@
 """Apply small, checked Android host adaptations to pinned Wails templates."""
 from pathlib import Path
+import os
 import shutil
 
 root = Path(__file__).resolve().parent.parent
@@ -10,7 +11,11 @@ for name, dest in {
     "network_security_config.xml": main / "res/xml/network_security_config.xml",
     "file_paths.xml": main / "res/xml/file_paths.xml",
     "overland_icon.xml": main / "res/drawable/overland_icon.xml",
+    "overland_splash.xml": main / "res/drawable/overland_splash.xml",
+    "themes.xml": main / "res/values/themes.xml",
+    "themes_v31.xml": main / "res/values-v31/themes.xml",
     "IncomingGpx.java": main / "java/com/wails/app/IncomingGpx.java",
+    "OverlandChrome.java": main / "java/com/wails/app/OverlandChrome.java",
     "test/IncomingGpxTest.java": project / "app/src/test/java/com/wails/app/IncomingGpxTest.java",
 }.items():
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -31,7 +36,11 @@ replace(gradle, 'applicationId "com.wails.app"', 'applicationId "co.overland.mob
 replace(gradle, 'compileSdk 35', 'compileSdk 36')
 replace(gradle, 'targetSdk 35', 'targetSdk 36')
 replace(gradle, 'minSdk 21', 'minSdk 26')
-replace(gradle, "abiFilters 'arm64-v8a', 'x86_64'", "abiFilters 'arm64-v8a'")
+# One ABI per APK: arm64-v8a for phones, x86_64 only for emulator debug builds.
+abi = os.environ.get("OVERLAND_ANDROID_ABI", "arm64-v8a")
+if abi not in ("arm64-v8a", "x86_64"):
+    raise SystemExit(f"unsupported OVERLAND_ANDROID_ABI {abi!r}")
+replace(gradle, "abiFilters 'arm64-v8a', 'x86_64'", f"abiFilters '{abi}'")
 replace(gradle, 'dependencies {', "dependencies {\n    testImplementation 'junit:junit:4.13.2'")
 
 # Wails' share API currently only shares text. Extend it with a constrained
@@ -65,6 +74,9 @@ replace(activity, '    private void loadApplication() {', '''    @Override
 
     private void loadApplication() {''')
 replace(activity, 'private WebView webView;', 'private WebView webView;\n    private String overlandOrigin;')
+# Paint the splash green until the first page draws: the WebView default is white.
+# OverlandChrome reports system bar insets and sets the bar icon colours.
+replace(activity, '        webView = findViewById(R.id.webview);', '        webView = findViewById(R.id.webview);\n        webView.setBackgroundColor(0xFF1F3329);\n        webView.addJavascriptInterface(new OverlandChrome(this), "OverlandChrome");')
 replace(activity, 'webView.setWebViewClient(new WebViewClient() {', '''webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {

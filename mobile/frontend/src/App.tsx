@@ -40,6 +40,15 @@ import { AroundAreaCache, aroundCategory, ON_ROUTE_M, routeOffsets, searchAround
 import type { AroundCategory, AroundPoi } from '../../../src/lib/around'
 import { cumulativeDistanceKm } from '../../../src/lib/geo'
 import { Marker, Popup } from 'react-leaflet'
+import Leaflet from 'leaflet'
+
+/** "You are here": a dot with a soft ring, the convention every map app uses. */
+const myLocationIcon = Leaflet.divIcon({
+  className: 'my-location',
+  html: '<span class="my-location-ring"></span><span class="my-location-dot"></span>',
+  iconSize: [44, 44],
+  iconAnchor: [22, 22],
+})
 import OfflineMapControl from './OfflineMapControl'
 import PlanPanel, { PlanHandle } from './PlanPanel'
 import { useIncomingGPX } from './useIncomingGPX'
@@ -47,6 +56,22 @@ import { hideSplash, setSplashStatus, SPLASH_MAX_MS, whenSplashHidden } from './
 import { setDarkChrome } from './chrome'
 
 const emptyCoordinates: Coordinate[] = []
+
+/** What to do about a failed location request, in words a rider can act on. */
+function locationProblem(error: unknown): string {
+  const code = (error as { code?: number })?.code
+  const text = error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error)
+  if (code === 1 || /denied|permission/i.test(text)) {
+    return 'Location is off for Overland. Allow it in Android Settings › Apps › Overland › Permissions.'
+  }
+  if (/provider|disabled|unavailable/i.test(text) || code === 2) {
+    return 'Turn on Location in your phone’s quick settings, then try again.'
+  }
+  if (code === 3 || /time/i.test(text)) {
+    return 'No position fix yet. Move to open sky and try again.'
+  }
+  return 'Could not find your position. Try again in a moment.'
+}
 type Dialog = {
   title: string
   message?: string
@@ -125,6 +150,8 @@ export default function App() {
   /* -- Ride details map overlay and nearby places --------------------- */
 
   const [rideOverlay, setRideOverlay] = useState<RideOverlay>({ access: [], fuel: null })
+  /** Last position from "My location", shown until the app restarts. */
+  const [myLocation, setMyLocation] = useState<Coordinate | null>(null)
   const aroundCache = useRef(new AroundAreaCache())
   const aroundAbort = useRef<AbortController | null>(null)
   const [around, setAround] = useState<(AroundState & { point: Coordinate }) | null>(null)
@@ -224,11 +251,20 @@ export default function App() {
   )
 
   const fit = useCallback((points: Coordinate[]) => {
-    if (points.length)
+    if (!points.length) return
+    // Measured after the next render, when a sheet opened with the track exists.
+    window.requestAnimationFrame(() => {
+      // Fit into the part of the map no panel covers: in landscape the sheet
+      // docks on the left, so the route belongs to its right.
+      const panel = window.document.querySelector('.bottom-sheet, .route-info-overlay')?.getBoundingClientRect()
+      const besidePanel = panel && window.innerWidth > window.innerHeight && panel.left < 40 && panel.width < window.innerWidth * 0.6
       map.current?.fitBounds(
         points.map((p) => [p.lat, p.lon] as [number, number]),
-        { padding: [35, 75], maxZoom: 15, animate: true },
+        besidePanel
+          ? { paddingTopLeft: [panel.right + 24, 35], paddingBottomRight: [80, 35], maxZoom: 15, animate: true }
+          : { padding: [35, 75], maxZoom: 15, animate: true },
       )
+    })
   }, [])
 
   useEffect(() => {
@@ -569,16 +605,22 @@ export default function App() {
     })
   const locate = () =>
     void run(async () => {
-      const point = native
-        ? await request<Coordinate>('/mobile/location', jsonBody({}))
-        : await new Promise<Coordinate>((resolve, reject) =>
-            navigator.geolocation.getCurrentPosition(
-              (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
-              reject,
-              { enableHighAccuracy: true, timeout: 30000 },
-            ),
-          )
-      map.current?.setView([point.lat, point.lon], 14)
+      let point: Coordinate
+      try {
+        point = native
+          ? await request<Coordinate>('/mobile/location', jsonBody({}))
+          : await new Promise<Coordinate>((resolve, reject) =>
+              navigator.geolocation.getCurrentPosition(
+                (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+                reject,
+                { enableHighAccuracy: true, timeout: 30000 },
+              ),
+            )
+      } catch (error) {
+        throw new Error(locationProblem(error))
+      }
+      setMyLocation(point)
+      map.current?.setView([point.lat, point.lon], Math.max(map.current.getZoom(), 14))
     })
   const search = () =>
     void run(async () => {
@@ -647,6 +689,9 @@ export default function App() {
           )}
           {routeInfoOpen && rideOverlay.fuel && rideOverlay.fuel.warnings.length > 0 && (
             <FuelRangeMarkers coordinates={coordinates} cumKm={cumulativeDistanceKm(coordinates)} plan={rideOverlay.fuel} />
+          )}
+          {myLocation && (
+            <Marker position={[myLocation.lat, myLocation.lon]} icon={myLocationIcon} zIndexOffset={2000} interactive={false} />
           )}
           {around?.result && <AroundRadius result={around.result} />}
           {around?.result?.pois.filter((poi) => !aroundHidden.has(poi.category)).map((poi) => {

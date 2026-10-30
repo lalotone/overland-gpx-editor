@@ -76,19 +76,32 @@ export function useTrackAnnotation(
 
 export function SurfaceBreakdown({
   summary,
+  unmatchedKm = 0,
   colorBySurface,
   onToggleColor,
   matched = false,
 }: {
   summary: SurfaceSummary
+  /** Distance that matched no road at all (opened tracks only). */
+  unmatchedKm?: number
   colorBySurface?: boolean
   /** Omitted where the map has no surface colouring to switch. */
   onToggleColor?: () => void
   /** The track was matched to the road network rather than routed on it. */
   matched?: boolean
 }) {
+  const outside = summary.totalKm > 0 && unmatchedKm / summary.totalKm > 0.95
   return (
     <div className="insight">
+      {outside && (
+        <div className="drawer-callout tone-neutral">
+          <MapIcon id="route" size={18} />
+          <span>
+            <strong>Outside the routing data</strong>
+            <span>Almost none of this track matched a road in the region on this device, so its surface is unknown. Download a region that covers it.</span>
+          </span>
+        </div>
+      )}
       <div className="drawer-metrics">
         <Metric value={(summary.unpavedFraction * 100).toFixed(0)} unit="%" caption="unpaved" />
         <Metric value={summary.unpavedKm.toFixed(1)} unit="km" caption={`of ${summary.totalKm.toFixed(1)} km`} />
@@ -217,9 +230,24 @@ export function AccessWarnings({
   const breakdown = ACCESS_CLASSES.filter(def => (report.km[def.id] ?? 0) > 0.005)
   const groups = useMemo(() => groupStretches(report.stretches), [report.stretches])
   const untaggedKm = report.km.untagged ?? 0
+  const unknownKm = report.km.unknown ?? 0
+  // Unmatched distance carries no tags at all: say so rather than call it open.
+  const unmatched = report.totalKm > 0 && (report.totalKm - unknownKm) / report.totalKm < 0.05
+  const quiet = [
+    untaggedKm > 0.05 && `${formatLength(untaggedKm)} has no access tag; local rules apply.`,
+    unknownKm > 0.05 && `${formatLength(unknownKm)} could not be matched to a road.`,
+  ].filter(Boolean).join(' ')
   return (
     <div className="insight">
-      {report.stretches.length > 0 ? (
+      {unmatched && report.stretches.length === 0 ? (
+        <div className="drawer-callout tone-neutral">
+          <MapIcon id="route" size={18} />
+          <span>
+            <strong>No road data for this track</strong>
+            <span>It could not be matched to the routing data on this device, so nothing is known about access. Download a region that covers it.</span>
+          </span>
+        </div>
+      ) : report.stretches.length > 0 ? (
         <div className="drawer-callout tone-danger">
           <MapIcon id="access" size={18} />
           <span>
@@ -232,7 +260,7 @@ export function AccessWarnings({
           <MapIcon id="shield" size={18} />
           <span>
             <strong>No restrictions tagged</strong>
-            <span>{untaggedKm > 0.05 ? `${untaggedKm.toFixed(1)} km has no access tag; local rules apply.` : 'Every way is tagged open.'}</span>
+            <span>{quiet || 'Every way is tagged open.'}</span>
           </span>
         </div>
       )}

@@ -789,3 +789,54 @@ test('local import remains create-only and offline mode is accessible', async ({
   await page.getByRole('button', { name: 'Online', exact: true }).click()
   await expect(page.locator('.connection-pill')).toHaveText('Offline')
 })
+
+test('the launch splash gives way to an interactive app and leaves the page', async ({ page }) => {
+  await setup(page)
+  await page.goto('/')
+  await expect(page.locator('#splash')).toHaveCount(0, { timeout: 10_000 })
+  await page.getByRole('button', { name: 'Plan', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Start route here' })).toBeVisible()
+})
+
+test('a track outside the routing data is never reported as legally open', async ({ page }) => {
+  await setup(page)
+  await page.route('**/routing/broom/annotate', route => route.fulfill({ json: {
+    schemaVersion: 1, distanceMeters: 1000, surfaces: [{ surface: '', distanceMeters: 1000 }],
+    spans: [{ start: { index: 0, fraction: 0 }, end: { index: 9, fraction: 0 }, distanceMeters: 1000, matched: false }],
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  await page.getByRole('button', { name: 'Route details', exact: true }).click()
+  const info = page.getByRole('dialog', { name: 'Route details' })
+  await expect(info.getByText('No road data for this track')).toBeVisible()
+  await expect(info.getByText('Outside the routing data')).toBeVisible()
+  await expect(info.getByText('Every way is tagged open.')).toHaveCount(0)
+})
+
+test('the appearance setting is saved with the draft, not in browser storage', async ({ page }) => {
+  const state = await setup(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Map layers' }).click()
+  await page.getByRole('group', { name: 'Appearance' }).getByRole('button', { name: 'Dark' }).click()
+  await expect(page.locator('html')).toHaveClass(/theme-dark/)
+  await expect.poll(() => state.draft()).toMatchObject({ settings: { theme: 'dark' } })
+  expect(await page.evaluate(() => Object.keys(localStorage))).not.toContain('gpx-theme')
+  await page.evaluate(() => localStorage.clear())
+  await page.reload()
+  await expect(page.locator('html')).toHaveClass(/theme-dark/)
+})
+
+test('landscape uses the whole width and docks the track sheet beside the map', async ({ page }) => {
+  await setup(page)
+  await page.setViewportSize({ width: 860, height: 390 })
+  await page.goto('/')
+  const app = await page.locator('.mobile-app').boundingBox()
+  expect(app!.width).toBe(860)
+  await page.getByRole('button', { name: 'Library', exact: true }).click()
+  await page.getByRole('button', { name: /Original filename/ }).click()
+  const sheet = await page.locator('.bottom-sheet').boundingBox()
+  expect(sheet!.x).toBeLessThan(10)
+  expect(sheet!.width).toBeLessThan(860 * 0.5)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})

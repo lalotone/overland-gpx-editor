@@ -132,7 +132,7 @@ export default function RideDetails({
       <Section icon="surface" title="Surface">
         {surface ? (
           surface.totalKm > 0
-            ? <SurfaceBreakdown summary={surface} matched={!route} />
+            ? <SurfaceBreakdown summary={surface} matched={!route} unmatchedKm={route ? 0 : access?.km.unknown} />
             : <p className="ride-note">No measurable track distance.</p>
         ) : !available ? (
           <p className="ride-note">{!runtime.services.broomAnnotate

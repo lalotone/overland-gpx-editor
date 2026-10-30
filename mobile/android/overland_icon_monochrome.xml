@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 13+ themed icon: one tone, the launcher supplies the colour. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+  <group android:scaleX="0.6" android:scaleY="0.6" android:translateX="21.6" android:translateY="19">
+    <path android:fillColor="#FFFFFF" android:pathData="M6,80 L38,28 L54,54 L64,38 L92,80 Z" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="6" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M20,100 C34,96 44,92 40,84 S46,70 54,66 S58,56 54,54" />
+  </group>
+</vector>

@@ -7,7 +7,7 @@
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-  <application android:allowBackup="false" android:icon="@drawable/overland_icon" android:label="Overland" android:supportsRtl="true" android:theme="@style/Theme.WailsApp" android:networkSecurityConfig="@xml/network_security_config">
+  <application android:allowBackup="false" android:icon="@mipmap/overland_launcher" android:roundIcon="@mipmap/overland_launcher" android:label="Overland" android:supportsRtl="true" android:theme="@style/Theme.WailsApp" android:networkSecurityConfig="@xml/network_security_config">
     <activity android:name="com.wails.app.MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|keyboardHidden|uiMode" android:windowSoftInputMode="adjustResize">
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
       <intent-filter>

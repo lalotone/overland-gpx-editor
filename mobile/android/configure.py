@@ -12,11 +12,15 @@ for name, dest in {
     "file_paths.xml": main / "res/xml/file_paths.xml",
     "overland_icon.xml": main / "res/drawable/overland_icon.xml",
     "overland_splash.xml": main / "res/drawable/overland_splash.xml",
+    "overland_icon_foreground.xml": main / "res/drawable/overland_icon_foreground.xml",
+    "overland_icon_monochrome.xml": main / "res/drawable/overland_icon_monochrome.xml",
+    "overland_launcher.xml": main / "res/mipmap-anydpi-v26/overland_launcher.xml",
     "themes.xml": main / "res/values/themes.xml",
     "themes_v31.xml": main / "res/values-v31/themes.xml",
     "IncomingGpx.java": main / "java/com/wails/app/IncomingGpx.java",
     "OverlandChrome.java": main / "java/com/wails/app/OverlandChrome.java",
     "test/IncomingGpxTest.java": project / "app/src/test/java/com/wails/app/IncomingGpxTest.java",
+    "lint.xml": project / "app/lint.xml",
 }.items():
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / "android" / name, dest)
@@ -65,7 +69,14 @@ replace(bridge, 'String text = opts.optString("text", "");', '''String path = op
 # Native interfaces must never be exposed to a page from an external origin.
 activity = main / "java/com/wails/app/MainActivity.java"
 replace(activity, '        loadApplication();', '''        loadApplication();
-        if (savedInstanceState == null) IncomingGpx.receive(this, getIntent());''')
+        if (savedInstanceState == null) IncomingGpx.receive(this, getIntent());
+        // targetSdk 36 turns predictive back on: Android 16 never calls
+        // onBackPressed, so without a dispatcher callback every back press
+        // closed the app instead of the open sheet or tab.
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() { handleBack(); }
+        });''')
 replace(activity, '    private void loadApplication() {', '''    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -92,6 +103,9 @@ replace(activity, 'webView.setWebViewClient(new WebViewClient() {', '''webView.s
                 if ("https".equals(uri.getScheme())) startActivity(new Intent(Intent.ACTION_VIEW, uri));
                 return true;
             }''')
+replace(activity, '''    @Override
+    public void onBackPressed() {''', '''    private void handleBack() {''')
+replace(activity, '            super.onBackPressed();', '            moveTaskToBack(true);')
 replace(activity, 'if (webView != null && webView.canGoBack()) {', '''if (webView != null && webView.getUrl() != null && webView.getUrl().startsWith("http://127.0.0.1:")) {
             webView.evaluateJavascript("!window.dispatchEvent(new Event('overland:back', {cancelable:true}))", result -> { if ("false".equals(result)) moveTaskToBack(true); });
         } else if (webView != null && webView.canGoBack()) {''')

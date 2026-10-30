@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Lint configuration for the generated Wails Android host.
+
+  MissingPermission is ignored only in WailsBridge.java, the pinned Wails
+  template: its haptics API (vibrate) is never called by Overland, and its
+  location request runs inside try/catch(Exception), so a denied permission
+  is reported to the page instead of crashing. The rule stays on for
+  Overland's own Java (IncomingGpx, OverlandChrome).
+-->
+<lint>
+    <issue id="MissingPermission">
+        <ignore path="**/com/wails/app/WailsBridge.java" />
+    </issue>
+</lint>
